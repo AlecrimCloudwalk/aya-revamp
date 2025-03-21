@@ -1,0 +1,225 @@
+# ⚠️ FUNDAMENTAL PRINCIPLE: LLM-DRIVEN ARCHITECTURE ⚠️
+
+**CRITICAL: THE LLM MUST BE THE CENTRAL DECISION-MAKER**
+
+When developing or modifying this codebase, the most important principle is that the architecture is fundamentally LLM-driven, not code-driven. The LLM must have full agency and control over all aspects of user interaction.
+
+### Core LLM-First Guidelines:
+
+1. **STRICTLY FORBIDDEN**  
+   - Pattern matching, regex filters, or hard-coded logic paths that decide:
+     - Which tools to use
+     - When to respond to a user
+     - How to interpret user requests
+     - Whether to chain multiple tools
+     - What clarification questions to ask
+     - Any form of content filtering or routing based on keywords
+
+2. **The LLM must have COMPLETE agency** to:
+   - Choose which tools are appropriate for a given request
+   - Decide when to post messages back to the user
+   - Decide if or when to ask clarifying questions
+   - Chain multiple tools together in a sequence
+   - Select the format, style, and content of messages
+   - Handle or communicate errors
+
+3. **All user-intent decisions must be made by the LLM**, not by code:
+   - No code should interpret user intent
+   - No code should route requests based on keywords
+   - No code should decide which tool to call
+
+4. **Your code should ONLY**:
+   - Provide the LLM with complete context from previous messages, tool results, etc.
+   - Execute the LLM's decisions faithfully
+   - Maintain thread history
+   - Offer a suite of "tools" the LLM can call, each in its own module
+
+5. **Every interaction must maintain context**, including:
+   - The thread so far (previous messages)
+   - Results of previous tool executions
+   - The user's Slack info (channel, user ID, etc.)
+   - System state or relevant environment data
+
+### Anti-patterns (STRICTLY FORBIDDEN):
+
+- ❌ `"If the user says X, call tool Y directly in code."`
+- ❌ `"Hardcode different message flows for specific keywords."`
+- ❌ `"Route requests based on regex or pattern matching."`
+- ❌ `"Filtering or altering LLM's outputs in code to limit what is posted."`
+
+### Correct Patterns:
+
+- ✅ **Give the LLM everything it needs** (thread history, tool results, environment details).
+- ✅ **Let the LLM decide** which tool to use, in what order.
+- ✅ **Only implement the chosen tool** call in code—no behind-the-scenes filtering.
+- ✅ **Return the tool's result** to the LLM, let it decide next steps.
+
+# Thread-Centric Design
+
+## Core Thread Principles
+
+1. **Threads Are Primary**
+   - In Slack, most tasks happen in threads
+   - The parent message (first message) in a thread typically contains the main task/context
+   - All state management is thread-based, not conversation-based
+   - Always identify if we're in a thread or a direct message
+
+2. **Thread Context Preservation**
+   - For thread-based interactions, the thread's history is critical context
+   - The LLM should always have access to thread statistics (message count, etc.)
+   - Parent messages must always be provided to the LLM for context
+
+3. **Thread History Tool**
+   - The `getThreadHistory` tool allows the LLM to rebuild context when needed
+   - The LLM decides when to fetch history based on thread stats
+   - Parent messages are always included and marked as the thread parent
+
+4. **Thread State Management**
+   - All state is stored in thread-specific data structures
+   - Direct messages (DMs) are treated as a special case of threads
+   - Thread identity is used for all context tracking and management
+
+# Code Organization Guidelines
+
+## Directory Structure (for Node/TS)
+
+- **`src/`**  
+  - `main.js` – The app entry point (sets up Slack Bolt or Express)  
+  - `orchestrator.js` – Orchestration logic between Slack, the LLM, and tools  
+  - `llmInterface.js` – Sends data to the LLM and interprets responses  
+  - `slackEvents.js` – Handles incoming Slack events  
+  - `slackFormat.js` – Helper utilities for Slack block kit or attachments  
+  - `config.js` – Loads environment variables, tokens, or config  
+  - `errors.js` – Custom errors or error-handling logic  
+  - **`tools/`** – Each file is a distinct "tool" the LLM can call  
+
+- **`docker/`**: Docker-related files
+
+- **`tests/`**: Unit tests and integration tests
+
+## Code Organization Principles
+
+1. **Modularity**
+   - Each tool in a separate file under `src/tools/`
+   - Slack-specific code in `slackEvents.js` and `slackFormat.js`
+   - LLM-specific code in `llmInterface.js`
+
+2. **Code Reuse**
+   - No duplication. Reuse common utilities (e.g., `slackFormat.js`).
+
+3. **Error Handling**
+   - Pass error context back to the LLM
+   - Possibly also log or notify devs
+
+4. **Documentation**
+   - Add JSDoc/TSDoc docstrings for functions/classes
+   - Update `README.md` if you add major features
+
+5. **Testing**
+   - Keep tests in `tests/`
+
+6. **Security**
+   - Don't log sensitive info
+   - Manage tokens/keys in `config.js` or environment variables
+
+7. **Performance**
+   - Watch for unnecessary external calls
+   - Consider caching if needed
+
+8. **Backward Compatibility**
+   - Don't break existing tool interfaces without good reason
+
+# Tools Structure and Capabilities
+
+## Currently Implemented Tools
+
+1. **postMessage**
+   - Posts formatted messages to Slack
+   - Supports rich formatting, colors, fields, etc.
+   - Returns message metadata including timestamp for potential updates
+
+2. **finishRequest**
+   - Signals the end of processing for a user request
+   - Provides summary for logging/tracking purposes
+   - Cleans up resources after successful processing
+
+3. **getThreadHistory**
+   - Retrieves and formats thread history from Slack
+   - Always includes the parent message (first message in thread)
+   - Formats attachments to include descriptions and URLs
+   - Provides thread statistics (total messages, etc.)
+   - LLM can specify how many messages to retrieve
+
+4. **exampleTool** (for demonstration)
+   - Sample tool showing implementation patterns
+   - Not used in production scenarios
+
+## Adding New Tools
+
+When adding new tools, follow these principles:
+1. Each tool should be in its own file under `src/tools/`
+2. Register the tool in `src/tools/index.js`
+3. Add the tool definition to `getAvailableTools()` in `llmInterface.js`
+4. Ensure the tool accepts `(args, threadState)` parameters
+5. Return a consistent response format for the LLM
+
+# Implementation Workflow Guidelines
+
+## Checklist Management (Optional/If Used)
+
+1. **Checklist Creation**
+   - If you maintain checklists, keep them in `docs/checklists/`
+
+2. **Checklist Iteration**
+   - Update them at the start of each new feature or fix
+   - Mark items done as you proceed
+
+3. **Scope Management**
+   - Document any out-of-scope tasks or expansions
+
+4. **Verification**
+   - Confirm completion before merging or deployment
+
+# ⚠️ CRITICAL: MESSAGE FORMATTING AND LLM CONTROL ⚠️
+
+## Message Formatting Standards
+
+1. **Use Slack Blocks/Attachments**  
+   - All bot messages must have consistent block formatting
+   - Typically use a color bar (if attachments are used) or a styled heading if using blocks
+
+2. **LLM-Driven Customization**
+   - The LLM decides the content, style, color, etc.
+   - If the LLM wants to update a previous message, code should comply
+
+3. **Formatting Consistency**
+   - Keep a uniform style across Slack messages
+   - Put any repeated block-building logic into `slackFormat.js`
+
+## Message Posting Control
+
+1. **No Hard-Coded Filters**
+   - Under no circumstances parse user requests to determine the flow
+   - If a user says "generate audio," let the LLM decide to call a "generateAudio" tool
+
+2. **Error Handling**
+   - Pass tool/orchestrator errors to the LLM
+   - Optionally DM devs on critical errors
+   - The LLM decides how to inform the user
+
+3. **Full Control to LLM**
+   - The LLM decides if/when to post Slack messages
+   - Tools must carry out exactly the instructions from the LLM
+
+## Implementation Guidelines
+
+1. **Expose All Formatting Options**
+   - Let the LLM specify the blocks, text, color, etc.
+
+2. **Tool Implementation**
+   - The `postMessage` tool in `src/tools/postMessage.js` must accept the LLM's parameters and post accordingly
+   - Return Slack's API response to the LLM
+
+3. **Context Preservation**
+   - Keep track of posted message IDs so the LLM can update them if it chooses
+   - The LLM might ask for an edit or follow-up message 

@@ -1,0 +1,21 @@
+{
+  "name": "slack-bot-aya",
+  "version": "1.0.0",
+  "description": "A Slack bot using LLM for text interaction",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "dev": "nodemon src/main.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.13.1",
+    "dotenv": "^16.3.1",
+    "axios": "^1.4.0",
+    "nodemon": "^3.0.1",
+    "node-fetch": "^2.6.9"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+} 
