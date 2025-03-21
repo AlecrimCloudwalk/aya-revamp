@@ -222,4 +222,51 @@ When adding new tools, follow these principles:
 
 3. **Context Preservation**
    - Keep track of posted message IDs so the LLM can update them if it chooses
+   - The LLM might ask for an edit or follow-up message
+
+# ⚠️ CRITICAL: AVOIDING DUPLICATE FUNCTIONALITY ⚠️
+
+## Function and Tool Indexing
+
+1. **Maintain a Comprehensive Index**
+   - Keep an up-to-date index of all scripts and their functions in `docs/function_index.md`
+   - This index must describe each function's purpose concisely
+   - ALWAYS consult this index before creating new functionality
+
+2. **Strict Avoidance of Duplication**
+   - It is ABSOLUTELY PARAMOUNT to never duplicate functionality
+   - Duplicated or triplicated functions severely break projects and create maintenance nightmares
+   - Before writing any new function, thoroughly search existing code
+   - When in doubt, refactor existing functions to be more general rather than creating new ones
+
+3. **Code Review Process**
+   - Every new pull request must include updates to the function index
+   - Explicitly document how new functions differ from existing ones with similar names
+   - Explain why a new function is needed rather than enhancing an existing one
+
+4. **When Adding New Tools**
+   - Verify no existing tool provides similar functionality
+   - Document the tool's unique purpose
+   - Ensure the tool doesn't overlap with existing tools
+   - Update both the function index and tools documentation
+
+5. **Branching Prevention**
+   - Never create alternate paths for the same functionality
+   - Avoid conditional branches that replicate similar logic in different ways
+   - Consolidate related functionality into unified, parameter-driven functions
+
+## Implementation Guidelines
+
+1. **Regular Index Audits**
+   - Periodically review the function index for potential consolidation
+   - Look for functions with similar purposes that could be unified
+   - Document deprecated functions clearly
+
+2. **DRY Principle Enforcement**
+   - Maintain strict adherence to Don't Repeat Yourself
+   - Extract common functionality into shared utilities
+   - Create abstractions that can be reused rather than copied
+
+3. **Context Preservation**
+   - Keep track of posted message IDs so the LLM can update them if it chooses
    - The LLM might ask for an edit or follow-up message 
