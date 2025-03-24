@@ -5,7 +5,7 @@ const { logError } = require('../errors.js');
 /**
  * Tool to retrieve the history of a thread for context rebuilding
  * @param {Object} args - Arguments
- * @param {number} [args.maxMessages=20] - Maximum number of messages to retrieve
+ * @param {number} [args.limit=20] - Maximum number of messages to retrieve
  * @param {Object} threadState - Current thread state
  * @returns {Promise<Object>} - Formatted thread history and thread stats
  */
@@ -13,7 +13,7 @@ async function getThreadHistory(args = {}, threadState) {
   try {
     // Default arguments
     const {
-      maxMessages = 20
+      limit = 20
     } = args;
     
     // Get required context info
@@ -56,7 +56,7 @@ async function getThreadHistory(args = {}, threadState) {
     const result = await slackClient.conversations.replies({
       channel: channelId,
       ts: threadTs,
-      limit: maxMessages,
+      limit: limit,
       inclusive: true // Always include the parent message
     });
     

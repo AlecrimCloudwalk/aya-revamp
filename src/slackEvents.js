@@ -1,5 +1,5 @@
 // Handles Slack events and routes them to the orchestrator
-const { handleIncomingSlackMessage } = require('./orchestrator.js');
+const { handleIncomingSlackMessage, handleButtonClick } = require('./orchestrator.js');
 const { logError } = require('./errors.js');
 const { DEV_MODE } = require('./config.js');
 
@@ -131,7 +131,18 @@ function setupSlackEvents(app) {
     try {
       // Basic log with relevant info only
       console.log(`Action: ${action.action_id} | Value: ${action.value} | User: ${body.user.id} | Channel: ${body.channel.id}`);
-
+      
+      // Extract metadata if available
+      let metadata = {};
+      try {
+        if (action.metadata) {
+          metadata = JSON.parse(action.metadata);
+          console.log(`Button metadata: ${JSON.stringify(metadata)}`);
+        }
+      } catch (metadataError) {
+        console.log(`Error parsing button metadata: ${metadataError.message}`);
+      }
+      
       // Collect action metadata
       const actionContext = {
         actionId: action.action_id,
@@ -139,13 +150,18 @@ function setupSlackEvents(app) {
         userId: body.user.id,
         channelId: body.channel.id,
         messageTs: body.message.ts,
-        threadTs: body.message.thread_ts,
+        threadTs: body.message.thread_ts || body.message.ts,
         teamId: context.teamId,
-        isAction: true
+        isAction: true,
+        metadata,
+        originalMessage: {
+          text: body.message.text,
+          blocks: body.message.blocks
+        }
       };
 
       // Pass the action to a specialized handler
-      await handleIncomingSlackMessage(actionContext);
+      await handleButtonClick(actionContext);
     } catch (error) {
       logError('Error handling interactive action', error, { action, body });
     }

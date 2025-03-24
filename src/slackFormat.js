@@ -1,59 +1,64 @@
-// Utilities for formatting Slack messages with consistent styling
+// Handles formatting of messages for Slack
 
 /**
- * Creates a Slack message with blocks format
- * @param {Object} params - Message parameters
- * @param {string} params.title - Main title text
- * @param {string} [params.subtitle] - Optional subtitle text
- * @param {string} [params.text] - Main message text (markdown supported)
- * @param {string} [params.color] - Color for the message (hex code or named color)
- * @param {Array} [params.fields] - Optional array of field objects {title, value, short}
- * @param {Array} [params.actions] - Optional array of action buttons
- * @param {Array} [params.blocks] - Optional custom blocks to append to the message
- * @returns {Object} - Formatted Slack message object with blocks
+ * Formats a message for Slack with consistent styling
+ * 
+ * @param {Object} options - Formatting options
+ * @param {string} options.title - Message title (optional)
+ * @param {string} options.text - Message text content (optional)
+ * @param {string} options.color - Message color (optional)
+ * @param {Array} options.fields - Message fields (optional)
+ * @param {Array} options.actions - Message action buttons (optional)
+ * @param {Array} options.sections - Additional sections (optional)
+ * @param {Array} options.elements - Rich message elements (optional)
+ * @param {Array} options.context - Context elements for showing status text (optional)
+ * @returns {Object} - Formatted message with blocks
  */
-function formatSlackMessage({ 
-  title, 
-  subtitle, 
-  text, 
-  color = '#0078D7', 
-  fields = [],
-  actions = [],
-  blocks = [] 
-}) {
-  // Default blocks with a header
-  const messageBlocks = [
-    {
+function formatSlackMessage(options = {}) {
+  const blocks = [];
+  
+  // Extract options with defaults
+  const {
+    title,
+    text,
+    subtitle,
+    color = '#0078D7',
+    fields = [],
+    actions = [],
+    sections = [],
+    elements = [],
+    attachments = [],
+    context = []
+  } = options;
+  
+  // If we have a title, add it as a header block
+  if (title) {
+    blocks.push({
       type: 'header',
       text: {
         type: 'plain_text',
         text: title,
         emoji: true
       }
-    }
-  ];
-
-  // Add subtitle if provided
+    });
+  }
+  
+  // If we have a subtitle, add it as context
   if (subtitle) {
-    messageBlocks.push({
+    blocks.push({
       type: 'context',
       elements: [
         {
           type: 'mrkdwn',
-          text: subtitle
+          text: `*${subtitle}*`
         }
       ]
     });
   }
-
-  // Add divider
-  messageBlocks.push({
-    type: 'divider'
-  });
-
-  // Add main text section if provided
+  
+  // If we have text content, add it as a section block
   if (text) {
-    messageBlocks.push({
+    blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
@@ -61,99 +66,357 @@ function formatSlackMessage({
       }
     });
   }
-
+  
   // Add fields if provided
   if (fields.length > 0) {
-    // Group fields in sections of 2 for better layout
+    // Split fields into pairs for side-by-side layout
     for (let i = 0; i < fields.length; i += 2) {
-      const fieldGroup = fields.slice(i, i + 2).map(field => ({
-        type: 'mrkdwn',
-        text: `*${field.title}*\n${field.value}`
-      }));
-
-      messageBlocks.push({
+      const fieldBlock = {
         type: 'section',
-        fields: fieldGroup
-      });
+        fields: [
+          {
+            type: 'mrkdwn',
+            text: `*${fields[i].title}*\n${fields[i].value}`
+          }
+        ]
+      };
+      
+      // Add second field if it exists
+      if (i + 1 < fields.length) {
+        fieldBlock.fields.push({
+          type: 'mrkdwn',
+          text: `*${fields[i + 1].title}*\n${fields[i + 1].value}`
+        });
+      }
+      
+      blocks.push(fieldBlock);
     }
   }
-
+  
+  // Add context elements (like "Selected: Option A")
+  if (context && context.length > 0) {
+    const contextBlock = {
+      type: 'context',
+      elements: []
+    };
+    
+    // Add each context item
+    context.forEach(item => {
+      contextBlock.elements.push({
+        type: 'mrkdwn',
+        text: item.text || item
+      });
+    });
+    
+    blocks.push(contextBlock);
+  }
+  
+  // Add any additional sections
+  if (sections && sections.length > 0) {
+    // Process each section
+    for (const section of sections) {
+      if (typeof section === 'string') {
+        // Simple string section
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: section
+          }
+        });
+      } else if (typeof section === 'object') {
+        // Object section, add directly if it has a type
+        if (section.type) {
+          blocks.push(section);
+        }
+      }
+    }
+  }
+  
+  // Process rich elements (higher level abstractions)
+  if (elements && elements.length > 0) {
+    for (const element of elements) {
+      if (typeof element === 'string') {
+        // Simple string is treated as a text section
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: element
+          }
+        });
+      } else if (element.type) {
+        // Process based on element type
+        switch (element.type) {
+          case 'divider':
+            blocks.push({ type: 'divider' });
+            break;
+            
+          case 'header':
+            blocks.push({
+              type: 'header',
+              text: {
+                type: 'plain_text',
+                text: element.text,
+                emoji: true
+              }
+            });
+            break;
+            
+          case 'context':
+            blocks.push({
+              type: 'context',
+              elements: [
+                {
+                  type: 'mrkdwn',
+                  text: element.text
+                }
+              ]
+            });
+            break;
+            
+          case 'bullet_list':
+            if (element.items && Array.isArray(element.items)) {
+              const bulletItems = element.items.map(item => `• ${item}`).join('\n');
+              blocks.push({
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: bulletItems
+                }
+              });
+            }
+            break;
+            
+          case 'numbered_list':
+            if (element.items && Array.isArray(element.items)) {
+              const numberedItems = element.items.map((item, index) => `${index + 1}. ${item}`).join('\n');
+              blocks.push({
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: numberedItems
+                }
+              });
+            }
+            break;
+            
+          case 'quote':
+            blocks.push({
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `>${element.text.replace(/\n/g, '\n>')}`
+              }
+            });
+            break;
+            
+          case 'image':
+            blocks.push({
+              type: 'image',
+              image_url: element.url,
+              alt_text: element.alt || 'Image',
+              title: element.title ? {
+                type: 'plain_text',
+                text: element.title,
+                emoji: true
+              } : undefined
+            });
+            break;
+            
+          case 'code':
+            // Format code block with triple backticks
+            blocks.push({
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `\`\`\`${element.language || ''}\n${element.code}\n\`\`\``
+              }
+            });
+            break;
+            
+          default:
+            // For any other type, add directly as a block
+            if (isValidBlock(element)) {
+              blocks.push(element);
+            }
+        }
+      }
+    }
+  }
+  
   // Add action buttons if provided
-  if (actions.length > 0) {
-    const actionElements = actions.map(action => ({
+  if (actions && actions.length > 0) {
+    // Check if actions are already formatted or need formatting
+    const formattedButtons = actions.map(action => {
+      if (action.type === 'button') {
+        // Already formatted
+        return action;
+      }
+      
+      // Format as button
+      return {
+        type: 'button',
+        text: {
+          type: 'plain_text',
+          text: action.text || 'Button',
+          emoji: true
+        },
+        value: action.value || action.text || 'button_value',
+        action_id: action.action_id || `button_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+        style: action.style
+      };
+    });
+    
+    blocks.push({
+      type: 'actions',
+      elements: formattedButtons
+    });
+  }
+  
+  // Create formatted message with consistent styling
+  const formattedMessage = {
+    blocks,
+    text: title || text || 'Message from assistant'
+  };
+  
+  // If using color, create an attachment instead
+  if (color || attachments.length > 0) {
+    const attachment = {
+      color,
+      blocks
+    };
+    
+    formattedMessage.blocks = [];
+    // Keep the text as a fallback for notifications, but make it clear it's not meant to duplicate content
+    // This text will show in notifications but won't be rendered as duplicated content
+    formattedMessage.text = formattedMessage.text || 'Message from assistant';
+    formattedMessage.attachments = [attachment, ...attachments];
+  }
+  
+  return formattedMessage;
+}
+
+/**
+ * Checks if an object is a valid Slack block
+ * 
+ * @param {Object} block - The block to validate
+ * @returns {boolean} - Whether the block appears valid
+ */
+function isValidBlock(block) {
+  const validBlockTypes = [
+    'section', 'divider', 'image', 'actions', 
+    'context', 'header', 'input'
+  ];
+  
+  return block && block.type && validBlockTypes.includes(block.type);
+}
+
+/**
+ * Builds buttons for a Slack message
+ * 
+ * @param {Array} options - Button options
+ * @returns {Array} - Formatted button elements
+ */
+function buildButtons(options) {
+  if (!Array.isArray(options)) {
+    return [];
+  }
+  
+  return options.map(option => {
+    // Handle string options
+    if (typeof option === 'string') {
+      return {
+        type: 'button',
+        text: {
+          type: 'plain_text',
+          text: option,
+          emoji: true
+        },
+        value: option
+      };
+    }
+    
+    // Handle object options
+    return {
       type: 'button',
       text: {
         type: 'plain_text',
-        text: action.text,
+        text: option.text || 'Button',
         emoji: true
       },
-      value: action.value,
-      action_id: action.action_id
-    }));
-
-    messageBlocks.push({
-      type: 'actions',
-      elements: actionElements
-    });
-  }
-
-  // Add any custom blocks
-  if (blocks.length > 0) {
-    messageBlocks.push(...blocks);
-  }
-
-  // Return the formatted message
-  return {
-    blocks: messageBlocks,
-    // For legacy clients and notifications
-    text: title + (subtitle ? ` - ${subtitle}` : ''),
-    // For attachment style, if desired
-    attachments: [
-      {
-        color,
-        blocks: messageBlocks
-      }
-    ]
-  };
-}
-
-/**
- * Creates a Slack message with simple attachment
- * @param {Object} params - Message parameters
- * @param {string} params.title - Message title
- * @param {string} [params.text] - Message text (markdown supported)
- * @param {string} [params.color] - Attachment color
- * @returns {Object} - Formatted Slack message with attachment
- */
-function formatSimpleAttachment({ title, text, color = '#0078D7' }) {
-  return {
-    text: title,
-    attachments: [
-      {
-        color,
-        text: text || ''
-      }
-    ]
-  };
-}
-
-/**
- * Creates a message for error scenarios
- * @param {string} title - Error title
- * @param {string} errorMessage - Error details
- * @param {string} [suggestion] - Optional suggested actions
- * @returns {Object} - Formatted error message
- */
-function formatErrorMessage({ title, errorMessage, suggestion }) {
-  return formatSlackMessage({
-    title: `❌ ${title}`,
-    text: errorMessage + (suggestion ? `\n\n_Suggestion: ${suggestion}_` : ''),
-    color: '#E81123'
+      value: option.value || option.text || 'button_value',
+      action_id: option.action_id,
+      style: option.style
+    };
   });
+}
+
+/**
+ * Creates a message section
+ * 
+ * @param {string} text - Section text
+ * @returns {Object} - Formatted section
+ */
+function createSection(text) {
+  return {
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text
+    }
+  };
+}
+
+/**
+ * Creates a message header
+ * 
+ * @param {string} text - Header text
+ * @returns {Object} - Formatted header
+ */
+function createHeader(text) {
+  return {
+    type: 'header',
+    text: {
+      type: 'plain_text',
+      text,
+      emoji: true
+    }
+  };
+}
+
+/**
+ * Creates a divider element
+ * 
+ * @returns {Object} - Divider block
+ */
+function createDivider() {
+  return { type: 'divider' };
+}
+
+/**
+ * Creates a context element
+ * 
+ * @param {string} text - Context text
+ * @returns {Object} - Formatted context block
+ */
+function createContext(text) {
+  return {
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text
+      }
+    ]
+  };
 }
 
 module.exports = {
   formatSlackMessage,
-  formatSimpleAttachment,
-  formatErrorMessage
+  buildButtons,
+  createSection,
+  createHeader,
+  createDivider,
+  createContext
 }; 

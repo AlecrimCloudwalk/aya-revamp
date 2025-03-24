@@ -1,11 +1,13 @@
 // Orchestrates the flow between Slack, LLM, and tools
 const { getNextAction } = require('./llmInterface.js');
-const tools = require('./tools/index.js');
+const { getTool, isAsyncTool } = require('./tools/index.js');
 const { logError } = require('./errors.js');
 const { getSlackClient } = require('./slackClient.js');
 
 // In-memory store for active threads (in a production app, use a database)
 const activeThreads = new Map();
+// In-memory store for async operations
+const asyncOperations = new Map();
 
 /**
  * Handles an incoming message from Slack
@@ -105,222 +107,302 @@ async function handleIncomingSlackMessage(context) {
       console.log(`- Failed to add error reaction: ${reactionError.message}`);
     }
     
-    // Try to send an error message to Slack if possible
-    try {
-      const slackClient = getSlackClient();
-      await slackClient.chat.postMessage({
-        channel: context.channelId,
-        text: `Error processing request: ${error.message}`,
-        thread_ts: context.threadTs
-      });
-    } catch (slackError) {
-      logError('Failed to send error message to Slack', slackError);
-    }
+    // Do not send an error message - let the LLM handle all user communication
   }
 }
 
 /**
- * Processes the thread through LLM-tool loops until complete
+ * Processes a thread with the LLM
+ * 
  * @param {Object} threadState - Current thread state
  * @returns {Promise<void>}
  */
 async function processThread(threadState) {
-  let isComplete = false;
-  let maxIterations = 10; // Safety limit to prevent infinite loops
-  let consecutiveErrors = 0; // Track consecutive errors
-  let currentRequestId = Date.now().toString(); // Unique ID for this processing request
-  let pendingFinishRequest = false; // Flag to indicate we need to call finishRequest
+  // Exit early if no context or thread state
+  if (!threadState || !threadState.context) {
+    console.log("No thread state or context provided, cannot process");
+    return false;
+  }
   
-  console.log(`\n🔄 THREAD: ${threadState.id}`);
-  console.log(`🔍 REQUEST ID: ${currentRequestId}`);
+  console.log("🔍 THREAD STATE ANALYSIS:");
+  console.log("- Thread has processed:", threadState.iterations, "iterations");
+  console.log("- Thread has finishRequest toolResult:", 
+              threadState.toolResults.some(r => r.toolName === "finishRequest") ? "Yes" : "No");
+  console.log("- Thread has message count:", threadState.userMessages.length + threadState.botMessages.length);
+  
+  // Maximum number of iterations to prevent infinite loops
+  const MAX_ITERATIONS = 10;
+  let iteration = 0;
+  let lastResponse = null;
+  let hasPostedMessage = false;
+  let shouldAutoFinish = false;  // Initialize the flag for auto-finishing
+  
+  // Create a request ID for this processing loop
+  const requestId = Date.now().toString();
+  
+  console.log("\n🔄 THREAD:", threadState.context.threadTs || "DIRECT_MESSAGE");
+  console.log("🔍 REQUEST ID:", requestId);
   console.log("--------------------------------");
   
-  while (!isComplete && maxIterations > 0) {
+  // Track this processing session's iterations
+  threadState.iterations = threadState.iterations || 0;
+  
+  // Initialize the sentContentMessages array if it doesn't exist
+  if (!threadState.sentContentMessages) {
+    threadState.sentContentMessages = [];
+  }
+  
+  while (iteration < MAX_ITERATIONS) {
+    // Track iterations to catch potential loops
+    iteration++;
+    threadState.iterations++;
+    console.log(`- Iteration ${iteration}/${MAX_ITERATIONS} (Thread total: ${threadState.iterations})`);
+    
     try {
-      console.log(`- Iteration ${10 - maxIterations + 1}/${10}`);
+      // Call LLM to get the next action
+      const llmResult = await getNextAction(threadState);
       
-      // If we have a pending finishRequest from a previous iteration,
-      // manually create a finishRequest action
-      if (pendingFinishRequest) {
-        console.log(`- Automatically executing finishRequest after postMessage`);
+      // Get the tool calls from the LLM response
+      const { toolCalls, content } = llmResult;
+      
+      // If no tool calls were found, log a warning and try one more time
+      if (!toolCalls || toolCalls.length === 0) {
+        console.log("⚠️ No tool calls found in LLM response, requesting again");
         
-        const toolResult = {
-          toolName: 'finishRequest',
-          args: { 
-            reasoning: 'Automatically finishing request after postMessage',
-            summary: 'Request completed' 
-          },
-          response: {
-            complete: true,
-            timestamp: new Date().toISOString(),
-            summary: 'Request completed'
-          },
-          toolCallId: `auto_finish_${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          requestId: currentRequestId
-        };
+        if (iteration >= MAX_ITERATIONS - 1) {
+          console.log("❌ Max iterations reached without valid tool calls, aborting");
+          break;
+        }
         
-        // Add the tool result to the thread state
-        addToolResultToThread(threadState, toolResult);
+        continue; // Try again in the next iteration
+      }
+      
+      // Process the first tool call (we only support one at a time)
+      const toolCall = toolCalls[0];
+      console.log(`📣 Processing tool call: ${toolCall.tool}`);
+      
+      // Execute the tool
+      const toolResult = await executeToolAction({
+        toolName: toolCall.tool,
+        toolArgs: toolCall.parameters,
+        toolCallId: toolCall.id
+      }, threadState, requestId);
+      
+      // Add the result to the thread state
+      addToolResultToThread(threadState, toolResult);
+      
+      // Handle specific tool behaviors
+      if (toolCall.tool === 'postMessage') {
+        hasPostedMessage = true;
         
-        console.log(`\n✅ THREAD COMPLETE - ${10 - maxIterations + 1} steps (auto-finish)`);
-        console.log(`🔄 Had postMessage: Yes (from previous step)`);
-        console.log(`📝 Summary: Request completed`);
-        console.log("--------------------------------");
-        isComplete = true;
-        
-        // Clean up the thread state if needed
-        cleanupThread(threadState);
+        // Add the message text to the list of sent messages
+        if (toolCall.parameters.text && !threadState.sentContentMessages.includes(toolCall.parameters.text)) {
+          threadState.sentContentMessages.push(toolCall.parameters.text);
+        }
+      } 
+      else if (toolCall.tool === 'finishRequest') {
+        // If finishRequest is called, we're done with this thread
+        console.log("📢 finishRequest called - ending processing loop");
         break;
       }
       
-      // Get the next action from the LLM
-      const action = await getNextAction(threadState);
-      
-      console.log(`- Tool: ${action.toolName}`);
-      
-      // Check if the response indicates we should follow up with finishRequest
-      if (action.hasFinishRequest) {
-        pendingFinishRequest = true;
-        console.log(`- Will auto-execute finishRequest in next iteration`);
+      // After processing a postMessage and there's no finishRequest, 
+      // auto-finish on the last iteration
+      if (hasPostedMessage && iteration >= MAX_ITERATIONS - 1 && 
+          !threadState.toolResults.some(r => r.toolName === 'finishRequest' && r.requestId === requestId)) {
+        shouldAutoFinish = true;
       }
-      
-      // Execute the specified tool
-      const toolResult = await executeToolAction(action, threadState, currentRequestId);
-      
-      if (toolResult.error) {
-        console.log(`- Error: ${toolResult.response.message}`);
-      }
-      
-      // Add the tool result to the thread state
-      addToolResultToThread(threadState, toolResult);
-      
-      // Reset consecutive error counter on success
-      consecutiveErrors = 0;
-      
-      // Check if we're done with this request
-      if (action.toolName === 'finishRequest') {
-        // Check if there was a postMessage before this finishRequest
-        const hasPostMessage = threadState.toolResults.some(
-          result => result.toolName === 'postMessage' && result.requestId === currentRequestId
-        );
-        
-        console.log(`\n✅ THREAD COMPLETE - ${10 - maxIterations + 1} steps`);
-        console.log(`🔄 Had postMessage: ${hasPostMessage ? 'Yes' : 'No'}`);
-        console.log(`📝 Summary: ${action.toolArgs.summary || 'No summary provided'}`);
-        console.log("--------------------------------");
-        isComplete = true;
-        
-        // Clean up the thread state if needed
-        cleanupThread(threadState);
-      }
-      
-      maxIterations--;
     } catch (error) {
-      console.log(`\n❌ ERROR: ${error.message}`);
+      console.log(`\n❌ ERROR DURING ITERATION ${iteration}: ${error.message}`);
+      console.log("--------------------------------");
       
-      logError('Error in thread processing loop', error, { 
-        threadId: threadState.id 
-      });
+      logError(`Error during iteration ${iteration}`, error, { threadState });
       
-      // Increment consecutive error counter
-      consecutiveErrors++;
-      
-      // Add the error to thread for context to the LLM
-      addToolResultToThread(threadState, {
-        toolName: 'error',
-        args: {},
-        response: {
-          error: true,
-          message: error.message
-        }
-      });
-      
-      // Break out of the loop after 2 consecutive errors to prevent spam
-      if (consecutiveErrors >= 2) {
-        console.log(`\n🛑 THREAD TERMINATED: Too many errors (${consecutiveErrors})`);
-        console.log("--------------------------------");
-        
-        logError('Too many consecutive errors, stopping thread processing loop', null, {
-          threadId: threadState.id,
-          lastError: error.message
-        });
-        
-        // Try to send an error message to the user
-        try {
-          const slackClient = getSlackClient();
-          const { channelId, threadTs } = threadState.context;
-          
-          await slackClient.chat.postMessage({
-            channel: channelId,
-            thread_ts: threadTs,
-            text: "I'm having trouble processing your request. Please try again later."
-          });
-        } catch (slackError) {
-          logError('Failed to send error message to Slack', slackError);
-        }
-        
-        isComplete = true;
+      // If we've already posted a message, auto-finish to avoid leaving the thread hanging
+      if (hasPostedMessage) {
+        shouldAutoFinish = true;
       }
       
-      // Try one more time after an error, but then exit
-      if (maxIterations <= 1) {
-        isComplete = true;
+      // Break the loop on error unless we need to auto-finish
+      if (!shouldAutoFinish) {
+        break;
+      }
+    }
+    
+    // Auto-finish if we've posted a message but not called finishRequest
+    if (shouldAutoFinish && hasPostedMessage && 
+        !threadState.toolResults.some(r => r.toolName === 'finishRequest' && r.requestId === requestId)) {
+      console.log("🔄 Auto-finishing request after postMessage");
+      
+      try {
+        // Execute the finishRequest tool with a generic summary
+        const finishResult = await executeToolAction({
+          toolName: 'finishRequest',
+          toolArgs: { 
+            summary: "Request completed", 
+            reasoning: "Auto-finish after postMessage" 
+          },
+          toolCallId: `auto_finish_${Date.now()}`
+        }, threadState, requestId);
+        
+        // Add the result to the thread state
+        addToolResultToThread(threadState, finishResult);
+        
+        // Break the loop as we're done
+        break;
+      } catch (error) {
+        console.log(`- Error during auto-finish: ${error.message}`);
+        logError('Error auto-finishing request', error);
+        break;
       }
     }
   }
   
-  // If we reached max iterations, log it
-  if (maxIterations <= 0 && !isComplete) {
-    console.log(`\n⚠️ MAX ITERATIONS REACHED`);
-    console.log("--------------------------------");
-    
-    logError('Reached maximum thread iterations', null, { 
-      threadId: threadState.id 
-    });
-    
-    // We've hit max iterations, but we don't force a finishRequest
-    // because that would violate the LLM-driven principle
-    // Instead, we just notify the user and let them start a new interaction
-    try {
-      const slackClient = getSlackClient();
-      const { channelId, threadTs } = threadState.context;
-      
-      await slackClient.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: "I've been working on your request for a while but haven't been able to complete it. Please try with a new message."
-      });
-    } catch (slackError) {
-      logError('Failed to send max iterations message to Slack', slackError);
-    }
-  }
+  console.log(`\n✅ THREAD COMPLETE - ${iteration} steps${shouldAutoFinish ? ' (auto-finish after postMessage)' : ''}`);
+  console.log("--------------------------------");
+  
+  return true;
 }
 
 /**
- * Executes a tool action
- * @param {Object} action - Tool action from LLM
+ * Executes a tool based on LLM action
+ * 
+ * @param {Object} action - Action from LLM
  * @param {Object} threadState - Current thread state
- * @param {string} requestId - The ID of the current request
- * @returns {Promise<Object>} - Tool result
+ * @param {string} requestId - Request ID
+ * @returns {Promise<Object>} - Result of the action
  */
 async function executeToolAction(action, threadState, requestId) {
   const { toolName, toolArgs, toolCallId } = action;
   
   try {
-    // Check if the tool exists
-    if (!tools[toolName]) {
-      throw new Error(`Tool "${toolName}" not found`);
+    // Get the tool from the registry
+    const toolFunction = getTool(toolName);
+    const isAsync = isAsyncTool(toolName);
+    
+    // Add before executing any extracted tool - log first
+    console.log("⚠️ TOOL EXECUTION PATH:");
+    console.log("- Source:", toolArgs ? "Structured Tool Call" : "Content JSON");
+    console.log("- Tool Name:", toolName);
+    console.log("- Is duplicate of previous call:", isDuplicateToolCall(toolName, toolArgs, threadState));
+    
+    // Check for duplicate postMessage calls with similar content
+    if (toolName === 'postMessage') {
+      const isDuplicate = isDuplicateToolCall(toolName, toolArgs, threadState);
+      
+      if (isDuplicate) {
+        console.log(`⛔ DUPLICATE TOOL CALL DETECTED - Skipping execution`);
+        console.log(`- This exact ${toolName} has already been executed`);
+        
+        // Return a non-executed result to avoid duplicating the same message
+        return { 
+          toolName,
+          args: toolArgs,
+          response: { 
+            ok: true, 
+            duplicate: true,
+            message: "Duplicate call detected - not executed"
+          },
+          toolCallId,
+          timestamp: new Date().toISOString(),
+          duplicate: true,
+          requestId
+        };
+      }
+      
+      // If there have been multiple postMessage calls in this iteration, mark to end request
+      const postMessagesThisIteration = threadState.toolResults
+        .filter(r => r.toolName === 'postMessage' && r.requestId === requestId)
+        .length;
+        
+      if (postMessagesThisIteration >= 1) {
+        console.log(`⚠️ Multiple postMessage calls in one iteration (${postMessagesThisIteration + 1}) - will auto-finish after this one`);
+      }
     }
     
-    // Call the tool with the arguments and thread context
+    // Special handling for postMessage to prevent duplicate messages during button clicks
+    if (toolName === 'postMessage' && threadState.buttonClickState && threadState.buttonClickState.processing) {
+      // Check if we already posted a message for this button click
+      if (threadState.buttonClickState.messagePosted) {
+        console.log(`⚠️ Already sent a message for this button click. Enabling auto-finish.`);
+        
+        // If trying to post a second message, automatically finish the request
+        if (toolName !== 'finishRequest') {
+          const finishTool = getTool('finishRequest');
+          await finishTool({ summary: "Request completed" }, threadState);
+          console.log(`- Automatically executing finishRequest after postMessage`);
+          return { 
+            toolName,
+            args: toolArgs,
+            response: { 
+              ok: true, 
+              autoFinished: true,
+              message: "Auto-finished after duplicate postMessage"
+            },
+            toolCallId,
+            timestamp: new Date().toISOString(),
+            autoFinished: true,
+            requestId
+          };
+        }
+      }
+      
+      // Mark that we've posted a message for this button click
+      if (toolName === 'postMessage') {
+        threadState.buttonClickState.messagePosted = true;
+      }
+    }
+    
+    // Handle async tools differently
+    if (isAsync) {
+      console.log(`Tool "${toolName}" is asynchronous - scheduling async execution`);
+      
+      // Register the async operation
+      const operationId = `${threadState.context.threadTs || 'dm'}-${requestId}-${toolName}-${Date.now()}`;
+      
+      // Return an immediate response that the operation has been scheduled
+      const initialResponse = {
+        status: "scheduled",
+        message: `Operation ${operationId} has been scheduled for async execution`,
+        operationId
+      };
+      
+      // Schedule the async operation to execute in the background
+      executeAsyncOperation(
+        operationId,
+        toolFunction,
+        toolArgs,
+        threadState,
+        toolName,
+        toolCallId
+      );
+      
+      return { 
+        toolName,
+        args: toolArgs,
+        response: initialResponse,
+        toolCallId,
+        timestamp: new Date().toISOString(),
+        isAsync: true,
+        operationId,
+        requestId
+      };
+    }
+    
+    // For synchronous tools, proceed normally
+    console.log(`- Tool: ${toolName}`);
     const startTime = Date.now();
-    const toolResponse = await tools[toolName](toolArgs, threadState);
+    const toolResponse = await toolFunction(toolArgs, threadState);
     const duration = Date.now() - startTime;
     
     // For postMessage tool, add the message content to the thread messages
     // so the LLM can see its own previous responses
     if (toolName === 'postMessage' && toolArgs) {
+      // Track the message text in sentContentMessages to prevent duplicates
+      if (toolArgs.text && !threadState.sentContentMessages.includes(toolArgs.text)) {
+        threadState.sentContentMessages.push(toolArgs.text);
+      }
+      
       // Construct a text message from the tool arguments
       let messageText = '';
       
@@ -366,7 +448,7 @@ async function executeToolAction(action, threadState, requestId) {
       toolCallId,
       timestamp: new Date().toISOString(),
       duration,
-      requestId // Include the request ID with the tool result
+      requestId
     };
   } catch (error) {
     logError(`Error executing tool "${toolName}"`, error, { toolArgs });
@@ -378,10 +460,120 @@ async function executeToolAction(action, threadState, requestId) {
       error: true,
       response: {
         error: true,
+        message: error.message,
+        stack: error.stack?.split('\n').slice(0, 3).join('\n') || 'No stack trace available',
+        toolName: toolName,
+        actionFailed: true,
+        errorTime: new Date().toISOString()
+      },
+      toolCallId,
+      timestamp: new Date().toISOString(),
+      requestId
+    };
+  }
+}
+
+/**
+ * Executes a tool asynchronously and updates thread state when complete
+ * @param {string} operationId - Unique ID for the async operation
+ * @param {Function} toolFunction - The tool function to execute
+ * @param {Object} toolArgs - Arguments for the tool
+ * @param {Object} threadState - Thread state
+ * @param {string} toolName - Name of the tool
+ * @param {string} toolCallId - ID of the tool call
+ */
+async function executeAsyncOperation(
+  operationId,
+  toolFunction,
+  toolArgs,
+  threadState,
+  toolName,
+  toolCallId
+) {
+  // Register the operation as in progress
+  asyncOperations.set(operationId, {
+    status: "in_progress",
+    startTime: Date.now(),
+    threadId: threadState.context.threadTs || 'dm',
+    channelId: threadState.context.channelId,
+    userId: threadState.context.userId,
+    toolName,
+    toolArgs
+  });
+  
+  try {
+    console.log(`Starting async operation ${operationId}`);
+    
+    // Execute the tool
+    const startTime = Date.now();
+    const toolResponse = await toolFunction(toolArgs, threadState);
+    const duration = Date.now() - startTime;
+    
+    // Update the operation status
+    asyncOperations.set(operationId, {
+      ...asyncOperations.get(operationId),
+      status: "completed",
+      completionTime: Date.now(),
+      response: toolResponse,
+      error: null
+    });
+    
+    console.log(`Async operation ${operationId} completed in ${duration}ms`);
+    
+    // Create a standardized tool result
+    const toolResult = {
+      toolName,
+      args: toolArgs,
+      response: toolResponse,
+      toolCallId,
+      timestamp: new Date().toISOString(),
+      duration,
+      isAsync: true,
+      operationId,
+      status: "completed"
+    };
+    
+    // Get the current thread state (it may have changed)
+    const currentThreadState = activeThreads.get(threadState.context.threadTs || 'dm');
+    
+    if (currentThreadState) {
+      // Add the result to the thread state
+      addToolResultToThread(currentThreadState, toolResult);
+      
+      console.log(`Async operation ${operationId} completed successfully in ${duration}ms`);
+      
+      // Optionally continue processing the thread
+      // await processThread(currentThreadState);
+    }
+    
+    return toolResult;
+  } catch (error) {
+    console.log(`Error in async operation ${operationId}: ${error.message}`);
+    
+    // Update the operation status
+    asyncOperations.set(operationId, {
+      ...asyncOperations.get(operationId),
+      status: "failed",
+      completionTime: Date.now(),
+      error: error.message
+    });
+    
+    console.log(`Async operation ${operationId} failed: ${error.message}`);
+    logError(`Error in async operation ${operationId}`, error, { threadState, toolName });
+    
+    return {
+      toolName,
+      args: toolArgs,
+      error: true,
+      response: {
+        error: true,
         message: error.message
       },
       toolCallId,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      isAsync: true,
+      operationId,
+      status: "failed"
     };
   }
 }
@@ -425,7 +617,11 @@ function getThreadState(context) {
       mayNeedHistory: !!context.threadTs
     },
     messages: [],
-    toolResults: []
+    userMessages: [],  // Add this to avoid undefined errors
+    botMessages: [],   // Add this to avoid undefined errors
+    toolResults: [],
+    processedButtonClicks: [],
+    iterations: 0      // Initialize iterations counter
   };
   
   // Store in memory
@@ -459,6 +655,17 @@ function addMessageToThread(threadState, message) {
   
   // Add the message to the thread
   threadState.messages.push(messageWithTimestamp);
+  
+  // Ensure userMessages and botMessages arrays exist
+  if (!threadState.userMessages) threadState.userMessages = [];
+  if (!threadState.botMessages) threadState.botMessages = [];
+  
+  // Add to the appropriate category array
+  if (message.isUser) {
+    threadState.userMessages.push(messageWithTimestamp);
+  } else {
+    threadState.botMessages.push(messageWithTimestamp);
+  }
   
   // Log the message
   console.log(`- Added ${message.isUser ? 'user' : 'bot'} message to thread${message.requestId ? ` (Request: ${message.requestId})` : ''}`);
@@ -688,6 +895,198 @@ async function enrichWithThreadStats(threadState) {
   }
 }
 
+/**
+ * Handles interactive button clicks from Slack
+ * 
+ * @param {Object} context - Button click context
+ * @returns {Promise<void>}
+ */
+async function handleButtonClick(context) {
+  try {
+    console.log("\n👆 BUTTON CLICK");
+    console.log(`User: ${context.userId} | Channel: ${context.channelId} | Action: ${context.actionId}`);
+    console.log(`Value: ${context.actionValue}`);
+    if (context.threadTs) console.log(`Thread: ${context.threadTs}`);
+    console.log("--------------------------------");
+    
+    // Get the thread state or initialize a new one
+    const threadState = getThreadState(context);
+    
+    // Check if this exact button click was already processed (deduplication)
+    const buttonSignature = `${context.actionId}-${context.actionValue}-${context.messageTs}`;
+    if (threadState.processedButtonClicks && threadState.processedButtonClicks.includes(buttonSignature)) {
+      console.log(`Button click ${buttonSignature} already processed, skipping`);
+      return;
+    }
+    
+    // Initialize or update processed button clicks tracking
+    if (!threadState.processedButtonClicks) {
+      threadState.processedButtonClicks = [];
+    }
+    threadState.processedButtonClicks.push(buttonSignature);
+    
+    // If button has metadata with callbackId, use it to look up button registry
+    let buttonInfo = null;
+    let buttonText = context.actionValue;
+    let buttonContext = '';
+    let callbackId = null;
+    
+    if (context.metadata && context.metadata.callbackId) {
+      callbackId = context.metadata.callbackId;
+      const buttonRegistry = threadState.buttonRegistry || {};
+      
+      if (buttonRegistry[callbackId]) {
+        buttonInfo = buttonRegistry[callbackId];
+        console.log(`Found registered button set for callback: ${callbackId}`);
+        
+        // Find the specific button that was clicked to get its full context
+        if (buttonInfo.buttons && Array.isArray(buttonInfo.buttons)) {
+          const clickedButton = buttonInfo.buttons.find(b => b.value === context.actionValue);
+          if (clickedButton) {
+            buttonText = clickedButton.text || buttonText;
+          }
+        }
+        
+        // Add the original message context if available
+        if (context.originalMessage) {
+          buttonContext = `The button was clicked on a message that said: "${extractFullMessageContent(context.originalMessage)}"`;
+        }
+      }
+    }
+    
+    // Create a request ID specific to this button click
+    const buttonClickRequestId = `button_click_${Date.now()}`;
+    
+    // Add the button click to the thread as a specialized message type
+    addMessageToThread(threadState, {
+      text: `[BUTTON CLICK] User clicked the button: "${buttonText}"${buttonContext ? `\n\nContext: ${buttonContext}` : ''}`,
+      isUser: true,
+      timestamp: new Date().toISOString(),
+      userId: context.userId,
+      isButtonClick: true,
+      buttonClickId: buttonSignature,
+      requestId: buttonClickRequestId,
+      buttonInfo: {
+        actionId: context.actionId,
+        value: context.actionValue,
+        text: buttonText,
+        metadata: context.metadata,
+        originalMessageTs: context.messageTs
+      }
+    });
+    
+    // Update the original button message to show the selection
+    try {
+      // Get the updateButtonMessage tool
+      const updateButtonMessageTool = getTool('updateButtonMessage');
+      
+      // Update the button message
+      await updateButtonMessageTool({
+        messageTs: context.messageTs,
+        selectedValue: context.actionValue,
+        callbackId: callbackId,
+        additionalText: `\n\n_Button selected by <@${context.userId}>_`
+      }, threadState);
+      
+      console.log(`- Updated original button message to reflect selection`);
+    } catch (error) {
+      console.log(`- Error updating button message: ${error.message}`);
+      logError('Error updating button message', error, { context });
+    }
+    
+    // Add a flag to prevent duplicate message responses
+    threadState.buttonClickState = {
+      processing: true,
+      buttonSignature,
+      messagePosted: false,
+      timestamp: new Date().toISOString(),
+      requestId: buttonClickRequestId
+    };
+    
+    // Update the thread state with a flag indicating we're processing a button click
+    threadState.context.currentButtonClick = {
+      buttonSignature,
+      timestamp: new Date().toISOString(),
+      requestId: buttonClickRequestId
+    };
+    
+    // Process the thread to generate a response
+    await processThread(threadState);
+    
+    // Clear the current button click from context after processing
+    delete threadState.context.currentButtonClick;
+    if (threadState.buttonClickState) {
+      delete threadState.buttonClickState;
+    }
+  } catch (error) {
+    logError('Error handling button click', error, { context });
+  }
+}
+
+// Helper function to check for duplicate tool calls
+function isDuplicateToolCall(toolName, args, threadState) {
+  // If there are no tool results yet, it can't be a duplicate
+  if (!threadState.toolResults || threadState.toolResults.length === 0) {
+    return false;
+  }
+  
+  // For postMessage tools, we want to be more careful about duplicates
+  if (toolName === 'postMessage') {
+    // First try an exact argument match
+    const exactMatch = threadState.toolResults.some(result => 
+      result.toolName === toolName && 
+      JSON.stringify(result.args) === JSON.stringify(args)
+    );
+    
+    if (exactMatch) {
+      return true;
+    }
+    
+    // If no exact match, check for similar content (text field matches)
+    if (args && args.text) {
+      return threadState.toolResults.some(result => {
+        // Must be a postMessage tool
+        if (result.toolName !== 'postMessage') return false;
+        
+        // If the result has no args, skip
+        if (!result.args) return false;
+        
+        // Check if text fields match
+        const resultText = result.args.text || '';
+        const newText = args.text || '';
+        
+        // If both are empty, not a match
+        if (!resultText && !newText) return false;
+        
+        // Check for exact text match
+        if (resultText === newText) return true;
+        
+        // Check if one is substring of the other (for partial matches)
+        if (resultText.includes(newText) || newText.includes(resultText)) {
+          console.log(`⚠️ Text similarity detected between messages - "${resultText.substring(0, 30)}..." and "${newText.substring(0, 30)}..."`);
+          return true;
+        }
+        
+        return false;
+      });
+    }
+    
+    return false;
+  }
+  
+  // For other tools, just check for exact argument match
+  return threadState.toolResults.some(result => {
+    // Special case for finishRequest with autoFinish flag - these should never be considered duplicates
+    if (toolName === 'finishRequest' && args && args.autoFinish) {
+      return false;
+    }
+    
+    return result.toolName === toolName && 
+           JSON.stringify(result.args) === JSON.stringify(args);
+  });
+}
+
 module.exports = {
-  handleIncomingSlackMessage
+  handleIncomingSlackMessage,
+  handleButtonClick
 }; 
