@@ -16,89 +16,121 @@ function processUserMentions(text) {
 }
 
 /**
- * Posts a message to Slack with rich formatting options
- * 
- * @param {Object} args - Arguments for posting the message
- * @param {string} args.text - Plain text or markdown formatted message content
- * @param {string} args.title - Optional title for the message
- * @param {string} args.subtitle - Optional subtitle for the message
- * @param {string} args.color - Optional color for the message sidebar (hex code or color name)
- * @param {Array} args.fields - Optional fields as [{title, value}]
- * @param {Array} args.elements - Optional rich elements for advanced formatting
- * @param {Array} args.sections - Optional section texts
- * @param {Array} args.actions - Optional button actions for basic buttons without tracking
- * @param {Array|string} args.blocks - Direct Slack Block Kit formatted message content (optional, advanced)
- * @param {Object} threadState - Current thread state
- * @returns {Promise<Object>} - Result of sending the message
+ * Posts a message to a channel
+ * @param {Object} args - The arguments for the message
+ * @param {string} args.text - The text content of the message
+ * @param {string} [args.title] - An optional title for the message
+ * @param {string} [args.color] - An optional color for the message (blue, green, red, orange, purple or hex code)
+ * @param {string} [args.threadTs] - Optional thread timestamp to reply in
+ * @param {string} [args.channel] - Optional channel to post in (defaults to the current channel)
+ * @param {Object} threadState - The current thread state
+ * @returns {Promise<Object>} - Result of posting the message
  */
 async function postMessage(args, threadState) {
   try {
-    // Always use the channel from thread context, ignoring any channel provided in args
-    const channel = threadState.context?.channelId;
-    
-    if (!channel) {
-      throw new Error('Channel ID not available in thread context');
+    // Handle potential nested parameters structure 
+    // This happens when the LLM returns {"tool": "postMessage", "parameters": {...}}
+    if (args.parameters && !args.text && !args.title) {
+      console.log('⚠️ Detected nested parameters structure in postMessage, extracting inner parameters');
+      args = args.parameters;
     }
+
+    // Get context from metadata
+    const context = threadState.getMetadata('context');
     
-    // Ensure we have some content
-    if (!args.text && !args.title && !args.elements && !args.blocks && !args.sections) {
-      throw new Error('Message must have content (text, title, elements, or blocks)');
-    }
+    // Extract parameters
+    const {
+      text,
+      title,
+      color = 'good',
+      threadTs
+    } = args;
     
-    // Process user mentions in text and other content
-    if (args.text) {
-      args.text = processUserMentions(args.text);
-    }
-    
-    if (args.title) {
-      args.title = processUserMentions(args.title);
-    }
-    
-    if (args.subtitle) {
-      args.subtitle = processUserMentions(args.subtitle);
-    }
-    
-    // Process direct blocks if provided (advanced usage)
-    let messageOptions = {};
-    
-    if (args.blocks) {
-      // Handle direct block kit format (advanced)
-      messageOptions = handleDirectBlocks(args, channel);
+    // CRITICAL FIX: Ignore any hardcoded channel that doesn't match current context
+    // (This happens when the LLM hallucinates channel IDs)
+    let channelId;
+    if (args.channel && context?.channelId && args.channel !== context.channelId) {
+      // Channel mismatch - log warning and use context channel instead
+      console.log(`⚠️ WARNING: Ignoring mismatched channel ID "${args.channel}" - using context channel "${context.channelId}" instead`);
+      channelId = context.channelId;
     } else {
-      // Use our abstracted formatting (recommended approach)
-      messageOptions = formatMessageWithAbstraction(args, channel);
+      // Use channel from args, or fall back to context
+      channelId = args.channel || context?.channelId;
     }
     
-    // Add thread_ts if provided
-    if (args.threadTs) {
-      messageOptions.thread_ts = args.threadTs;
-    } else if (threadState.context?.threadTs) {
-      // If threadTs not provided but thread context exists, use that
-      messageOptions.thread_ts = threadState.context.threadTs;
+    // Validate channel
+    if (!channelId) {
+      throw new Error('Channel ID not available in thread context or args');
     }
     
-    // Post the message
-    console.log(`Posting message to channel ${channel} with options: ${JSON.stringify({
-      channel: messageOptions.channel,
-      text: messageOptions.text?.substring(0, 50) + (messageOptions.text?.length > 50 ? '...' : ''),
-      hasBlocks: !!messageOptions.blocks,
-      blockCount: messageOptions.blocks?.length,
-      hasAttachments: !!messageOptions.attachments,
-      threadTs: messageOptions.thread_ts
-    })}`);
+    // Debug the message about to be sent
+    console.log(`Sending message to channel: ${channelId}`);
+    console.log(`Message content: ${text ? (text.length > 100 ? text.substring(0, 100) + '...' : text) : 'No text'}`);
     
     // Get Slack client
     const slackClient = getSlackClient();
     
+    // Format the message with our formatting helper
+    const formattedMessage = formatSlackMessage({
+      title,
+      text,
+      color
+    });
+    
+    // Ensure message has content - this is critical
+    // If formatSlackMessage failed to generate blocks or attachments, create a simple text attachment
+    if (!formattedMessage.blocks?.length && !formattedMessage.attachments?.length) {
+      // Create a simple attachment with the text
+      formattedMessage.attachments = [{
+        color: color || 'good',
+        text: text || " ", // Use space if no text is provided
+        fallback: text || title || "Message from bot"
+      }];
+      
+      // Remove the text field to avoid duplication
+      formattedMessage.text = " ";
+    }
+    
+    // Prepare message options
+    const messageOptions = {
+      channel: channelId,
+      ...formattedMessage
+    };
+    
+    // Always set text to a space character if we have blocks or attachments
+    // This avoids duplication while still meeting Slack's requirement for text
+    if (messageOptions.blocks?.length > 0 || messageOptions.attachments?.length > 0) {
+      messageOptions.text = " "; // Space character
+    }
+    
+    // Add thread_ts if provided or from thread context
+    const threadTimestamp = threadTs || context?.threadTs;
+    if (threadTimestamp) {
+      messageOptions.thread_ts = threadTimestamp;
+    }
+    
+    // Log the full message structure for debugging
+    console.log('OUTGOING MESSAGE - Message structure:');
+    console.log(JSON.stringify({
+      hasText: !!messageOptions.text,
+      textLength: messageOptions.text?.length,
+      hasBlocks: !!messageOptions.blocks && messageOptions.blocks.length > 0,
+      blockCount: messageOptions.blocks?.length || 0,
+      hasAttachments: !!messageOptions.attachments && messageOptions.attachments.length > 0,
+      attachmentCount: messageOptions.attachments?.length || 0
+    }, null, 2));
+    
     // Send the message
     const response = await slackClient.chat.postMessage(messageOptions);
     
-    // Return relevant information
+    // Structured response for the LLM
     return {
-      ok: response.ok,
-      ts: response.ts,
-      channel: response.channel,
-      message: response.message
+      messageTs: response.ts,
+      channelId: response.channel,
+      metadata: {
+        userId: context?.userId,
+        threadTs: threadTimestamp
+      }
     };
   } catch (error) {
     logError('Error posting message to Slack', error, { args });
@@ -114,6 +146,9 @@ async function postMessage(args, threadState) {
  * @returns {Object} - Formatted message options for Slack API
  */
 function formatMessageWithAbstraction(args, channel) {
+  console.log('FORMATTING WITH ABSTRACTION - Input args:');
+  console.log(JSON.stringify(args, null, 2));
+
   // Use our formatting utilities to create a rich message
   const formattedMessage = formatSlackMessage({
     title: args.title,
@@ -126,6 +161,14 @@ function formatMessageWithAbstraction(args, channel) {
     elements: args.elements,
     attachments: args.attachments
   });
+  
+  console.log('FORMATTING WITH ABSTRACTION - Result:');
+  console.log(JSON.stringify({
+    hasText: !!formattedMessage.text,
+    textLength: formattedMessage.text?.length,
+    blockCount: formattedMessage.blocks?.length,
+    attachmentCount: formattedMessage.attachments?.length
+  }, null, 2));
   
   // Return message options for Slack API
   return {
@@ -144,6 +187,16 @@ function formatMessageWithAbstraction(args, channel) {
  * @returns {Object} - Formatted message options for Slack API
  */
 function handleDirectBlocks(args, channel) {
+  console.log('HANDLING DIRECT BLOCKS - Input args:');
+  console.log(JSON.stringify({
+    hasText: !!args.text,
+    textLength: args.text?.length,
+    blocksType: typeof args.blocks,
+    isBlocksArray: Array.isArray(args.blocks),
+    blocksLength: Array.isArray(args.blocks) ? args.blocks.length : 
+                  (typeof args.blocks === 'string' ? args.blocks.length : 'N/A')
+  }, null, 2));
+
   let formattedBlocks = args.blocks;
   
   // If blocks is a string, try to parse it as JSON, otherwise use formatSlackMessage
@@ -197,7 +250,9 @@ function handleDirectBlocks(args, channel) {
   // Return message options
   return {
     channel,
-    text: args.text || "Message from assistant",
+    // Provide a non-empty text field for accessibility (required by Slack API)
+    // When blocks are present, this is only used for notifications and screen readers
+    text: args.text || args.title || "Message from assistant",
     blocks: formattedBlocks
   };
 }

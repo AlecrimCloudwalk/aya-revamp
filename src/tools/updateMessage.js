@@ -22,19 +22,27 @@ async function updateMessage(args, threadState) {
   try {
     const { messageTs, title, text, color, fields, actions, removeButtons, selectedButtonText } = args;
     
-    // Get Slack client
-    const slackClient = getSlackClient();
-    
-    // Get channel from thread state
-    const channelId = threadState.context.channelId;
-    if (!channelId) {
-      throw new Error('Channel ID not found in thread context');
-    }
-    
-    // Validate messageTs
+    // Get required parameters
     if (!messageTs) {
       throw new Error('Message timestamp (messageTs) is required');
     }
+    
+    if (!text && !fields) {
+      throw new Error('Either text or fields must be provided');
+    }
+    
+    // Get context from metadata
+    const context = threadState.getMetadata('context');
+    
+    // Get channel ID from context
+    const channelId = context?.channelId;
+    
+    if (!channelId) {
+      throw new Error('Channel ID not available in thread context');
+    }
+    
+    // Get Slack client
+    const slackClient = getSlackClient();
     
     // Determine if and how to update actions/buttons
     let formattedActions = actions;

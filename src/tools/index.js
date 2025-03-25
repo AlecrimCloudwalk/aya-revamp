@@ -54,7 +54,7 @@ const toolRegistry = {
       title: 'Title of the message',
       text: 'Message text content',
       color: 'Color of the message sidebar (optional)',
-      buttons: 'JSON array of button objects with text, value, and action_id properties',
+      buttons: 'Array of button objects with text and value properties, e.g. [{text: "Option 1", value: "opt1"}, {text: "Option 2", value: "opt2"}]',
       threadTs: 'Thread timestamp to reply in (optional)',
       callbackId: 'Unique identifier for this set of buttons'
     },
@@ -134,18 +134,24 @@ const getToolsForLLM = () => {
 
 // Get a specific tool by name
 const getTool = (name) => {
-  if (!toolRegistry[name]) {
-    throw new Error(`Tool "${name}" not found in registry`);
+  // Remove functions. prefix if present
+  const cleanName = name.replace(/^functions\./, '');
+  
+  if (!toolRegistry[cleanName]) {
+    throw new Error(`Tool "${cleanName}" not found in registry`);
   }
-  return toolRegistry[name].function;
+  return toolRegistry[cleanName].function;
 };
 
 // Check if a tool is asynchronous
 const isAsyncTool = (name) => {
-  if (!toolRegistry[name]) {
-    throw new Error(`Tool "${name}" not found in registry`);
+  // Remove functions. prefix if present
+  const cleanName = name.replace(/^functions\./, '');
+  
+  if (!toolRegistry[cleanName]) {
+    throw new Error(`Tool "${cleanName}" not found in registry`);
   }
-  return toolRegistry[name].isAsync || false;
+  return toolRegistry[cleanName].isAsync || false;
 };
 
 // Register a new tool

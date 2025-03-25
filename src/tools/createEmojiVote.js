@@ -19,13 +19,14 @@ async function createEmojiVote(args, threadState) {
   try {
     const { title, text, options, color, threadTs } = args;
     
-    // Get Slack client
-    const slackClient = getSlackClient();
+    // Get context from metadata
+    const context = threadState.getMetadata('context');
     
-    // Get channel from thread state
-    const channelId = threadState.context.channelId;
+    // Get channel ID from context
+    const channelId = context?.channelId;
+    
     if (!channelId) {
-      throw new Error('Channel ID not found in thread context');
+      throw new Error('Channel ID not available in thread context');
     }
     
     // Parse options if provided as string
@@ -60,20 +61,23 @@ async function createEmojiVote(args, threadState) {
     });
     
     // Prepare message options
-    const messageOptions = {
+    const messageParams = {
       channel: channelId,
       text: message.text,
       blocks: message.blocks
     };
     
     // Add thread_ts if provided or from thread context
-    const threadTimestamp = threadTs || threadState.context.threadTs;
+    const threadTimestamp = threadTs || context?.threadTs;
     if (threadTimestamp) {
-      messageOptions.thread_ts = threadTimestamp;
+      messageParams.thread_ts = threadTimestamp;
     }
     
+    // Get Slack client
+    const slackClient = getSlackClient();
+    
     // Send the message
-    const response = await slackClient.chat.postMessage(messageOptions);
+    const response = await slackClient.chat.postMessage(messageParams);
     
     // Store vote metadata in thread state for later retrieval
     if (!threadState.voteRegistry) {
@@ -145,6 +149,16 @@ async function getVoteResults(args, threadState) {
   try {
     const { voteId, messageTs } = args;
     
+    // Get context from metadata
+    const context = threadState.getMetadata('context');
+    
+    // Get channel ID from context
+    const channelId = context?.channelId;
+    
+    if (!channelId) {
+      throw new Error('Channel ID not available in thread context');
+    }
+    
     // Need either voteId or messageTs
     if (!voteId && !messageTs) {
       throw new Error('Either voteId or messageTs is required');
@@ -171,9 +185,6 @@ async function getVoteResults(args, threadState) {
     if (!voteInfo && !messageTimestamp) {
       throw new Error('Vote not found in registry');
     }
-    
-    // Get channel from thread state
-    const channelId = threadState.context.channelId;
     
     // Get reactions from the message
     const slackClient = getSlackClient();

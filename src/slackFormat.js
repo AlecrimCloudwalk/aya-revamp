@@ -31,6 +31,20 @@ function formatSlackMessage(options = {}) {
     context = []
   } = options;
   
+  console.log('SLACK FORMAT - Received options:');
+  console.log(JSON.stringify({
+    hasTitle: !!title,
+    titleLength: title?.length,
+    hasText: !!text,
+    textLength: text?.length,
+    hasColor: !!color,
+    fieldsCount: fields.length,
+    actionsCount: actions.length,
+    sectionsCount: sections.length,
+    elementsCount: elements.length,
+    attachmentsCount: attachments.length
+  }, null, 2));
+  
   // If we have a title, add it as a header block
   if (title) {
     blocks.push({
@@ -247,54 +261,87 @@ function formatSlackMessage(options = {}) {
   
   // Add action buttons if provided
   if (actions && actions.length > 0) {
-    // Check if actions are already formatted or need formatting
-    const formattedButtons = actions.map(action => {
-      if (action.type === 'button') {
-        // Already formatted
-        return action;
-      }
-      
-      // Format as button
-      return {
+    blocks.push({
+      type: 'actions',
+      elements: actions.map((action, index) => ({
         type: 'button',
         text: {
           type: 'plain_text',
-          text: action.text || 'Button',
+          text: action.text,
           emoji: true
         },
-        value: action.value || action.text || 'button_value',
-        action_id: action.action_id || `button_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-        style: action.style
-      };
-    });
-    
-    blocks.push({
-      type: 'actions',
-      elements: formattedButtons
+        value: action.value || `value_${index}`,
+        action_id: action.action_id || `action_${index}`
+      }))
     });
   }
   
-  // Create formatted message with consistent styling
-  const formattedMessage = {
-    blocks,
-    text: title || text || 'Message from assistant'
-  };
+  // Add a divider at the end (optional but provides visual separation)
+  if (blocks.length > 0) {
+    blocks.push({
+      type: 'divider'
+    });
+  }
+
+  // Process any pre-existing attachments the user has provided
+  const formattedAttachments = [...attachments];
   
-  // If using color, create an attachment instead
-  if (color || attachments.length > 0) {
-    const attachment = {
-      color,
-      blocks
+  // IMPORTANT: Always use attachments with color to ensure vertical color bar
+  // If blocks exist, add them to an attachment to ensure the color bar is shown
+  if (blocks.length > 0) {
+    // Create a primary attachment with the color
+    const primaryAttachment = {
+      color: color,
+      blocks: blocks
     };
     
-    formattedMessage.blocks = [];
-    // Keep the text as a fallback for notifications, but make it clear it's not meant to duplicate content
-    // This text will show in notifications but won't be rendered as duplicated content
-    formattedMessage.text = formattedMessage.text || 'Message from assistant';
-    formattedMessage.attachments = [attachment, ...attachments];
+    // Add a fallback text for the attachment (required by Slack)
+    primaryAttachment.fallback = title || text || "Message from the bot";
+    
+    // If there was existing text, add it to the attachment
+    if (text) {
+      primaryAttachment.text = text;
+    }
+    
+    // Add the primary attachment
+    formattedAttachments.unshift(primaryAttachment);
+    
+    // Since we're moving the blocks to the attachment, clear the blocks array
+    blocks.length = 0;
+  } else if (formattedAttachments.length === 0) {
+    // No blocks or attachments were provided, create a minimal attachment to show the color bar
+    formattedAttachments.push({
+      color: color,
+      text: text || "",
+      fallback: title || text || "Message from the bot"
+    });
+  } else {
+    // Ensure all attachments have a color
+    formattedAttachments.forEach(attachment => {
+      if (!attachment.color) {
+        attachment.color = color;
+      }
+    });
   }
   
-  return formattedMessage;
+  // Build the final message
+  const message = {
+    blocks,
+    attachments: formattedAttachments,
+    text: " "  // Use a space character instead of duplicating content
+  };
+  
+  console.log('SLACK FORMAT - Final message structure:');
+  console.log(JSON.stringify({
+    hasText: !!message.text,
+    textLength: message.text?.length,
+    hasBlocks: message.blocks?.length > 0,
+    blockCount: message.blocks?.length || 0,
+    hasAttachments: message.attachments?.length > 0,
+    attachmentCount: message.attachments?.length || 0
+  }, null, 2));
+  
+  return message;
 }
 
 /**

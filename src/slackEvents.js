@@ -1,7 +1,8 @@
-// Handles Slack events and routes them to the orchestrator
-const { handleIncomingSlackMessage, handleButtonClick } = require('./orchestrator.js');
-const { logError } = require('./errors.js');
+// Setup and handlers for Slack events
 const { DEV_MODE } = require('./config.js');
+const { getThreadState } = require('./threadState.js');
+const { handleIncomingSlackMessage, handleButtonClick, processButtonInteraction } = require('./orchestrator');
+const { logError } = require('./errors.js');
 
 /**
  * Checks if a message should be processed in development mode
@@ -11,6 +12,58 @@ const { DEV_MODE } = require('./config.js');
 function shouldProcessInDevMode(text) {
   // In development mode, only process messages containing the test key
   return text && text.includes("!@#");
+}
+
+/**
+ * Processes a message from Slack
+ * @param {Object} message - The message from Slack
+ * @param {Object} context - Additional context for processing
+ * @returns {Object} - Context object with additional fields
+ */
+function createMessageContext(message = {}, context = {}) {
+  // Start with existing context or an empty object
+  const ctx = context || {};
+  
+  // Add core message data
+  ctx.timestamp = message.ts || ctx.timestamp;
+  ctx.channelId = message.channel || ctx.channelId;
+  ctx.userId = message.user || ctx.userId;
+  ctx.text = message.text || ctx.text;
+  
+  // Determine if this is a threaded message
+  if (message.thread_ts) {
+    ctx.threadTs = message.thread_ts;
+    ctx.isThreadedConversation = true;
+    // For a thread reply, we need both the thread timestamp and the message timestamp
+    ctx.currentMessageTs = message.ts;
+  } else if (message.ts) {
+    // For a non-threaded message, the thread ID is the message ID
+    ctx.threadTs = message.ts;
+    ctx.isThreadedConversation = false;
+  }
+  
+  // Determine if this is a direct message
+  if (message.channel_type === 'im') {
+    ctx.isDirectMessage = true;
+  }
+  
+  // Add current message data for LLM context
+  ctx.currentMessage = {
+    text: message.text,
+    timestamp: message.ts,
+    threadPosition: message.thread_ts ? null : 1  // First message in thread is position 1
+  };
+  
+  // Add metadata about message type for better LLM context
+  if (ctx.isThreadedConversation) {
+    ctx.messageType = 'thread_reply';
+  } else if (ctx.isDirectMessage) {
+    ctx.messageType = 'direct_message';
+  } else {
+    ctx.messageType = 'channel_message';
+  }
+  
+  return ctx;
 }
 
 /**
@@ -44,14 +97,9 @@ function setupSlackEvents(app) {
       }
 
       // Collect message metadata
-      const messageContext = {
-        text: event.text,
-        userId: event.user,
-        channelId: event.channel,
-        threadTs: event.thread_ts || event.ts,
-        timestamp: event.ts,
+      const messageContext = createMessageContext(event, {
         teamId: context.teamId
-      };
+      });
 
       // Handle the message with our orchestrator
       await handleIncomingSlackMessage(messageContext);
@@ -73,15 +121,10 @@ function setupSlackEvents(app) {
       }
 
       // Collect message metadata
-      const messageContext = {
-        text: event.text,
-        userId: event.user,
-        channelId: event.channel,
-        threadTs: event.thread_ts || event.ts,
-        timestamp: event.ts,
+      const messageContext = createMessageContext(event, {
         teamId: context.teamId,
         isMention: true
-      };
+      });
 
       // Handle the message with our orchestrator
       await handleIncomingSlackMessage(messageContext);
@@ -123,51 +166,34 @@ function setupSlackEvents(app) {
     }
   });
 
-  // Handle interactive button clicks (for action buttons in messages)
-  app.action(/.*/, async ({ action, body, context, ack, client }) => {
-    // Acknowledge the action request
-    await ack();
-
+  // Handle button clicks from messages with blocks
+  app.action(/.*/, async ({ action, body, ack }) => {
     try {
-      // Basic log with relevant info only
-      console.log(`Action: ${action.action_id} | Value: ${action.value} | User: ${body.user.id} | Channel: ${body.channel.id}`);
+      // Acknowledge receipt of the button action
+      await ack();
       
-      // Extract metadata if available
-      let metadata = {};
-      try {
-        if (action.metadata) {
-          metadata = JSON.parse(action.metadata);
-          console.log(`Button metadata: ${JSON.stringify(metadata)}`);
-        }
-      } catch (metadataError) {
-        console.log(`Error parsing button metadata: ${metadataError.message}`);
-      }
+      // Log the entire payload for debugging
+      console.log('Button click event payload:', JSON.stringify({
+        action_id: action.action_id,
+        button_value: action.value,
+        user_id: body.user.id,
+        channel_id: body.channel.id,
+        message_ts: body.message.ts,
+        thread_ts: body.message.thread_ts || body.container.message_ts
+      }, null, 2));
       
-      // Collect action metadata
-      const actionContext = {
-        actionId: action.action_id,
-        actionValue: action.value,
-        userId: body.user.id,
-        channelId: body.channel.id,
-        messageTs: body.message.ts,
-        threadTs: body.message.thread_ts || body.message.ts,
-        teamId: context.teamId,
-        isAction: true,
-        metadata,
-        originalMessage: {
-          text: body.message.text,
-          blocks: body.message.blocks
-        }
-      };
-
-      // Pass the action to a specialized handler
-      await handleButtonClick(actionContext);
+      // Process the button click
+      await processButtonInteraction(body);
     } catch (error) {
-      logError('Error handling interactive action', error, { action, body });
+      console.error('Error handling button click:', error);
     }
   });
+
+  return app;
 }
 
 module.exports = {
-  setupSlackEvents
+  setupSlackEvents,
+  shouldProcessInDevMode,
+  createMessageContext
 }; 

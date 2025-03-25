@@ -18,20 +18,62 @@ async function getNextAction(threadState) {
       throw new Error('LLM_API_KEY is not configured');
     }
 
-    // Format the messages for the LLM
-    const messages = formatMessagesForLLM(threadState);
-    
-    // Log the messages we're sending to the LLM in a developer-friendly way
     console.log("\n🧠 SENDING REQUEST TO LLM");
     console.log(`Model: ${LLM_MODEL}`);
+
+    // Determine if we have a ThreadState instance or just the state object
+    const isThreadStateInstance = typeof threadState.getMetadata === 'function';
     
-    if (messages.length > 0) {
-      console.log(`\nContext items: ${messages.length}`);
-      // We've already logged the full context in formatMessagesForLLM
-      console.log("-> See CONVERSATION CONTEXT SENT TO LLM above for details");
-      console.log("Sending request...");
+    // Get context from metadata
+    let context = isThreadStateInstance ? threadState.getMetadata('context') : null;
+    
+    if (!context && isThreadStateInstance) {
+      console.log("⚠️ WARNING: No context found in thread state metadata");
     }
     
+    // Format messages based on thread state
+    const messages = formatMessagesForLLM(threadState);
+    
+    // Log the actual content we're sending to the LLM for debugging
+    console.log("\n--- Content being sent to LLM ---");
+    if (context && context.text) {
+      console.log(`User's query: "${context.text}"`);
+    } else {
+      console.log("No user query found in context!");
+    }
+    console.log(`Sending ${messages.length} messages to LLM`);
+    
+    // Add detailed context logging
+    console.log("\n--- DETAILED CONTEXT LOG ---");
+    console.log("Messages in threadState:", threadState.messages?.length || 0);
+    if (threadState.messages && threadState.messages.length > 0) {
+      console.log("Thread message history:");
+      threadState.messages.forEach((msg, idx) => {
+        console.log(`[${idx + 1}] ${msg.isUser ? 'USER' : 'BOT'}: ${msg.isSystemNote ? 'SYSTEM NOTE' : ''} ${msg.text?.substring(0, 50)}${msg.text?.length > 50 ? '...' : ''}`);
+      });
+    }
+    
+    // Log tool execution history
+    if (typeof threadState.getToolExecutionHistory === 'function') {
+      const toolHistory = threadState.getToolExecutionHistory(5);
+      if (toolHistory.length > 0) {
+        console.log("\nRecent tool executions:");
+        toolHistory.forEach((exec, idx) => {
+          console.log(`[${idx + 1}] ${exec.toolName} - ${exec.error ? 'ERROR' : 'SUCCESS'}`);
+        });
+      }
+    }
+    
+    // Log messages being sent to LLM
+    console.log("\nMessages to LLM:");
+    messages.forEach((msg, idx) => {
+      const content = typeof msg.content === 'string' ? 
+        `${msg.content.substring(0, 100)}${msg.content.length > 100 ? '...' : ''}` : 
+        'Complex content';
+      console.log(`[${idx + 1}] ${msg.role.toUpperCase()}: ${content}`);
+    });
+    console.log("-------------------------");
+
     // Build the complete LLM request
     const requestBody = {
       model: LLM_MODEL,
@@ -41,11 +83,11 @@ async function getNextAction(threadState) {
       frequency_penalty: 0,
       presence_penalty: 0,
       tools: getAvailableTools(),
-      tool_choice: "auto"  // Allow model to choose which tool is appropriate
+      tool_choice: "required"  // Changed from "auto" to "required" to force the model to always use a tool
     };
 
     // Make the API request to the LLM
-    return await sendRequestToLLM(requestBody, threadState);
+    return await sendRequestToLLM(requestBody);
   } catch (error) {
     console.log(`\n❌ LLM ERROR ❌`);
     console.log(`Message: ${error.message}`);
@@ -55,7 +97,6 @@ async function getNextAction(threadState) {
     logError('Error getting next action from LLM', error, { threadState });
     
     // Rethrow the error for the orchestrator to handle
-    // This is better than creating a tool call here - let the LLM decide how to communicate errors
     throw error;
   }
 }
@@ -146,73 +187,138 @@ function filterDevPrefix(message) {
 
 /**
  * Gets a system message with instructions and context
- * @param {Object} context - The thread context
- * @returns {string} - The system message
  */
-function getSystemMessage(context) {
-  // Create a system message with instructions and context
-  let systemMessage = `Hi there! You're Aya, a helpful AI assistant in Slack. This is a conversation between you and users. You have special tools you can use to interact with Slack.
+function getSystemMessage(context = {}) {
+    // Make sure context exists and has expected properties
+    const ctx = context || {};
+    
+    // Get registered tools for dynamically generating the tool list
+    let toolsList = '';
+    try {
+        const registeredTools = getToolsForLLM();
+        
+        // Create a numbered list of tools
+        if (registeredTools && registeredTools.length > 0) {
+            toolsList = registeredTools
+                .map((tool, index) => `${index + 1}. ${tool.name} - ${tool.description}`)
+                .join('\n');
+        } else {
+            // Fallback if tools aren't available
+            toolsList = '1. postMessage - Send a message to the user\n2. finishRequest - End your turn in the conversation';
+        }
+    } catch (error) {
+        console.log('Error getting tools for system message:', error.message);
+        // Fallback if there's an error
+        toolsList = '1. postMessage - Send a message to the user\n2. finishRequest - End your turn in the conversation';
+    }
+    
+    return `Hi there! You're Aya, a helpful AI assistant in Slack. This is a conversation between you and users.
 
 IMPORTANT CONTEXT:
-You're in a ${context.isDirectMessage ? 'direct message' : 'thread'} in Slack ${context.isThreadedConversation ? 'with multiple messages' : ''}.
-User ID: ${context.userId}
-Channel: ${context.channelId}${context.threadTs ? `\nThread: ${context.threadTs}` : ''}
-${context.isCommand ? `The user used a command: ${context.commandName || 'unknown'}` : ''}`;
+You're in a ${ctx.isDirectMessage ? 'direct message' : 'thread'} in Slack.
+User ID: ${ctx.userId || 'unknown'}
+Channel: ${ctx.channelId || 'unknown'}
+${ctx.threadTs ? `Thread: ${ctx.threadTs}` : ''}
 
-  // Add thread statistics if available
-  if (context.threadTs && context.threadStats) {
-    systemMessage += `\n\nTHREAD INFO:
-- There are ${context.threadStats.totalMessagesInThread} total messages in this thread
-- The parent message (first message of the thread) is ${context.threadStats.hasParentMessage ? 'included in your context' : 'not in your context'}
-- This thread might contain task context in its parent message`;
-  }
-  
-  systemMessage += `\n\nYOUR TOOLS:
-1. postMessage - Use this to send a message to the user in Slack
-   Example: When the user asks a question, call postMessage to answer them
+CRITICAL INSTRUCTIONS:
+1. DO NOT send multiple similar messages - ONE response per user query
+2. ALWAYS communicate with users by calling tools
+3. NEVER output direct content or messages
+4. ALWAYS check the conversation history to avoid duplicating messages
+5. AFTER creating a button message, DO NOT create another one with the same options
+6. After sending a message, call finishRequest to end your turn
 
-2. finishRequest - Call this when you've completed responding to the user
-   Example: After answering a question, call finishRequest to end that conversation turn
+YOUR TOOLS:
+${toolsList}
 
-3. getThreadHistory - Use this if you're missing context from earlier in the thread
-   Example: If the user refers to something you don't know about, get the thread history
-
-Each tool requires a brief "reasoning" field explaining why you're using it. This helps with debugging.
-
-CONVERSATION FLOW:
-- When a user sends a message, you typically respond with postMessage
-- Then call finishRequest to finish your turn
-- For complex conversations, you might need multiple messages before finishing
-- Only call getThreadHistory if the user refers to something you don't have context for
-
-VERY IMPORTANT: TOOL CALL FORMAT
-When you need to call a tool, use ONLY this format:
-
-\`\`\`json
+TOOL CALL FORMAT:
+// DO NOT USE CODE BLOCKS. Return a JSON object directly like this:
 {
   "tool": "toolName",
   "parameters": {
     "param1": "value1",
-    "param2": "value2",
     "reasoning": "Brief explanation of why you're using this tool"
   }
 }
-\`\`\`
 
-IMPORTANT RULES:
-1. Send only ONE tool call at a time
-2. Wait for each tool to complete before sending another
-3. For normal interactions: first send postMessage, then after that completes, send finishRequest
-4. DO NOT include multiple tool calls in one response
-5. Text outside the JSON code blocks will not be sent to the user
+⚠️ CRITICAL: DO NOT WRAP YOUR RESPONSE IN CODE BLOCKS OR MARKDOWN. Just return the JSON object directly. ⚠️
 
-Make sure to include a JSON code block with a "tool" property and a "parameters" object. This format is required for the system to process your tool calls correctly.
+IMPORTANT PARAMETERS NOTES:
+- For parameters that require arrays or objects, provide them as proper JSON arrays/objects, NOT as string representations.
+- CORRECT: "buttons": [{"text": "Option 1", "value": "opt1"}, {"text": "Option 2", "value": "opt2"}]
+- INCORRECT: "buttons": "[{\\"text\\": \\"Option 1\\", \\"value\\": \\"opt1\\"}, {\\"text\\": \\"Option 2\\", \\"value\\": \\"opt2\\"}]"
+- Always include a "reasoning" parameter in all tool calls to explain your decision.
 
-Remember, you're having a natural conversation. Don't repeat yourself or send the same message multiple times.
+BUTTON CREATION GUIDELINES:
+1. When asked to provide options, create ONLY ONE button message
+2. DO NOT create multiple button messages with similar options
+3. After creating buttons, call finishRequest - don't create more messages
+4. When a user clicks a button, acknowledge their choice with a postMessage
 
-Below you'll see the conversation history. Read through it to understand the context before deciding what to do next.`;
+CONVERSATION FLOW:
+- User makes a request -> You call postMessage or createButtonMessage -> You call finishRequest
+- User clicks a button -> You acknowledge their choice with postMessage -> You call finishRequest
+- ONE response cycle per user action
 
-  return systemMessage;
+EXAMPLES OF CORRECT FORMAT:
+
+EXAMPLE 1 - Posting a message:
+{
+  "tool": "postMessage",
+  "parameters": {
+    "title": "Here's the information you requested",
+    "text": "I found the answer to your question...",
+    "color": "blue",
+    "reasoning": "Responding with requested information"
+  }
+}
+
+EXAMPLE 2 - Creating a button message:
+{
+  "tool": "createButtonMessage",
+  "parameters": {
+    "title": "Choose an option",
+    "text": "Please select one of the following options:",
+    "buttons": [
+      {"text": "Yes", "value": "yes"},
+      {"text": "No", "value": "no"},
+      {"text": "Maybe", "value": "maybe"}
+    ],
+    "actionPrefix": "choice",
+    "reasoning": "Presenting the user with options to choose from"
+  }
+}
+
+EXAMPLE 3 - Creating an emoji vote:
+{
+  "tool": "createEmojiVote",
+  "parameters": {
+    "title": "Vote on your favorite",
+    "text": "React with an emoji to vote:",
+    "options": [
+      {"emoji": "coffee", "text": "Coffee"},
+      {"emoji": "tea", "text": "Tea"}
+    ],
+    "reasoning": "Creating a poll for user preferences"
+  }
+}
+
+EXAMPLE 4 - Finishing request (REQUIRED after posting a message):
+{
+  "tool": "finishRequest",
+  "parameters": {
+    "summary": "Responded to user request for dinner options",
+    "reasoning": "Task has been completed, ending the conversation turn"
+  }
+}
+
+IMPORTANT REMINDERS:
+1. DO NOT wrap your tool call in markdown code blocks
+2. Return ONLY the bare JSON object
+3. Do not include \`\`\`json or \`\`\` markers
+4. Always check the thread history to avoid duplicating messages
+5. If you've already responded to the user, don't send a similar message again
+6. After creating a button message, call finishRequest - don't create more buttons`;
 }
 
 /**
@@ -223,8 +329,11 @@ Below you'll see the conversation history. Read through it to understand the con
 function formatMessagesForLLM(threadState) {
   const messages = [];
   
+  // Get context from metadata
+  const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
+  
   // Add system message
-  const systemMessage = getSystemInstructions(threadState.context);
+  const systemMessage = getSystemInstructions(context || {});
   messages.push({
     role: 'system',
     content: systemMessage,
@@ -232,22 +341,42 @@ function formatMessagesForLLM(threadState) {
 
   // Debug logging of context
   console.log(`\n---- Building Context for LLM ----`);
-  console.log(`Thread Stats: ${threadState.context.threadStats ? 
-    `${threadState.context.threadStats.totalMessagesInThread} total messages, ${threadState.messages?.length || 0} in context` : 
-    'Not available'}`);
-  console.log(`Context includes: ${threadState.messages?.filter(m => m.isUser).length || 0} user messages, ${threadState.messages?.filter(m => !m.isUser).length || 0} bot messages, ${threadState.toolResults?.length || 0} tool call results`);
+  if (context) {
+    console.log(`Context details: User:${context.userId}, Channel:${context.channelId}, Thread:${context.threadTs || 'N/A'}`);
+    console.log(`Thread Stats: ${context.threadStats ? 
+      `${context.threadStats.totalMessagesInThread} total messages` : 
+      'Not available'}`);
+    console.log(`Messages in context: ${threadState.messages?.length || 0} messages`);
+    console.log(`User Message: "${context.text || 'No text'}" (${context.messageType || 'unknown type'})`);
+  } else {
+    console.log("No context found in thread state!");
+  }
   
-  // Check if this is for a button click
-  const isButtonClick = !!threadState.context.currentButtonClick;
-  if (isButtonClick) {
-    console.log(`Building context for button click: ${threadState.context.currentButtonClick.buttonSignature}`);
+  // Add important system note about conversation state
+  if (threadState.messages && threadState.messages.length > 0) {
+    // Check if any messages are from the bot
+    const botMessages = threadState.messages.filter(msg => !msg.isUser);
+    if (botMessages.length > 0) {
+      messages.push({
+        role: 'system',
+        content: `⚠️ CRITICAL: You have already sent ${botMessages.length} message(s) in this conversation. DO NOT send another message with the same content or options. The user is waiting for your existing message to be processed.`
+      });
+    }
   }
   
   // Format thread messages if present
+  let currentMessageFound = false;
+  let prevBotMessageCount = 0;
+  
   if (threadState.messages && threadState.messages.length > 0) {
     console.log(`Thread history: ${threadState.messages.length} messages being imported`);
     
     for (const message of threadState.messages) {
+      // Check if this is the current user's message (matches the context)
+      if (context && message.isUser && message.text === context.text) {
+        currentMessageFound = true;
+      }
+      
       let prefix = '';
       let positionDisplay = '';
       
@@ -256,13 +385,16 @@ function formatMessagesForLLM(threadState) {
         positionDisplay = ` [MESSAGE #${message.threadPosition}]`;
       }
 
-      if (message.isParentMessage) {
-        prefix = `THREAD PARENT MESSAGE${positionDisplay}:\n`;
-      } else if (message.isButtonClick) {
-        // Special formatting for button clicks
-        prefix = `BUTTON INTERACTION${positionDisplay}:\n`;
-      } else {
-        prefix = `THREAD REPLY${positionDisplay}:\n`;
+      // Only add prefixes for non-system messages
+      if (!message.isSystemNote) {
+        if (message.isParentMessage) {
+          prefix = `THREAD PARENT MESSAGE${positionDisplay}:\n`;
+        } else if (message.isButtonClick) {
+          // Special formatting for button clicks
+          prefix = `BUTTON INTERACTION${positionDisplay}:\n`;
+        } else {
+          prefix = `THREAD MESSAGE${positionDisplay}:\n`;
+        }
       }
 
       // Determine if message is from the bot or a user
@@ -279,143 +411,107 @@ function formatMessagesForLLM(threadState) {
             content: `${prefix}USER MESSAGE: ${message.text || 'No text content'}`
           });
         }
-      } else {
-        // For bot messages, try to find the associated tool call
-        let toolCallInfo = '';
-        
-        // Check if this message was generated by a tool call
-        if (message.fromTool && threadState.toolResults) {
-          // Find the related tool execution that generated this message
-          const relatedToolResult = threadState.toolResults.find(tr => 
-            tr.requestId === message.requestId && tr.toolName === 'postMessage'
-          );
-          
-          if (relatedToolResult) {
-            toolCallInfo = ` (from postMessage tool call #${threadState.toolResults.indexOf(relatedToolResult) + 1})`;
-          }
+      } else if (message.isSystemNote) {
+        // Only include important system notes to reduce noise
+        if (message.text.includes("Created interactive buttons") || 
+            message.text.includes("auto-completed") ||
+            message.text.includes("error")) {
+          messages.push({
+            role: 'system',
+            content: message.text
+          });
         }
+      } else {
+        // For bot messages, format with very clear indication this was already sent
+        prevBotMessageCount++;
+        
+        let sentMessage = '';
+        if (message.title) {
+          sentMessage += `Title: "${message.title}"\n`;
+        }
+        sentMessage += `Content: "${message.text || 'No text content'}"`;
         
         messages.push({
           role: 'assistant',
-          content: `${prefix}YOUR PREVIOUS RESPONSE${toolCallInfo}: ${message.text || 'No text content'}`
+          content: `⚠️ PREVIOUSLY SENT MESSAGE (#${prevBotMessageCount}) using ${message.toolName || 'unknown tool'}:\n${sentMessage}\n\nDO NOT DUPLICATE THIS MESSAGE. The user already sees this message.`
         });
       }
     }
   }
 
-  // Add the current user message that triggered this interaction
-  if (threadState.context.currentMessage) {
-    // Determine position display for current message
-    let positionDisplay = '';
-    if (threadState.context.currentMessage.threadPosition) {
-      positionDisplay = ` [MESSAGE #${threadState.context.currentMessage.threadPosition}]`;
-    }
+  // Add the current user message if not already found in message history
+  // IMPORTANT: Only add it if it wasn't already found in thread history
+  if (context && context.text && !currentMessageFound) {
+    console.log("Adding current message to context (wasn't found in message history)");
     
-    let prefix = '';
-    if (threadState.context.isThreadedConversation) {
-      prefix = `CURRENT THREAD REPLY${positionDisplay}:\n`;
-    } else if (threadState.context.isDirectMessage) {
-      prefix = `DIRECT MESSAGE${positionDisplay}:\n`;
-    } else {
-      prefix = `CHANNEL MESSAGE${positionDisplay}:\n`;
-    }
+    let prefix = 'CURRENT USER REQUEST: ';
     
     messages.push({
       role: 'user',
-      content: `${prefix}USER MESSAGE: ${threadState.context.currentMessage.text || 'No text content'}`
+      content: `${prefix}${context.text || 'No text content'}`
+    });
+  } else {
+    console.log("Current user message already included in thread history, not adding again");
+  }
+
+  // Handle button clicks specially
+  if (context && context.actionId) {
+    // Add a clear notice about button clicks
+    messages.push({
+      role: 'system',
+      content: `⚠️ IMPORTANT: The user clicked a button with action ID "${context.actionId}" and value "${context.actionValue}". 
+Respond to this button click directly.
+
+1. Do NOT create new buttons - the user has already made their choice
+2. Use postMessage to acknowledge their selection
+3. Provide a response based on their button choice
+4. End the conversation turn with finishRequest`
     });
   }
 
-  // If this is a button click, add a special message to clarify
-  if (isButtonClick) {
-    // Find the button click message
-    const buttonClickMessage = threadState.messages.find(
-      m => m.buttonClickId === threadState.context.currentButtonClick.buttonSignature
-    );
-    
-    if (buttonClickMessage && buttonClickMessage.buttonInfo) {
-      // Add more detailed button information for better context
-      messages.push({
-        role: 'system',
-        content: `IMPORTANT: The user clicked a button. Please respond to this action using the standard tool call format. 
-Button details: 
-- Text: "${buttonClickMessage.buttonInfo.text || buttonClickMessage.buttonInfo.value}"
-- Value: "${buttonClickMessage.buttonInfo.value}"
-- Action ID: "${buttonClickMessage.buttonInfo.actionId}"
+  // Add a final reminder if we've already posted messages
+  if (prevBotMessageCount > 0) {
+    messages.push({
+      role: 'system',
+      content: `⚠️ FINAL WARNING: You have already sent ${prevBotMessageCount} message(s) in this conversation as shown above. 
+DO NOT send duplicate messages or create similar button options. The user already sees your previous message(s).
 
-The button has been visually updated in the UI to show it was selected. You should now:
-1. Use the postMessage tool to confirm the user's selection
-2. Include an acknowledgment of their choice in your message
-3. Proceed with the next step based on their selection
-4. DO NOT ask the user to click the button again - they already did
-5. Use the finishRequest tool after your response
-
-IMPORTANT: Use the same JSON format in \`\`\`json code blocks as in your other responses.
-DO NOT change your response format - use the standard postMessage and finishRequest tools.`
-      });
-    } else {
-      messages.push({
-        role: 'system',
-        content: `IMPORTANT: The user clicked a button. Respond directly to this button click.
-
-1. Use the postMessage tool to acknowledge their selection
-2. Include a brief confirmation of what was selected
-3. Continue with your normal tool call format, using the JSON format in code blocks
-4. Remember to use finishRequest when you're done`
-      });
-    }
-  }
-
-  // Add previous tool calls if any
-  if (threadState.toolResults && threadState.toolResults.length > 0) {
-    console.log(`Adding ${threadState.toolResults.length} tool results to context`);
-    
-    // First organize tool results in chronological order
-    const sortedToolResults = [...threadState.toolResults].sort((a, b) => {
-      return new Date(a.timestamp) - new Date(b.timestamp);
+If you already created buttons, DO NOT create more buttons or suggest options again.
+The user is waiting for your existing message to be processed.`
     });
+  }
+  
+  // Add previous tool executions to context (limited)
+  // Use the getToolExecutionHistory method if available
+  if (typeof threadState.getToolExecutionHistory === 'function') {
+    const toolExecutionHistory = threadState.getToolExecutionHistory(3); // Just get last 3
     
-    // Group by requestId to show logical flow
-    const requestGroups = {};
-    for (const result of sortedToolResults) {
-      const requestId = result.requestId || 'unknown';
-      if (!requestGroups[requestId]) {
-        requestGroups[requestId] = [];
-      }
-      requestGroups[requestId].push(result);
-    }
-    
-    // Add each group's tool results in order
-    let resultCounter = 1;
-    for (const requestId of Object.keys(requestGroups)) {
-      const results = requestGroups[requestId];
+    if (toolExecutionHistory.length > 0) {
+      console.log(`Adding ${toolExecutionHistory.length} recent tool executions to context`);
       
-      if (results.length > 0) {
-        messages.push({
-          role: 'system',
-          content: `--- Tool execution sequence #${resultCounter++} ---`
-        });
-      }
-      
-      for (const toolCall of results) {
-        // Skip duplicate tools that weren't actually executed
-        if (toolCall.duplicate) {
+      // Add only the most important tool calls
+      for (const execution of toolExecutionHistory) {
+        // Skip non-message tools
+        if (execution.toolName !== 'postMessage' && 
+            execution.toolName !== 'createButtonMessage' &&
+            execution.toolName !== 'finishRequest') {
           continue;
         }
         
-        // Format the message for the function result
-        let functionContent = typeof toolCall.response === 'string' 
-          ? toolCall.response 
-          : JSON.stringify(toolCall.response, null, 2);
+        // Add error information if present
+        let functionContent = '';
         
-        // For postMessage, add a note about the message being sent to the user
-        if (toolCall.toolName === 'postMessage' && !toolCall.error) {
-          functionContent = `MESSAGE SENT TO USER: ${functionContent}`;
+        if (execution.error) {
+          functionContent = `ERROR: ${execution.error.message}`;
+        } else {
+          functionContent = typeof execution.result === 'string' 
+            ? execution.result 
+            : JSON.stringify(execution.result, null, 2);
         }
         
         messages.push({
           role: 'function',
-          name: toolCall.toolName,
+          name: execution.toolName,
           content: functionContent
         });
       }
@@ -489,6 +585,35 @@ function formatToolResponse(toolName, args, response) {
 function getSystemInstructions(context) {
   const botUserID = context?.botUserID || 'YOUR_SLACK_BOT_ID';
   
+  // Get registered tools for dynamically generating the tool list
+  let toolsWithDetails = '';
+  try {
+    const registeredTools = getToolsForLLM();
+    
+    // Generate a more descriptive list of tools with their parameters
+    if (registeredTools && registeredTools.length > 0) {
+      toolsWithDetails = registeredTools.map(tool => {
+        // Create a brief parameters description
+        const paramsList = Object.entries(tool.parameters || {})
+          .filter(([paramName]) => paramName !== 'reasoning') // Don't include reasoning
+          .map(([paramName, description]) => {
+            const isRequired = !description || !description.toLowerCase().includes('optional');
+            return `    - ${paramName}${isRequired ? ' (required)' : ' (optional)'}: ${description || 'No description available'}`;
+          })
+          .join('\n');
+          
+        return `- ${tool.name}: ${tool.description || 'No description available'}\n  Parameters:\n${paramsList}`;
+      }).join('\n\n');
+    } else {
+      // Fallback if tools aren't available
+      toolsWithDetails = '- postMessage: Send a message to the user\n  Parameters:\n    - text (required): Message text content\n    - title (optional): Title for the message\n\n- finishRequest: End your turn in the conversation\n  Parameters:\n    - summary (required): Brief summary of completed action';
+    }
+  } catch (error) {
+    console.log('Error getting tools for system instructions:', error.message);
+    // Fallback if there's an error
+    toolsWithDetails = '- postMessage: Send a message to the user\n  Parameters:\n    - text (required): Message text content\n    - title (optional): Title for the message\n\n- finishRequest: End your turn in the conversation\n  Parameters:\n    - summary (required): Brief summary of completed action';
+  }
+  
   return `You are Aya, a helpful assistant in Slack.
 
 COMMUNICATION STYLE:
@@ -502,19 +627,25 @@ WORKFLOW:
 2. Use available tools to respond appropriately 
 3. Post your response in the thread using the postMessage tool
 4. Use the finishRequest tool when you're done to signal completion
+5. If errors occur, handle them gracefully without exposing technical details to users
 
-CRITICAL BEHAVIOR REQUIREMENTS:
-1. NEVER send more than one message per user request unless explicitly needed
-2. ALWAYS call finishRequest after sending your response
-3. NEVER repeat a postMessage with the same content
-4. ALWAYS check if you've already responded before sending a new message
-5. Each user message should get exactly ONE response from you
-6. NEVER include raw code or function calls in your message content
-7. ALWAYS use the standardized JSON format for tool calls as shown below
-8. ALWAYS respond on your first iteration with a properly-formatted tool call
+⚠️ CRITICAL BEHAVIOR REQUIREMENTS (READ CAREFULLY) ⚠️:
+1. YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
+2. NEVER send more than one message per user request unless explicitly needed
+3. ALWAYS call finishRequest after sending your response
+4. NEVER repeat a postMessage with the same content
+5. ALWAYS check if you've already responded before sending a new message
+6. Each user message should get exactly ONE response from you
+7. NEVER include raw code or function calls in your message content
+8. ALWAYS use the standardized JSON format for tool calls as shown below
 9. IMPORTANT: Text written outside of tool calls will NOT be shown to the user
 10. ALL your responses to users MUST go through the postMessage tool
 11. SEND ONLY ONE TOOL CALL AT A TIME - Do not include multiple tool calls in one response
+12. WHEN HANDLING ERRORS: Never use hardcoded responses. Always decide what to tell the user based on the error context.
+
+AVAILABLE TOOLS:
+
+${toolsWithDetails}
 
 FORMAT REQUIREMENTS FOR TOOLS:
 1. ALL tool calls must be in \`\`\`json code blocks
@@ -526,7 +657,7 @@ FORMAT REQUIREMENTS FOR TOOLS:
 7. Send only ONE tool call per response - DO NOT include multiple tool calls
 8. For a normal user interaction: first send postMessage, then after receiving a response, send finishRequest
 
-TOOL CALLING FORMAT:
+TOOL CALLING FORMAT (YOU MUST USE THIS FORMAT FOR ALL RESPONSES):
 Use this exact JSON format for EACH tool call (send only one at a time):
 \`\`\`json
 {
@@ -588,7 +719,8 @@ Example 2: After the postMessage completes, send a finishRequest:
 }
 \`\`\`
 
-REMEMBER: 
+⚠️ REMEMBER (CRITICAL): 
+- YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
 - All your responses to users MUST go through the postMessage tool 
 - Send only ONE tool call at a time - DO NOT send multiple tool calls in the same response
 - Wait for each tool call to complete before sending another one
@@ -596,217 +728,273 @@ REMEMBER:
 }
 
 /**
- * Parses the LLM response to extract tool calls from our custom JSON format
- * @param {Object} llmResponse - Response from the LLM API
- * @returns {Object} - Parsed tool calls and other message content
+ * Parses the tool call from the LLM response
+ * @param {Object} llmResponse - The response from the LLM
+ * @returns {Object} - The parsed tool call
  */
 async function parseToolCallFromResponse(llmResponse) {
   try {
-    const response = llmResponse;
-    const choices = response.choices || [];
-    
-    if (choices.length === 0) {
-      return { toolCalls: [], content: '' };
+    // Log the format we're detecting
+    console.log("Tool call format: Using native OpenAI tool_calls format");
+
+    // Get the assistant's message
+    const assistantMessage = llmResponse.choices[0].message;
+    if (!assistantMessage) {
+      throw new Error('No assistant message found in response');
     }
-    
-    // Get the first (and typically only) choice
-    const firstChoice = choices[0];
-    const message = firstChoice.message || {};
-    let content = message.content || '';
-    
-    // Array to store extracted tool calls
-    const extractedToolCalls = [];
-    
-    // OpenAI might still use its native format, handle both
-    const nativeToolCalls = message.tool_calls || [];
-    let hasNativeCalls = nativeToolCalls.length > 0;
-    
-    // Process any native tool calls (for backward compatibility)
-    if (hasNativeCalls) {
-      console.log("Tool call format: Using native OpenAI tool_calls format");
+
+    // Handle native OpenAI tool_calls format
+    if (assistantMessage.tool_calls && Array.isArray(assistantMessage.tool_calls)) {
+      const toolCalls = [];
       
-      for (const toolCall of nativeToolCalls) {
-        if (toolCall.function && toolCall.function.name) {
-          // Remove any "functions." prefix from the tool name
-          const toolName = toolCall.function.name.replace(/^functions\./, '');
-          
-          extractedToolCalls.push({
-            id: toolCall.id || `native_${Date.now()}`,
-            tool: toolName,
-            parameters: JSON.parse(toolCall.function.arguments || '{}')
-          });
-        }
-      }
-    }
-    
-    // Look for tool calls in code blocks in the content
-    if (content) {
-      // Improved regex to capture JSON code blocks more reliably
-      // This handles both ```json and ``` format
-      const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g;
-      let match;
-      let matchCount = 0;
-      
-      while ((match = jsonBlockRegex.exec(content)) !== null) {
-        try {
-          matchCount++;
-          const jsonString = match[1].trim();
-          
-          // Skip empty blocks
-          if (!jsonString) {
-            console.log("Empty JSON code block found, skipping");
-            continue;
-          }
-          
-          // Parse the JSON
-          const jsonData = JSON.parse(jsonString);
-          
-          // Check if this is a valid tool call
-          if (jsonData.tool && typeof jsonData.parameters === 'object') {
-            console.log(`Found JSON tool call in code block: ${jsonData.tool}`);
-            
-            // Add this to the extracted tool calls
-            extractedToolCalls.push({
-              id: `json_block_${extractedToolCalls.length + 1}`,
-              tool: jsonData.tool,
-              parameters: jsonData.parameters
-            });
-            
-            // Replace the code block with nothing to avoid duplicate processing
-            content = content.replace(match[0], '');
-          } else {
-            console.log(`Found JSON in code block but it doesn't match tool call format:`, jsonData);
-          }
-        } catch (e) {
-          console.log(`Error parsing JSON from code block: ${e.message}`);
-          // Log the problematic match for debugging
-          console.log(`Problematic JSON: ${match[1].substring(0, 50)}...`);
-        }
-      }
-      
-      if (matchCount > 0) {
-        console.log(`Tool call format: Found ${matchCount} JSON code blocks`);
-      }
-    }
-    
-    // Check for mixed formats and log warning
-    if (hasNativeCalls && extractedToolCalls.length > nativeToolCalls.length) {
-      console.log("⚠️ CRITICAL WARNING: LLM is mixing tool call formats (native and JSON blocks)");
-      console.log("This can lead to duplicate messages and unexpected behavior");
-      console.log("Suggestion: Update system instructions to clarify format requirements");
-    }
-    
-    // Check for duplicate tool calls and remove them
-    const uniqueToolCalls = [];
-    const seenCalls = new Map();
-    
-    for (const call of extractedToolCalls) {
-      // Create a signature for the tool call based on tool name and parameters
-      const signature = `${call.tool}:${JSON.stringify(call.parameters)}`;
-      
-      if (!seenCalls.has(signature)) {
-        seenCalls.set(signature, true);
-        uniqueToolCalls.push(call);
-      } else {
-        console.log(`⚠️ Removing duplicate tool call for ${call.tool}`);
-      }
-    }
-    
-    // Replace extractedToolCalls with the deduplicated version
-    const deduplicatedCount = extractedToolCalls.length - uniqueToolCalls.length;
-    if (deduplicatedCount > 0) {
-      console.log(`Removed ${deduplicatedCount} duplicate tool calls`);
-      extractedToolCalls.length = 0;
-      extractedToolCalls.push(...uniqueToolCalls);
-    }
-    
-    // Log tool call detection summary
-    console.log(`Tool call format detection: Native OpenAI: ${hasNativeCalls ? 'YES' : 'NO'}, JSON blocks: ${extractedToolCalls.length > 0 ? 'YES' : 'NO'}`);
-    
-    console.log("\n=== LLM RESPONSE ===");
-    console.log(`Model: ${response.model}`);
-    console.log("");
-    
-    // Log content if present
-    if (content && content.trim()) {
-      console.log(`Content: ${content}`);
-      console.log("");
-    }
-    
-    // Log extracted tool calls
-    if (extractedToolCalls.length > 0) {
-      console.log("Tool Calls:");
-      for (let i = 0; i < extractedToolCalls.length; i++) {
-        const toolCall = extractedToolCalls[i];
-        console.log(`  [${i + 1}] ${toolCall.tool}`);
-        console.log(`      Parameters: ${JSON.stringify(toolCall.parameters, null, 2)}`);
-        console.log("");
-      }
-    }
-    
-    // Log usage statistics
-    if (response.usage) {
-      console.log(`Completion Tokens: ${response.usage.completion_tokens}`);
-      console.log(`Total Tokens: ${response.usage.total_tokens}`);
-    }
-    
-    console.log("===================\n");
-    
-    // If there is content but no tool calls, log a warning
-    if (extractedToolCalls.length === 0 && content && content.trim()) {
-      console.log("⚠️ WARNING: LLM returned content without tool calls");
-      console.log("The LLM should be using the JSON tool call format in code blocks");
-      
-      // Try harder to extract any JSON-like structure - a more forgiving fallback
-      try {
-        // This is a fallback for when the LLM formats JSON incorrectly 
-        // or doesn't use proper code blocks
-        const jsonPattern = /{[\s\S]*?"tool"[\s\S]*?:[\s\S]*?"[^"]*"[\s\S]*?,[\s\S]*?"parameters"[\s\S]*?:[\s\S]*?{[\s\S]*?}[\s\S]*?}/g;
-        const matches = content.match(jsonPattern);
+      // Extract each tool call
+      for (const toolCall of assistantMessage.tool_calls) {
+        const toolName = toolCall.function.name;
+        console.log(`Tool call from LLM: ${toolName} -> Converted to: ${toolName}`);
         
-        if (matches && matches.length > 0) {
-          console.log("Attempting fallback extraction of tool calls from malformed JSON");
+        // Parse the function arguments
+        let parameters;
+        try {
+          // First clean up the arguments by removing any code block formatting
+          let cleanedArgs = toolCall.function.arguments;
           
-          for (const match of matches) {
-            try {
-              const jsonData = JSON.parse(match);
+          // Clean any markdown code blocks that might be present
+          if (cleanedArgs.includes("```")) {
+            // Extract just the JSON content between code block markers
+            const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g;
+            const match = codeBlockRegex.exec(cleanedArgs);
+            if (match && match[1]) {
+              cleanedArgs = match[1].trim();
+            } else {
+              // If regex didn't find code blocks but they exist, use a simpler approach
+              cleanedArgs = cleanedArgs.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+            }
+            console.log("Removed code block formatting from arguments");
+          }
+          
+          // Now try to parse the cleaned arguments
+          parameters = JSON.parse(cleanedArgs);
+          
+          // Log successful parsing
+          console.log("Successfully parsed tool parameters");
+        } catch (parseError) {
+          console.log(`Error parsing tool parameters: ${parseError}`);
+          
+          // Special handling for malformed JSON - attempt to clean and extract
+          const argsText = toolCall.function.arguments;
+          
+          // Try to detect if there's a markdown code block present
+          if (argsText.includes("```json") || argsText.includes("```")) {
+            console.log("Detected code block in arguments - attempting cleanup");
+            
+            // Remove code block formatting first
+            const cleanedArgs = argsText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+            
+            // Extract the JSON object/array
+            const jsonStart = Math.max(cleanedArgs.indexOf("{"), cleanedArgs.indexOf("["));
+            const jsonEnd = Math.max(cleanedArgs.lastIndexOf("}"), cleanedArgs.lastIndexOf("]"));
+            
+            if (jsonStart >= 0 && jsonEnd >= 0) {
+              const extractedJson = cleanedArgs.substring(jsonStart, jsonEnd + 1);
               
-              if (jsonData.tool && typeof jsonData.parameters === 'object') {
-                console.log(`Fallback extraction: Found tool call for ${jsonData.tool}`);
+              try {
+                // Try to parse the extracted content
+                const extractedParams = JSON.parse(extractedJson);
                 
-                // Check for duplicates before adding
-                const signature = `${jsonData.tool}:${JSON.stringify(jsonData.parameters)}`;
-                if (!seenCalls.has(signature)) {
-                  seenCalls.set(signature, true);
-                  extractedToolCalls.push({
-                    id: `fallback_${extractedToolCalls.length + 1}`,
-                    tool: jsonData.tool,
-                    parameters: jsonData.parameters
-                  });
+                // Check if this is a nested tool specification rather than just parameters
+                if (extractedParams.tool && extractedParams.parameters) {
+                  parameters = extractedParams.parameters;
+                  console.log(`Found nested tool call format: ${extractedParams.tool}`);
                 } else {
-                  console.log(`⚠️ Skipping duplicate fallback tool call for ${jsonData.tool}`);
+                  parameters = extractedParams;
+                }
+                
+                console.log("Successfully extracted parameters from code block");
+              } catch (extractError) {
+                console.log(`Error parsing extracted JSON: ${extractError}`);
+                
+                // Last resort - try to find and extract individual parameters
+                try {
+                  // Look for a title in quotes
+                  const titleMatch = cleanedArgs.match(/"title":\s*"([^"]+)"/);
+                  const textMatch = cleanedArgs.match(/"text":\s*"([^"]+)"/);
+                  
+                  parameters = {
+                    title: titleMatch ? titleMatch[1] : "Options",
+                    text: textMatch ? textMatch[1] : "Please select an option:",
+                    reasoning: "Parameters extracted from malformed JSON"
+                  };
+                  
+                  // Try to extract buttons if present
+                  const buttonsMatch = cleanedArgs.match(/"buttons":\s*(\[\s*\{[^\]]+\]\s*)/);
+                  if (buttonsMatch) {
+                    try {
+                      // Try to clean and parse the buttons array
+                      const buttonsStr = buttonsMatch[1].replace(/'/g, '"').trim();
+                      const cleanedButtonsStr = buttonsStr.replace(/,\s*\]$/, ']'); // Fix trailing commas
+                      
+                      const buttons = JSON.parse(cleanedButtonsStr);
+                      if (Array.isArray(buttons)) {
+                        parameters.buttons = buttons;
+                      }
+                    } catch (btnError) {
+                      console.log(`Failed to parse buttons array: ${btnError}`);
+                      // Default buttons
+                      parameters.buttons = [
+                        { text: "Option 1", value: "option1" },
+                        { text: "Option 2", value: "option2" }
+                      ];
+                    }
+                  }
+                  
+                  console.log("Created fallback parameters from text extraction");
+                } catch (fallbackError) {
+                  console.log(`Fallback extraction failed: ${fallbackError}`);
+                  parameters = { 
+                    text: "I couldn't process that correctly. Here are some options:", 
+                    reasoning: "Parameter parsing failed completely" 
+                  };
                 }
               }
-            } catch (e) {
-              console.log(`Fallback extraction failed: ${e.message}`);
+            } else {
+              // Default parameters if JSON boundaries not found
+              parameters = { 
+                text: "Here are some options:", 
+                reasoning: "Failed to find valid JSON in the tool call" 
+              };
             }
+          } else {
+            // No code blocks, but still failed to parse
+            parameters = { 
+              text: "Here are some options:", 
+              reasoning: "Parameter parsing failed" 
+            };
           }
         }
-      } catch (fallbackError) {
-        console.log(`Fallback extraction error: ${fallbackError.message}`);
+        
+        // Always ensure there's a reasoning parameter
+        if (!parameters.reasoning) {
+          parameters.reasoning = "Auto-generated reasoning for tool call";
+        }
+        
+        toolCalls.push({
+          tool: toolName,
+          parameters
+        });
+      }
+      
+      console.log(`Successfully extracted ${toolCalls.length} tool calls from native format`);
+      return { toolCalls };
+    } else {
+      // Handle case where tool calls aren't present
+      console.log("No tool_calls found in response. Checking for content to use as postMessage");
+      
+      // Default to a postMessage with the content
+      if (assistantMessage.content) {
+        return {
+          toolCalls: [{
+            tool: 'postMessage',
+            parameters: {
+              text: assistantMessage.content,
+              reasoning: "Converting regular message to tool call"
+            }
+          }]
+        };
+      } else {
+        throw new Error('No content or tool calls found in response');
       }
     }
-    
-    // Return the processed data
-    return {
-      toolCalls: extractedToolCalls,
-      content,
-      model: response.model
-    };
   } catch (error) {
-    logError('Error parsing tool call from LLM response', error);
-    return { toolCalls: [], content: '' };
+    console.log(`Error parsing tool call: ${error.message}`);
+    throw error;
   }
+}
+
+/**
+ * Processes parameters that may be JSON strings but should be objects/arrays
+ * @param {Object} parameters - The parameters object from the LLM
+ * @param {string} toolName - The name of the tool being called
+ * @returns {Object} - The processed parameters
+ */
+function processJsonStringParameters(parameters, toolName) {
+    if (!parameters) return parameters;
+    
+    // Clone the parameters to avoid modifying the original
+    const processedParams = {...parameters};
+    
+    // Process each parameter that might be a JSON string but should be an object/array
+    Object.keys(processedParams).forEach(paramName => {
+        const value = processedParams[paramName];
+        
+        // Only process string values that look like JSON arrays or objects
+        if (typeof value === 'string' && 
+            ((value.startsWith('[') && value.endsWith(']')) || 
+             (value.startsWith('{') && value.endsWith('}')))
+           ) {
+            try {
+                // Common parameter names that should be arrays or objects
+                const arrayParams = ['buttons', 'options', 'fields', 'elements', 'items'];
+                const objectParams = ['metadata', 'context', 'config'];
+                
+                // Check if we should attempt to parse this parameter
+                if (arrayParams.includes(paramName) || 
+                    objectParams.includes(paramName) ||
+                    paramName.endsWith('List') || 
+                    paramName.endsWith('Array') ||
+                    paramName.endsWith('Object') ||
+                    paramName.endsWith('Map')) {
+                    
+                    console.log(`Attempting to parse parameter "${paramName}" from JSON string to object/array`);
+                    processedParams[paramName] = JSON.parse(value);
+                    console.log(`Successfully parsed "${paramName}" to ${Array.isArray(processedParams[paramName]) ? 'array' : 'object'}`);
+                }
+            } catch (error) {
+                console.log(`Error parsing parameter "${paramName}": ${error.message}`);
+            }
+        }
+    });
+    
+    // Tool-specific handling for special cases
+    switch (toolName) {
+        case 'createButtonMessage':
+            if (typeof processedParams.buttons === 'string') {
+                try {
+                    console.log('Parsing buttons parameter from JSON string to array');
+                    processedParams.buttons = JSON.parse(processedParams.buttons);
+                } catch (error) {
+                    console.log(`Error parsing buttons parameter: ${error.message}`);
+                }
+            }
+            break;
+            
+        case 'updateMessage':
+            // Handle fields parameter for updateMessage
+            if (typeof processedParams.fields === 'string') {
+                try {
+                    console.log('Parsing fields parameter from JSON string to array');
+                    processedParams.fields = JSON.parse(processedParams.fields);
+                } catch (error) {
+                    console.log(`Error parsing fields parameter: ${error.message}`);
+                }
+            }
+            break;
+            
+        case 'createEmojiVote':
+            // Handle options parameter for createEmojiVote
+            if (typeof processedParams.options === 'string') {
+                try {
+                    console.log('Parsing options parameter from JSON string to array');
+                    processedParams.options = JSON.parse(processedParams.options);
+                } catch (error) {
+                    console.log(`Error parsing options parameter: ${error.message}`);
+                }
+            }
+            break;
+            
+        // Add other tools as needed
+    }
+    
+    return processedParams;
 }
 
 /**
@@ -830,11 +1018,47 @@ function getAvailableTools() {
         required.push(paramName);
       }
       
-      // Add as property (simple string type for now)
-      properties[paramName] = {
-        type: 'string',
-        description: description
-      };
+      // Determine if this parameter should be an array or object based on name and description
+      let paramType = 'string';
+      let paramFormat = null;
+      
+      // Check if parameter is likely an array based on name or description
+      if (paramName === 'buttons' || 
+          paramName === 'options' || 
+          paramName === 'fields' || 
+          paramName === 'elements' || 
+          paramName === 'items' ||
+          (description && description.toLowerCase().includes('array'))) {
+        paramType = 'array';
+      }
+      // Check if parameter is likely an object based on name or description
+      else if (paramName === 'metadata' || 
+               paramName === 'context' || 
+               paramName === 'config' ||
+               (description && description.toLowerCase().includes('object'))) {
+        paramType = 'object';
+      }
+      
+      // Create the parameter definition with appropriate type
+      if (paramType === 'array') {
+        properties[paramName] = {
+          type: 'array',
+          description: description,
+          items: {
+            type: 'object'
+          }
+        };
+      } else if (paramType === 'object') {
+        properties[paramName] = {
+          type: 'object',
+          description: description
+        };
+      } else {
+        properties[paramName] = {
+          type: 'string',
+          description: description
+        };
+      }
     });
     
     // Add reasoning parameter to all tools
@@ -867,5 +1091,6 @@ function getAvailableTools() {
 }
 
 module.exports = {
-  getNextAction
-}; 
+  getNextAction,
+  processJsonStringParameters
+};

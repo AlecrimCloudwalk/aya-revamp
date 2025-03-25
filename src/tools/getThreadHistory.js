@@ -16,8 +16,9 @@ async function getThreadHistory(args = {}, threadState) {
       limit = 20
     } = args;
     
-    // Get required context info
-    const { channelId, threadTs, threadStats } = threadState.context;
+    // Get required context info from metadata
+    const context = threadState.getMetadata('context');
+    const { channelId, threadTs, threadStats } = context || {};
     
     // Verify we have the necessary context
     if (!channelId) {
@@ -110,7 +111,9 @@ async function getThreadHistory(args = {}, threadState) {
       }
       
       // Set mayNeedHistory to false since we've now loaded the history
-      threadState.context.mayNeedHistory = false;
+      if (context) {
+        context.mayNeedHistory = false;
+      }
     }
     
     // Return a summary of what we did along with thread statistics
