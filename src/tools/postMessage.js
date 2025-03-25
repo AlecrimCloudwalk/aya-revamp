@@ -70,37 +70,50 @@ async function postMessage(args, threadState) {
     // Get Slack client
     const slackClient = getSlackClient();
     
-    // Format the message with our formatting helper
-    const formattedMessage = formatSlackMessage({
-      title,
-      text,
-      color
-    });
-    
-    // Ensure message has content - this is critical
-    // If formatSlackMessage failed to generate blocks or attachments, create a simple text attachment
-    if (!formattedMessage.blocks?.length && !formattedMessage.attachments?.length) {
-      // Create a simple attachment with the text
-      formattedMessage.attachments = [{
-        color: color || 'good',
-        text: text || " ", // Use space if no text is provided
-        fallback: text || title || "Message from bot"
-      }];
+    // Check if blocks are provided directly, and handle them specially
+    let messageOptions;
+    if (args.blocks) {
+      console.log('Direct blocks provided, handling specially');
+      messageOptions = handleDirectBlocks(args, channelId);
+    } else {
+      // Format the message with our formatting helper
+      const formattedMessage = formatSlackMessage({
+        title,
+        text,
+        color,
+        subtitle: args.subtitle,
+        fields: args.fields,
+        actions: args.actions,
+        sections: args.sections,
+        elements: args.elements,
+        attachments: args.attachments
+      });
       
-      // Remove the text field to avoid duplication
-      formattedMessage.text = " ";
+      // Ensure message has content - this is critical
+      // If formatSlackMessage failed to generate blocks or attachments, create a simple text attachment
+      if (!formattedMessage.blocks?.length && !formattedMessage.attachments?.length) {
+        // Create a simple attachment with the text
+        formattedMessage.attachments = [{
+          color: color || 'good',
+          text: text || "", // Use space if no text is provided
+          fallback: text || title || "Message from bot"
+        }];
+        
+        // Remove the text field to avoid duplication
+        formattedMessage.text = "";
+      }
+      
+      // Prepare message options
+      messageOptions = {
+        channel: channelId,
+        ...formattedMessage
+      };
     }
-    
-    // Prepare message options
-    const messageOptions = {
-      channel: channelId,
-      ...formattedMessage
-    };
     
     // Always set text to a space character if we have blocks or attachments
     // This avoids duplication while still meeting Slack's requirement for text
     if (messageOptions.blocks?.length > 0 || messageOptions.attachments?.length > 0) {
-      messageOptions.text = " "; // Space character
+      messageOptions.text = messageOptions.text || ""; // Space character if not already set
     }
     
     // Add thread_ts if provided or from thread context
@@ -258,5 +271,7 @@ function handleDirectBlocks(args, channel) {
 }
 
 module.exports = {
-  postMessage
+  postMessage,
+  formatMessageWithAbstraction,
+  handleDirectBlocks
 }; 

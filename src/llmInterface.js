@@ -675,7 +675,10 @@ IMPORTANT: ALWAYS include a "tool" field and a "parameters" object with a "reaso
 DO NOT use any other format for tool calls. ONLY use the format shown above.
 
 MESSAGE FORMATTING GUIDELINES:
-Create well-formatted messages using these abstracted elements instead of raw Slack blocks:
+You have two ways to format messages:
+
+1. USING ABSTRACTED FORMATTING ELEMENTS:
+Create well-formatted messages using these abstracted elements:
 - title: Add a main heading to your message
 - text: Your main message content with markdown support
 - subtitle: Optional smaller text below the title
@@ -690,6 +693,38 @@ Create well-formatted messages using these abstracted elements instead of raw Sl
   * { type: 'context', text: 'Additional information' }
 - fields: For structured data as [{ title: 'Field name', value: 'Field value' }]
 - actions: For basic buttons without tracking as [{ text: 'Button Text', value: 'button_value' }]
+
+2. USING DIRECT SLACK BLOCKS (RECOMMENDED):
+You can pass Slack Block Kit blocks directly for more control:
+\`\`\`json
+{
+  "tool": "postMessage",
+  "parameters": {
+    "blocks": [
+      {
+        "type": "header",
+        "text": {
+          "type": "plain_text",
+          "text": "Your Header",
+          "emoji": true
+        }
+      },
+      {
+        "type": "divider"
+      },
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "*Bold text* and _italic text_ and \`code\`"
+        }
+      }
+    ],
+    "text": "Fallback text for notifications",
+    "reasoning": "Explaining why you're sending this message"
+  }
+}
+\`\`\`
 
 EXAMPLES OF CORRECT TOOL USAGE SEQUENCE:
 
