@@ -34,7 +34,7 @@ npm start
 
 ## Message Formatting
 
-The bot supports rich text formatting for messages posted to Slack. There are two primary ways to create formatted messages:
+The bot supports rich text formatting for messages posted to Slack. There are three primary ways to create formatted messages:
 
 ### 1. Rich Text with Markers (Recommended)
 
@@ -121,6 +121,46 @@ Buttons, fields, and images can be added directly via parameters:
 }
 ```
 
+### 3. Advanced Layout Components (New)
+
+The bot now supports sophisticated layout components for complex data presentation:
+
+```javascript
+{
+  "tool": "postMessage",
+  "parameters": {
+    "title": "Project Status Dashboard",
+    "text": "Here's the current status of our project.",
+    "color": "blue",
+    "table": {
+      "headers": ["Task", "Owner", "Status"],
+      "rows": [
+        ["API Integration", "John", "In Progress"],
+        ["Frontend Design", "Sarah", "Completed"],
+        ["Testing", "Michael", "Not Started"]
+      ]
+    },
+    "timeline": [
+      {
+        "title": "Planning",
+        "description": "Project kickoff and requirements gathering",
+        "status": "completed"
+      },
+      {
+        "title": "Development",
+        "description": "Building core features",
+        "status": "current"
+      },
+      {
+        "title": "Testing",
+        "description": "Quality assurance",
+        "status": "pending"
+      }
+    ]
+  }
+}
+```
+
 ### Implementation Note
 
 Messages are constructed using Slack's Block Kit. The blocks are placed inside attachments along with the color property to ensure the vertical colored bar appears with the content in Slack messages.
@@ -148,17 +188,38 @@ Messages are constructed using Slack's Block Kit. The blocks are placed inside a
 }
 ```
 
-#### Event Notification:
+#### Project Dashboard with Advanced Formatting:
 
 ```javascript
 {
   "tool": "postMessage",
   "parameters": {
-    "text": "# Team Event: Summer Picnic\n\nJoin us for a team picnic this Friday at Central Park.\n\n> Please RSVP by Thursday",
-    "color": "#FF9900",
-    "buttons": [
-      { "text": "RSVP Yes", "style": "primary" },
-      "RSVP No"
+    "title": "Project Dashboard",
+    "richHeader": {
+      "text": "Q2 Marketing Campaign",
+      "emoji": "rocket"
+    },
+    "color": "#0078D7",
+    "columns": [
+      "*Project Overview*\nA comprehensive marketing campaign for our new product launch.",
+      "*Resource Allocation*\nMarketing: 45%\nDesign: 30%\nDevelopment: 25%"
+    ],
+    "accordion": [
+      {
+        "title": "Campaign Goals",
+        "content": "• Increase brand awareness\n• Generate qualified leads\n• Drive product adoption"
+      },
+      {
+        "title": "Timeline & Milestones",
+        "content": "• Apr 15: Strategy finalization\n• May 1: Content creation\n• May 15: Campaign launch"
+      }
+    ],
+    "elements": [
+      {
+        "type": "info",
+        "title": "Next Team Meeting",
+        "text": "Our next planning meeting is scheduled for Friday at 2 PM."
+      }
     ]
   }
 }
@@ -173,6 +234,17 @@ This bot supports a rich set of formatting options for Slack messages:
 - **Structured Data** - Tables, multi-column layouts
 - **Visual Indicators** - Timelines, accordions, info/warning/error/success alerts
 - **Custom Layouts** - Rich headers with emoji or icons
+
+### Advanced Layout Components
+
+The bot now supports these sophisticated layout components:
+
+- **Tables** - Display tabular data with column headers and rows
+- **Multi-Column Layouts** - Present information in side-by-side columns
+- **Accordion Sections** - Collapsible sections for organizing complex information
+- **Timelines** - Visual representations of sequential processes or status
+- **Rich Headers** - Headers with emoji or icon integration
+- **Alert Blocks** - Styled blocks for different types of alerts (info, warning, error, success)
 
 To test these capabilities:
 

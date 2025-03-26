@@ -684,13 +684,13 @@ function createAlertBlock(alertData, alertType = 'warning') {
 }
 
 /**
- * Converts an array of simplified block definitions to proper Block Kit format
+ * Convert simplified block formats to Slack's Block Kit format
  * 
- * @param {Array} simpleBlocks - Array of simplified block definitions
- * @returns {Array} - Array of properly formatted Block Kit blocks
+ * @param {Array} simpleBlocks - Array of simplified blocks
+ * @returns {Array} - Array of Block Kit blocks
  */
 function convertSimpleBlocks(simpleBlocks) {
-  if (!simpleBlocks || !Array.isArray(simpleBlocks)) {
+  if (!Array.isArray(simpleBlocks)) {
     return [];
   }
   
@@ -700,17 +700,19 @@ function convertSimpleBlocks(simpleBlocks) {
     let blockKitBlock = null;
     
     if (typeof block === 'string') {
-      // If block is just a string, treat it as a section with text
-      blockKitBlock = createSection(block);
-    } else if (block && typeof block === 'object') {
-      // Process based on block type
-      switch (block.type) {
+      // If it's just a string, create a simple section with the text
+      blockKitBlock = {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: block
+        }
+      };
+    } else if (block && typeof block === 'object' && block.type) {
+      // Handle different block types
+      switch (block.type.toLowerCase()) {
         case 'section':
           blockKitBlock = createSectionBlock(block);
-          break;
-          
-        case 'divider':
-          blockKitBlock = createDivider();
           break;
           
         case 'context':
@@ -729,11 +731,19 @@ function convertSimpleBlocks(simpleBlocks) {
           blockKitBlock = createImageBlock(block);
           break;
           
+        case 'divider':
+          blockKitBlock = { type: 'divider' };
+          break;
+          
         default:
-          // For unknown types, try to use it directly if it has a type property
-          if (block.type) {
-            blockKitBlock = block;
-          }
+          // Unknown block type - create a section with stringified content
+          blockKitBlock = {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `Unknown block type: ${JSON.stringify(block)}`
+            }
+          };
       }
     }
     
@@ -746,28 +756,28 @@ function convertSimpleBlocks(simpleBlocks) {
 }
 
 /**
- * Creates a section block with text and optional fields/accessory
+ * Creates a section block from a simplified definition
  * 
- * @param {Object} block - Section block configuration
- * @param {string} block.text - Text for the section
- * @param {Array} block.fields - Optional fields for the section
- * @param {Object} block.accessory - Optional accessory for the section
- * @returns {Object} - Formatted section block
+ * @param {Object} block - Simplified section block
+ * @returns {Object} - Slack Block Kit section block
  */
 function createSectionBlock(block) {
-  const sectionBlock = {
-    type: 'section'
-  };
+  // Create base section
+  const sectionBlock = { type: 'section' };
   
-  // Handle text
+  // Add text if provided
   if (block.text) {
-    sectionBlock.text = {
-      type: block.text_type || 'mrkdwn',
-      text: block.text
-    };
+    if (typeof block.text === 'string') {
+      sectionBlock.text = {
+        type: 'mrkdwn',
+        text: block.text
+      };
+    } else if (typeof block.text === 'object') {
+      sectionBlock.text = block.text;
+    }
   }
   
-  // Handle fields
+  // Add fields if provided
   if (block.fields && Array.isArray(block.fields)) {
     sectionBlock.fields = block.fields.map(field => {
       if (typeof field === 'string') {
@@ -775,19 +785,14 @@ function createSectionBlock(block) {
           type: 'mrkdwn',
           text: field
         };
-      } else if (field && typeof field === 'object') {
-        return {
-          type: field.type || 'mrkdwn',
-          text: field.text || '',
-          emoji: field.type === 'plain_text' ? true : undefined
-        };
+      } else {
+        return field;
       }
-      return null;
-    }).filter(Boolean);
+    });
   }
   
-  // Handle accessory
-  if (block.accessory && typeof block.accessory === 'object') {
+  // Add accessory if provided
+  if (block.accessory) {
     sectionBlock.accessory = block.accessory;
   }
   
@@ -795,109 +800,105 @@ function createSectionBlock(block) {
 }
 
 /**
- * Creates a context block with elements
+ * Creates a context block from a simplified definition
  * 
- * @param {Object} block - Context block configuration
- * @param {Array} block.elements - Elements for the context block
- * @returns {Object} - Formatted context block
+ * @param {Object} block - Simplified context block
+ * @returns {Object} - Slack Block Kit context block
  */
 function createContextBlock(block) {
-  const contextBlock = {
-    type: 'context',
-    elements: []
-  };
+  // Create base context block
+  const contextBlock = { type: 'context', elements: [] };
   
-  // Handle elements
+  // Add elements if provided
   if (block.elements && Array.isArray(block.elements)) {
-    contextBlock.elements = block.elements.map(element => {
+    for (const element of block.elements) {
       if (typeof element === 'string') {
-        return {
+        contextBlock.elements.push({
           type: 'mrkdwn',
           text: element
-        };
-      } else if (element && typeof element === 'object') {
-        if (element.type === 'image') {
-          return {
-            type: 'image',
-            image_url: element.image_url || element.url,
-            alt_text: element.alt_text || 'Image'
-          };
-        } else {
-          return {
-            type: element.type || 'mrkdwn',
-            text: element.text || '',
-            emoji: element.type === 'plain_text' ? true : undefined
-          };
-        }
+        });
+      } else {
+        contextBlock.elements.push(element);
       }
-      return null;
-    }).filter(Boolean);
+    }
   } else if (block.text) {
-    // Simplified case - just a text string
-    contextBlock.elements = [
-      {
-        type: 'mrkdwn',
-        text: block.text
-      }
-    ];
+    // If no elements but text is provided, create a single text element
+    const text = typeof block.text === 'string' ? block.text : JSON.stringify(block.text);
+    contextBlock.elements.push({
+      type: 'mrkdwn',
+      text
+    });
   }
   
   return contextBlock;
 }
 
 /**
- * Creates an actions block with interactive elements
+ * Creates an actions block from a simplified definition
  * 
- * @param {Object} block - Actions block configuration
- * @param {Array} block.elements - Elements for the actions block
- * @returns {Object} - Formatted actions block
+ * @param {Object} block - Simplified actions block
+ * @returns {Object} - Slack Block Kit actions block
  */
 function createActionsBlock(block) {
-  const actionsBlock = {
-    type: 'actions',
-    elements: []
-  };
+  // Create base actions block
+  const actionsBlock = { type: 'actions', elements: [] };
   
-  // Add block_id if provided
-  if (block.block_id) {
-    actionsBlock.block_id = block.block_id;
-  }
-  
-  // Handle elements
+  // Add elements if provided
   if (block.elements && Array.isArray(block.elements)) {
-    actionsBlock.elements = block.elements.map(element => {
-      if (!element || typeof element !== 'object') {
-        return null;
+    for (const element of block.elements) {
+      if (typeof element === 'string') {
+        // Simple button with just text
+        actionsBlock.elements.push({
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: element,
+            emoji: true
+          },
+          value: element.toLowerCase().replace(/\s+/g, '_')
+        });
+      } else if (element && typeof element === 'object' && element.type) {
+        // Different element types
+        switch (element.type.toLowerCase()) {
+          case 'button':
+            actionsBlock.elements.push(createButtonElement(element));
+            break;
+            
+          case 'datepicker':
+            actionsBlock.elements.push(createDatepickerElement(element));
+            break;
+            
+          case 'overflow':
+            actionsBlock.elements.push(createOverflowElement(element));
+            break;
+            
+          case 'select':
+          case 'static_select':
+            actionsBlock.elements.push(createSelectElement(element));
+            break;
+            
+          default:
+            // Unknown element type - add as is
+            actionsBlock.elements.push(element);
+        }
+      } else {
+        // Unknown element format - add as is
+        actionsBlock.elements.push(element);
       }
-      
-      // Process specific element types
-      switch (element.type) {
-        case 'button':
-          return createButtonElement(element);
-        case 'datepicker':
-          return createDatepickerElement(element);
-        case 'overflow':
-          return createOverflowElement(element);
-        case 'select':
-        case 'static_select':
-          return createSelectElement(element);
-        default:
-          // For other types, use directly if it has a type property
-          return element.type ? element : null;
-      }
-    }).filter(Boolean);
+    }
   }
   
   return actionsBlock;
 }
 
 /**
- * Creates a button element for actions block
+ * Creates a button element from a simplified definition
  * 
- * @param {Object} element - Button element configuration
- * @returns {Object} - Formatted button element
+ * @param {Object} element - Simplified button element
+ * @returns {Object} - Slack Block Kit button element
  */
 function createButtonElement(element) {
+  // Create base button element
   const buttonElement = {
     type: 'button',
     text: {
@@ -907,166 +908,237 @@ function createButtonElement(element) {
     }
   };
   
-  // Add optional properties
+  // Add value if provided
+  if (element.value) {
+    buttonElement.value = element.value;
+  } else {
+    buttonElement.value = (element.text || 'Button').toLowerCase().replace(/\s+/g, '_');
+  }
+  
+  // Add action_id if provided
   if (element.action_id) {
     buttonElement.action_id = element.action_id;
   }
   
-  if (element.value) {
-    buttonElement.value = element.value;
-  }
-  
+  // Add URL if provided
   if (element.url) {
     buttonElement.url = element.url;
   }
   
+  // Add style if provided
   if (element.style && ['primary', 'danger'].includes(element.style)) {
     buttonElement.style = element.style;
+  }
+  
+  // Add confirm dialog if provided
+  if (element.confirm) {
+    buttonElement.confirm = element.confirm;
   }
   
   return buttonElement;
 }
 
 /**
- * Creates a datepicker element for actions block
+ * Creates a datepicker element from a simplified definition
  * 
- * @param {Object} element - Datepicker element configuration
- * @returns {Object} - Formatted datepicker element
+ * @param {Object} element - Simplified datepicker element
+ * @returns {Object} - Slack Block Kit datepicker element
  */
 function createDatepickerElement(element) {
+  // Create base datepicker element
   const datepickerElement = {
     type: 'datepicker',
     action_id: element.action_id || 'datepicker_action'
   };
   
-  // Add optional properties
+  // Add placeholder if provided
+  if (element.placeholder) {
+    datepickerElement.placeholder = {
+      type: 'plain_text',
+      text: element.placeholder,
+      emoji: true
+    };
+  }
+  
+  // Add initial date if provided
   if (element.initial_date) {
     datepickerElement.initial_date = element.initial_date;
   }
   
-  if (element.placeholder) {
-    datepickerElement.placeholder = {
-      type: 'plain_text',
-      text: typeof element.placeholder === 'string' ? element.placeholder : 'Select a date',
-      emoji: true
-    };
+  // Add confirm dialog if provided
+  if (element.confirm) {
+    datepickerElement.confirm = element.confirm;
   }
   
   return datepickerElement;
 }
 
 /**
- * Creates an overflow menu element for actions block
+ * Creates an overflow element from a simplified definition
  * 
- * @param {Object} element - Overflow element configuration
- * @returns {Object} - Formatted overflow element
+ * @param {Object} element - Simplified overflow element
+ * @returns {Object} - Slack Block Kit overflow element
  */
 function createOverflowElement(element) {
+  // Create base overflow element
   const overflowElement = {
     type: 'overflow',
     action_id: element.action_id || 'overflow_action'
   };
   
-  // Add options
+  // Add options if provided
   if (element.options && Array.isArray(element.options)) {
     overflowElement.options = element.options.map(option => {
-      return {
-        text: {
-          type: 'plain_text',
-          text: option.text || '',
-          emoji: true
-        },
-        value: option.value || option.text || ''
-      };
+      if (typeof option === 'string') {
+        return {
+          text: {
+            type: 'plain_text',
+            text: option,
+            emoji: true
+          },
+          value: option.toLowerCase().replace(/\s+/g, '_')
+        };
+      } else {
+        return option;
+      }
     });
+  }
+  
+  // Add confirm dialog if provided
+  if (element.confirm) {
+    overflowElement.confirm = element.confirm;
   }
   
   return overflowElement;
 }
 
 /**
- * Creates a select menu element for actions block
+ * Creates a select element from a simplified definition
  * 
- * @param {Object} element - Select element configuration
- * @returns {Object} - Formatted select element
+ * @param {Object} element - Simplified select element
+ * @returns {Object} - Slack Block Kit select element
  */
 function createSelectElement(element) {
+  // Create base select element
   const selectElement = {
     type: 'static_select',
     action_id: element.action_id || 'select_action'
   };
   
-  // Add placeholder
+  // Add placeholder if provided
   if (element.placeholder) {
     selectElement.placeholder = {
       type: 'plain_text',
-      text: typeof element.placeholder === 'string' ? element.placeholder : 'Select an option',
+      text: element.placeholder,
       emoji: true
     };
   }
   
-  // Add options
+  // Add options if provided
   if (element.options && Array.isArray(element.options)) {
     selectElement.options = element.options.map(option => {
-      return {
-        text: {
-          type: 'plain_text',
-          text: option.text || '',
-          emoji: true
-        },
-        value: option.value || option.text || ''
-      };
+      if (typeof option === 'string') {
+        return {
+          text: {
+            type: 'plain_text',
+            text: option,
+            emoji: true
+          },
+          value: option.toLowerCase().replace(/\s+/g, '_')
+        };
+      } else {
+        return option;
+      }
     });
+  }
+  
+  // Add option groups if provided
+  if (element.option_groups && Array.isArray(element.option_groups)) {
+    selectElement.option_groups = element.option_groups;
+  }
+  
+  // Add initial option if provided
+  if (element.initial_option) {
+    selectElement.initial_option = element.initial_option;
+  }
+  
+  // Add confirm dialog if provided
+  if (element.confirm) {
+    selectElement.confirm = element.confirm;
   }
   
   return selectElement;
 }
 
 /**
- * Creates a header block
+ * Creates a header block from a simplified definition
  * 
- * @param {Object} block - Header block configuration
- * @param {string} block.text - Text for the header
- * @returns {Object} - Formatted header block
+ * @param {Object} block - Simplified header block
+ * @returns {Object} - Slack Block Kit header block
  */
 function createHeaderBlock(block) {
-  return {
-    type: 'header',
-    text: {
-      type: 'plain_text',
-      text: block.text || '',
-      emoji: true
+  // Create header block
+  const headerBlock = { type: 'header' };
+  
+  // Add text if provided
+  if (block.text) {
+    if (typeof block.text === 'string') {
+      headerBlock.text = {
+        type: 'plain_text',
+        text: block.text,
+        emoji: true
+      };
+    } else if (typeof block.text === 'object') {
+      headerBlock.text = {
+        ...block.text,
+        type: 'plain_text',
+        emoji: true
+      };
     }
-  };
+  }
+  
+  return headerBlock;
 }
 
 /**
- * Creates an image block
+ * Creates an image block from a simplified definition
  * 
- * @param {Object} block - Image block configuration
- * @param {string} block.image_url - URL of the image
- * @param {string} block.alt_text - Alt text for the image
- * @returns {Object} - Formatted image block
+ * @param {Object} block - Simplified image block
+ * @returns {Object} - Slack Block Kit image block
  */
 function createImageBlock(block) {
-  const imageBlock = {
-    type: 'image',
-    image_url: block.image_url || block.url,
-    alt_text: block.alt_text || 'Image'
-  };
+  // Create image block
+  const imageBlock = { type: 'image' };
+  
+  // Add image URL if provided
+  if (block.url || block.image_url) {
+    imageBlock.image_url = block.url || block.image_url;
+  }
+  
+  // Add alt text if provided
+  if (block.alt_text || block.alt) {
+    imageBlock.alt_text = block.alt_text || block.alt;
+  } else {
+    imageBlock.alt_text = 'Image';
+  }
   
   // Add title if provided
   if (block.title) {
-    imageBlock.title = {
-      type: 'plain_text',
-      text: block.title,
-      emoji: true
-    };
+    if (typeof block.title === 'string') {
+      imageBlock.title = {
+        type: 'plain_text',
+        text: block.title,
+        emoji: true
+      };
+    } else if (typeof block.title === 'object') {
+      imageBlock.title = block.title;
+    }
   }
   
   return imageBlock;
 }
 
+// Export utility functions
 module.exports = {
   formatSlackMessage,
   createSection,

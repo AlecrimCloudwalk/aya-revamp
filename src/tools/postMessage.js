@@ -1,5 +1,5 @@
 // Posts messages to Slack
-const { formatSlackMessage, convertSimpleBlocks } = require('../slackFormat.js');
+const { formatSlackMessage } = require('../slackFormat.js');
 const { logError } = require('../errors.js');
 const { getSlackClient } = require('../slackClient.js');
 
