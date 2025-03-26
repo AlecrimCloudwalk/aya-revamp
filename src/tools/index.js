@@ -14,17 +14,36 @@ const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
 const toolRegistry = {
   postMessage: {
     name: 'postMessage',
-    description: 'Posts a message to Slack with rich formatting options',
+    description: 'Posts a message to Slack with rich formatting options. Always use this tool for all user responses. Supports markdown-style formatting and easy-to-use interactive elements.',
     function: postMessage,
     parameters: {
-      channel: 'Channel ID to post the message to',
-      blocks: 'Slack Block Kit formatted message content',
-      text: 'Plain text fallback message',
-      threadTs: 'Thread timestamp to reply in a thread (optional)',
-      attachments: 'Message attachments (optional)',
-      color: 'Color for the message sidebar (optional)'
+      title: 'Main message title displayed as a header',
+      text: 'Main message content with rich formatting. Supports Slack markdown (*bold*, _italic_, `code`) and special markers: # Header, --- for dividers, > for context blocks, !image:url:alt_text',
+      color: 'Color for the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
+      buttons: 'Array of button definitions - can be simple strings or objects with text, style ("primary"/"danger"), url, or value properties',
+      fields: 'Two-column layout items as array of {title, value} objects or simple strings',
+      images: 'Array of image URLs as strings or {url, alt_text} objects to include in the message',
+      blocks: 'For advanced usage: array of simplified block definitions for complex layouts'
     },
-    isAsync: false
+    isAsync: false,
+    examples: [
+      {
+        description: 'Basic message with title and text',
+        code: '{ title: "Important Update", text: "Meeting scheduled for tomorrow at 2pm.", color: "#3AA3E3" }'
+      },
+      {
+        description: 'Message with structured data in a table',
+        code: '{ title: "Team Roster", table: { headers: ["Name", "Role"], rows: [["John", "Developer"], ["Sarah", "Designer"]] }, color: "good" }'
+      },
+      {
+        description: 'Interactive message with buttons',
+        code: '{ title: "Action Required", text: "Please select an option:", actions: [{ text: "Approve", value: "approve", style: "primary" }, { text: "Reject", value: "reject", style: "danger" }], color: "#E01E5A" }'
+      },
+      {
+        description: 'Status message with timeline',
+        code: '{ title: "Project Status", timeline: [{ title: "Planning", status: "completed" }, { title: "Development", status: "current" }, { title: "Testing", status: "pending" }], color: "#2EB67D" }'
+      }
+    ]
   },
   finishRequest: {
     name: 'finishRequest',
@@ -53,7 +72,7 @@ const toolRegistry = {
     parameters: {
       title: 'Title of the message',
       text: 'Message text content',
-      color: 'Color of the message sidebar (optional)',
+      color: 'Color of the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
       buttons: 'Array of button objects with text and value properties, e.g. [{text: "Option 1", value: "opt1"}, {text: "Option 2", value: "opt2"}]',
       threadTs: 'Thread timestamp to reply in (optional)',
       callbackId: 'Unique identifier for this set of buttons'
@@ -68,7 +87,7 @@ const toolRegistry = {
       messageTs: 'Timestamp of the message to update',
       title: 'New title for the message',
       text: 'New text content for the message',
-      color: 'Color for the message (optional)',
+      color: 'Color for the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
       fields: 'Array of field objects (optional)',
       actions: 'New array of button objects (optional)',
       removeButtons: 'Whether to remove all buttons (optional)'
@@ -95,7 +114,7 @@ const toolRegistry = {
       title: 'Title of the vote',
       text: 'Vote description/question',
       options: 'Array of emoji voting options with text and emoji properties',
-      color: 'Color of the message sidebar (optional)',
+      color: 'Color of the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
       threadTs: 'Thread timestamp to reply in (optional)'
     },
     isAsync: false
@@ -128,7 +147,8 @@ const getToolsForLLM = () => {
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
-    isAsync: tool.isAsync
+    isAsync: tool.isAsync,
+    examples: tool.examples // Include examples if available
   }));
 };
 

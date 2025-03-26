@@ -4,6 +4,52 @@ const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
 
 /**
+ * Convert named colors to proper hex values
+ * @param {string} color - The color name or hex value
+ * @returns {string} - A properly formatted color value
+ */
+function normalizeColor(color) {
+  // Default to blue if no color specified
+  if (!color) return '#0078D7';
+  
+  // If it's already a hex code with #, return as is
+  if (color.startsWith('#')) return color;
+  
+  // If it's a hex code without #, add it
+  if (color.match(/^[0-9A-Fa-f]{6}$/)) {
+    return `#${color}`;
+  }
+  
+  // Map of named colors to hex values
+  const colorMap = {
+    // Slack's standard colors
+    'good': '#2EB67D',     // Green
+    'warning': '#ECB22E',  // Yellow
+    'danger': '#E01E5A',   // Red
+    
+    // Additional standard colors
+    'blue': '#0078D7',
+    'green': '#2EB67D',
+    'red': '#E01E5A',
+    'orange': '#F2952F', 
+    'purple': '#6B46C1',
+    'cyan': '#00BCD4',
+    'teal': '#008080',
+    'magenta': '#E91E63',
+    'yellow': '#FFEB3B',
+    'pink': '#FF69B4',
+    'brown': '#795548',
+    'black': '#000000',
+    'white': '#FFFFFF',
+    'gray': '#9E9E9E',
+    'grey': '#9E9E9E'
+  };
+  
+  // Return the mapped color or default to blue
+  return colorMap[color.toLowerCase()] || '#0078D7';
+}
+
+/**
  * Creates a message with interactive buttons
  * 
  * @param {Object} args - Arguments for the button message
@@ -26,12 +72,39 @@ async function createButtonMessage(args, threadState) {
       args = args.parameters;
     }
     
+    // Filter out non-standard fields that shouldn't be sent to Slack
+    // This prevents fields like 'reasoning' from being incorrectly included
+    const validFields = [
+      'text', 'title', 'color', 'buttons', 'callbackId', 
+      'actionPrefix', 'threadTs', 'channel'
+    ];
+    
+    const filteredArgs = {};
+    for (const key of validFields) {
+      if (args[key] !== undefined) {
+        filteredArgs[key] = args[key];
+      }
+    }
+    
+    // Log any filtered fields for debugging
+    const filteredKeys = Object.keys(args).filter(key => !validFields.includes(key));
+    if (filteredKeys.length > 0) {
+      console.log(`⚠️ Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
+    }
+    
+    // Use filtered args from now on
+    args = filteredArgs;
+    
     // Extract parameters with validation - use let for variables we'll modify later
     let title = args.title || 'Interactive Message';
     let text = args.text || 'Please select an option';
     let buttons = args.buttons || [];
-    let color = args.color || '#3AA3E3';
+    let color = args.color || 'blue';
     let threadTs = args.threadTs;
+    
+    // Normalize the color value
+    const formattedColor = normalizeColor(color);
+    console.log(`Using color: ${formattedColor}`);
     
     // Validate and log parameters
     console.log(`⚠️ Buttons parameter type: ${typeof buttons}`);
@@ -88,23 +161,42 @@ async function createButtonMessage(args, threadState) {
       // Ensure button has text and value
       return {
         text: button.text || `Option ${index + 1}`,
-        value: button.value || `option${index + 1}`
+        value: button.value || `option${index + 1}`,
+        style: button.style
       };
     });
     
     // Get context from metadata
     const context = threadState.getMetadata('context');
     
-    // Use channel from args, or fall back to context
-    const channelId = args.channel || context?.channelId;
+    // CRITICAL FIX: Ignore any hardcoded channel that doesn't match current context
+    // (This happens when the LLM hallucinates channel IDs)
+    let channelId;
+    if (args.channel && context?.channelId && args.channel !== context.channelId) {
+      // Channel mismatch - log warning and use context channel instead
+      console.log(`⚠️ WARNING: Ignoring mismatched channel ID "${args.channel}" - using context channel "${context.channelId}" instead`);
+      channelId = context.channelId;
+    } else {
+      // Use channel from args, or fall back to context
+      channelId = args.channel || context?.channelId;
+    }
+    
+    // CRITICAL FIX: Ignore any hardcoded threadTs that doesn't match current context
+    // (This happens when the LLM hallucinates thread timestamps)
+    let threadTimestamp;
+    if (args.threadTs && context?.threadTs && args.threadTs !== context.threadTs) {
+      // Thread timestamp mismatch - log warning and use context threadTs instead
+      console.log(`⚠️ WARNING: Ignoring mismatched thread timestamp "${args.threadTs}" - using context timestamp "${context.threadTs}" instead`);
+      threadTimestamp = context.threadTs;
+    } else {
+      // Use threadTs from args, or fall back to context
+      threadTimestamp = args.threadTs || context?.threadTs;
+    }
     
     // Validate channel
     if (!channelId) {
       throw new Error('Channel ID not available in thread context or args');
     }
-    
-    // Get Slack client
-    const slackClient = getSlackClient();
     
     // Check for potential duplicates in the button registry
     if (threadState.buttonRegistry) {
@@ -142,70 +234,11 @@ async function createButtonMessage(args, threadState) {
       }
     }
     
+    // Get Slack client
+    const slackClient = getSlackClient();
+    
     // Generate a random actionPrefix if not provided
     const actionPrefix = args.actionPrefix || `btn_${Date.now().toString()}_${Math.floor(Math.random() * 1000)}`;
-    
-    // Detailed logging for buttons parameter
-    console.log('⚠️ Buttons parameter type:', typeof buttons);
-    if (typeof buttons === 'string') {
-      console.log('⚠️ Buttons parameter is a string, will attempt to parse');
-    } else if (Array.isArray(buttons)) {
-      console.log('⚠️ Buttons parameter is already an array with', buttons.length, 'items');
-    } else {
-      console.log('⚠️ Buttons parameter is neither a string nor an array:', buttons);
-      
-      // Special case - check if the entire args.text is a JSON string that might contain button definitions
-      if (typeof text === 'string' && (text.includes('"buttons"') || text.includes('"tool"'))) {
-        console.log('⚠️ Trying to extract buttons from text parameter');
-        
-        try {
-          // Try to find a JSON object in text that might have buttons
-          const jsonMatches = text.match(/\{[\s\S]*?\}/g);
-          if (jsonMatches && jsonMatches.length > 0) {
-            for (const match of jsonMatches) {
-              try {
-                const parsedJson = JSON.parse(match);
-                
-                // Check if this has buttons or is a nested tool call
-                if (Array.isArray(parsedJson.buttons)) {
-                  console.log('✅ Found buttons array in text parameter JSON');
-                  args.buttons = parsedJson.buttons;
-                  buttons = parsedJson.buttons; // Update our local variable
-                  // Also update title and text if they exist
-                  if (parsedJson.title && !args.title) {
-                    args.title = parsedJson.title;
-                    title = parsedJson.title;
-                  }
-                  if (parsedJson.text && args.text === match) {
-                    args.text = parsedJson.text;
-                    text = parsedJson.text;
-                  }
-                  break;
-                } else if (parsedJson.parameters && Array.isArray(parsedJson.parameters.buttons)) {
-                  console.log('✅ Found nested buttons array in text parameter JSON');
-                  args.buttons = parsedJson.parameters.buttons;
-                  buttons = parsedJson.parameters.buttons; // Update our local variable
-                  // Also update title and text if they exist
-                  if (parsedJson.parameters.title && !args.title) {
-                    args.title = parsedJson.parameters.title;
-                    title = parsedJson.parameters.title;
-                  }
-                  if (parsedJson.parameters.text && args.text === match) {
-                    args.text = parsedJson.parameters.text;
-                    text = parsedJson.parameters.text;
-                  }
-                  break;
-                }
-              } catch (e) {
-                console.log(`Failed to parse potential JSON match: ${e.message}`);
-              }
-            }
-          }
-        } catch (e) {
-          console.log(`Failed to extract buttons from text: ${e.message}`);
-        }
-      }
-    }
     
     // Add callback_id to each button for tracking
     const actionsWithCallbackId = buttons.map((button, index) => {
@@ -229,23 +262,22 @@ async function createButtonMessage(args, threadState) {
       return {
         text: button.text || `Button ${index + 1}`,
         value: button.value || `${index}`,
+        style: button.style,
         action_id: actionId
       };
     });
     
-    // Format the message with buttons
-    // Instead of using formatSlackMessage which puts buttons in attachments,
-    // let's build the blocks directly for better handling of buttons
-    let blocks = [];
+    // Create blocks to be placed inside the attachment
+    const blocks = [];
     
-    // Add header if title is provided
+    // Add title as a section with bold text (not header block)
+    // This matches postMessage.js approach for consistency
     if (title) {
       blocks.push({
-        type: 'header',
+        type: 'section',
         text: {
-          type: 'plain_text',
-          text: title,
-          emoji: true
+          type: 'mrkdwn',
+          text: `*${title}*`
         }
       });
     }
@@ -277,22 +309,24 @@ async function createButtonMessage(args, threadState) {
       }))
     });
     
-    // Create an attachment with the color bar
-    const attachment = {
-      color: color,
-      blocks: blocks,
-      fallback: title || text || "Button message"
-    };
+    // Message structure for Slack API:
+    // 1. empty text field to prevent duplication
+    // 2. blocks go inside the colored attachment
+    // 3. color goes on the attachment
+    // This structure ensures we get the colored vertical bar and no duplicated content
     
     // Prepare message options using attachments for color bar
     const messageOptions = {
       channel: channelId,
-      text: " ",  // Use empty space character instead of duplicating text
-      attachments: [attachment]
+      text: "", // Empty string for fallback, content will be in blocks inside attachment
+      attachments: [{
+        color: formattedColor,
+        blocks: blocks,
+        fallback: title || text || "Button message"
+      }]
     };
     
-    // Add thread_ts if provided or from thread context
-    const threadTimestamp = threadTs || context?.threadTs;
+    // Add thread_ts if we have a valid thread timestamp
     if (threadTimestamp) {
       messageOptions.thread_ts = threadTimestamp;
     }
@@ -305,11 +339,9 @@ async function createButtonMessage(args, threadState) {
       hasAttachments: !!messageOptions.attachments && messageOptions.attachments.length > 0,
       attachmentCount: messageOptions.attachments?.length || 0,
       blockCount: messageOptions.attachments?.[0]?.blocks?.length || 0,
-      buttonCount: messageOptions.attachments?.[0]?.blocks?.find(b => b.type === 'actions')?.elements?.length || 0
+      buttonCount: messageOptions.attachments?.[0]?.blocks?.find(b => b.type === 'actions')?.elements?.length || 0,
+      threadTs: messageOptions.thread_ts || null
     }, null, 2));
-    
-    console.log('BUTTON MESSAGE - Full message to be sent:');
-    console.log(JSON.stringify(messageOptions, null, 2));
     
     // Send the message
     const response = await slackClient.chat.postMessage(messageOptions);
@@ -386,5 +418,6 @@ async function createButtonMessage(args, threadState) {
 }
 
 module.exports = {
-  createButtonMessage
+  createButtonMessage,
+  normalizeColor
 }; 

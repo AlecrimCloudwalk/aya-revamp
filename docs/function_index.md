@@ -58,12 +58,31 @@ This document maintains a comprehensive index of all functions and tools in the 
 - **Purpose**: Provides formatting utilities for Slack messages
 - **Functions**:
   - `formatSlackMessage(options)` - Enhanced formatting with rich elements support
+    - **Key Parameters**:
+      - `title` - Main message title (header)
+      - `text` - Main message content (supports Slack markdown)
+      - `color` - Message color (hex code or predefined colors)
+      - `subtitle` - Smaller text below title
+      - `fields` - Two-column layout items
+      - `actions` - Interactive buttons
+      - `elements` - Rich content elements
+      - `table` - Tabular data display
+      - `columns` - Multi-column layout
+      - `accordion` - Collapsible sections
+      - `timeline` - Progress/status indicators
+      - `richHeader` - Enhanced header with emoji/icon
   - `buildButtons(options)` - Builds formatted button elements
   - `createSection(text)` - Creates a section block with text
   - `createHeader(text)` - Creates a header block
   - `createDivider()` - Creates a divider block
   - `createContext(text)` - Creates a context block with text
-  - `isValidBlock(block)` - Validates if an object is a valid Slack block
+  - `createRichHeader(options)` - Creates a header with icon/emoji
+  - `createTableBlocks(tableData)` - Creates blocks for tabular data
+  - `createColumnBlocks(columnData)` - Creates multi-column layout blocks
+  - `createAccordionBlocks(accordionData)` - Creates collapsible section blocks
+  - `createTimelineBlocks(timelineData)` - Creates timeline/progress blocks
+  - `createInfoBlock(infoData)` - Creates an info notice block
+  - `createAlertBlock(alertData, alertType)` - Creates alert blocks (warning/error/success)
 
 ### `src/config.js`
 - **Purpose**: Manages configuration and environment variables
@@ -88,9 +107,19 @@ This document maintains a comprehensive index of all functions and tools in the 
   - `registerTool(name, description, func, parameters, isAsync)` - Registers a new tool
 
 ### `src/tools/postMessage.js`
-- **Purpose**: Posts messages to Slack
+- **Purpose**: Posts messages to Slack with rich formatting
 - **Functions**:
-  - `postMessage(args, threadState)` - Posts a message to Slack with improved block handling
+  - `postMessage(args, threadState)` - Posts a message to Slack with advanced formatting capabilities
+    - **Advanced Formatting Support**:
+      - Rich headers with emoji/icons
+      - Tabular data display
+      - Multi-column layouts
+      - Collapsible sections (accordion)
+      - Timeline/progress indicators
+      - Alert blocks (info, warning, error, success)
+      - Interactive buttons with confirmations
+  - `formatMessageWithAbstraction(args, channel)` - Formats messages using high-level abstractions
+  - `handleDirectBlocks(args, channel)` - *Deprecated* - Handles direct Block Kit format (use high-level abstractions instead)
   - `processUserMentions(text)` - Processes user mentions in message text
 
 ### `src/tools/finishRequest.js`
