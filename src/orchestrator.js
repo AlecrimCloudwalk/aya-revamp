@@ -1,6 +1,7 @@
 // Orchestrates the flow between Slack, LLM, and tools
 const { getNextAction } = require('./llmInterface.js');
-const { getTool } = require('./tools/index.js');
+const tools = require('./tools/index.js');
+const { getTool } = tools;
 const { logError } = require('./errors.js');
 const { getSlackClient } = require('./slackClient.js');
 const { getThreadState } = require('./threadState.js');
@@ -90,7 +91,40 @@ async function executeTool(toolName, args, threadState) {
 
     try {
         console.log(`📣 Executing tool: ${toolName}`);
-        console.log(`Parameters:`, JSON.stringify(args, null, 2));
+        
+        // STANDARDIZE: Handle reasoning parameter by moving it to the top level
+        // We want reasoning to always be at the top level, not inside parameters
+        let sanitizedArgs = { ...args };
+        
+        // Handle nested tool structure - this happens when the LLM returns 
+        // { "tool": "toolName", "parameters": {...} } inside the parameters
+        if (sanitizedArgs.tool && sanitizedArgs.parameters && sanitizedArgs.tool === toolName) {
+            console.log('Detected nested tool structure, extracting inner parameters');
+            sanitizedArgs = {
+                ...sanitizedArgs.parameters,
+                reasoning: sanitizedArgs.reasoning || sanitizedArgs.parameters.reasoning
+            };
+        }
+        
+        // Check if we have reasoning in both places
+        if (sanitizedArgs.reasoning && 
+            sanitizedArgs.parameters && 
+            sanitizedArgs.parameters.reasoning) {
+            // Keep only the top-level reasoning and remove the parameters.reasoning
+            console.log('Detected duplicate reasoning fields - keeping only top-level reasoning');
+            delete sanitizedArgs.parameters.reasoning;
+        }
+        
+        // If reasoning is only in parameters, move it to the top level
+        if (!sanitizedArgs.reasoning && 
+            sanitizedArgs.parameters && 
+            sanitizedArgs.parameters.reasoning) {
+            sanitizedArgs.reasoning = sanitizedArgs.parameters.reasoning;
+            delete sanitizedArgs.parameters.reasoning;
+            console.log('Moved reasoning from parameters to top level for consistency');
+        }
+        
+        console.log(`Parameters:`, JSON.stringify(sanitizedArgs, null, 2));
         
         const tool = getTool(toolName);
         if (!tool) {
@@ -98,11 +132,12 @@ async function executeTool(toolName, args, threadState) {
         }
         
         // Pre-execution parameter validation and logging
-        logParameterTypes(toolName, args);
+        logParameterTypes(toolName, sanitizedArgs);
 
-        // Pass the entire threadState object to the tool, not just the context
-        const result = await tool(args, threadState);
-        threadState.recordToolExecution(toolName, args, result);
+        // Pass the entire threadState object to the tool
+        // Use the sanitized args with standardized reasoning
+        const result = await tool(sanitizedArgs, threadState);
+        threadState.recordToolExecution(toolName, sanitizedArgs, result);
         return result;
 
     } catch (error) {
@@ -210,8 +245,11 @@ async function processThread(threadState) {
     
     // Add the current user message to our message history if not already present
     if (!userMessageExists && context) {
+        // Make sure we're using the filtered text (without dev prefix)
+        const messageText = context.text || '';
+        
         threadState.messages.push({
-            text: context.text,
+            text: messageText,
             isUser: true,
             timestamp: context.timestamp,
             threadTs: context.threadTs,
@@ -261,8 +299,7 @@ async function processThread(threadState) {
                 
                 // Create a record of this message for future context
                 const messageRecord = {
-                    text: args.text || "Message with no text content",
-                    title: args.title || null,
+                    text: args.text || (args.blocks ? "Message with blocks content" : "Message with no text content"),
                     isUser: false,
                     timestamp: result.ts || result.messageTs || new Date().toISOString(),
                     threadTs: context?.threadTs || result.threadTs,
@@ -271,6 +308,67 @@ async function processThread(threadState) {
                     requestId: Date.now().toString(),
                     threadPosition: threadState.messages ? threadState.messages.length + 1 : 1
                 };
+                
+                // If there are attachments, save the content in a more descriptive way
+                if (args.attachments || args.color) {
+                    messageRecord.hasAttachments = true;
+                    
+                    // Extract actual content from attachments
+                    if (args.attachments && args.attachments.length > 0) {
+                        // Try to extract text from blocks inside attachments
+                        const attachmentBlocks = args.attachments[0].blocks || [];
+                        const extractedTexts = [];
+                        
+                        // Recursively extract text from blocks
+                        function extractTextFromBlock(block) {
+                            if (!block) return null;
+                            
+                            // Direct text in a block
+                            if (block.text?.text) {
+                                return block.text.text;
+                            }
+                            // Section block
+                            else if (block.type === 'section') {
+                                if (block.text?.text) {
+                                    return block.text.text;
+                                }
+                            }
+                            // Context block with elements
+                            else if (block.type === 'context' && Array.isArray(block.elements)) {
+                                return block.elements
+                                    .map(element => element.text || null)
+                                    .filter(Boolean)
+                                    .join(" ");
+                            }
+                            // Header block
+                            else if (block.type === 'header' && block.text?.text) {
+                                return `*${block.text.text}*`;
+                            }
+                            
+                            return null;
+                        }
+                        
+                        // Process each block
+                        for (const block of attachmentBlocks) {
+                            const extractedText = extractTextFromBlock(block);
+                            if (extractedText) {
+                                extractedTexts.push(extractedText);
+                            }
+                        }
+                        
+                        if (extractedTexts.length > 0) {
+                            // Use the actual content from blocks
+                            messageRecord.text = extractedTexts.join("\n");
+                        }
+                    }
+                    
+                    // Include the first part of the text as description
+                    if (messageRecord.text) {
+                        messageRecord.description = `Sent formatted message: "${messageRecord.text.substring(0, 100)}${messageRecord.text.length > 100 ? '...' : ''}"`;
+                    } else {
+                        messageRecord.description = "Sent message with attachments but couldn't extract text content";
+                    }
+                }
                 
                 // Add the message to our thread history
                 threadState.messages.push(messageRecord);
@@ -348,43 +446,24 @@ async function processThread(threadState) {
                 }
             }
             
-            // Auto-complete the request if we've posted a message and not explicitly finished
-            if (messagePosted && !requestCompleted) {
+            // Auto-complete the request after message was posted
+            if (!requestCompleted && messagePosted && iteration > 1) {
                 console.log("Message posted but no finishRequest called - auto-completing request immediately");
-                
+
                 try {
                     // Call finishRequest implicitly
                     const finishTool = getTool('finishRequest');
                     if (finishTool) {
                         await finishTool({
-                            summary: `Auto-completed after ${toolName}`,
+                            summary: "Auto-completed after message was posted",
                             reasoning: "Auto-completion to end request after message posted"
                         }, threadState);
-                        
-                        requestCompleted = true;
                         console.log("Request auto-completed with implicit finishRequest");
-                        
-                        // Add a clear system note about auto-completion
-                        if (threadState.messages) {
-                            threadState.messages.push({
-                                text: `Request auto-completed after ${toolName} was executed`,
-                                isUser: false,
-                                isSystemNote: true,
-                                timestamp: new Date().toISOString(),
-                                threadTs: context?.threadTs,
-                                fromTool: true,
-                                toolName: "system_note",
-                                threadPosition: threadState.messages.length + 1
-                            });
-                        }
+                        requestCompleted = true;
                     }
-                } catch (finishError) {
-                    console.log(`Error auto-completing request: ${finishError.message}`);
-                    // Continue even if auto-completion fails
+                } catch (autoCompleteError) {
+                    console.log(`Failed to auto-complete request: ${autoCompleteError.message}`);
                 }
-                
-                // Break out of the loop immediately
-                break;
             }
 
         } catch (error) {
@@ -437,8 +516,8 @@ async function processThread(threadState) {
         }
     }
 
-    // If we've reached max iterations without explicit completion, ensure we finish
-    if (iteration >= MAX_ITERATIONS && !requestCompleted) {
+    // Auto-complete the request if we've reached the iteration limit
+    if (!requestCompleted && iteration >= MAX_ITERATIONS) {
         console.log("Reached maximum iterations without explicit finishRequest - auto-completing");
         
         try {
@@ -446,12 +525,29 @@ async function processThread(threadState) {
             const finishTool = getTool('finishRequest');
             if (finishTool) {
                 await finishTool({
-                    summary: `Auto-completed after max iterations (${MAX_ITERATIONS})`,
+                    summary: "Auto-completed due to iteration limit",
                     reasoning: "Auto-completion due to iteration limit"
                 }, threadState);
+                
+                console.log("Request auto-completed due to iteration limit");
+                
+                // Add a clear system note about auto-completion due to iteration limit
+                if (threadState.messages) {
+                    threadState.messages.push({
+                        text: "Request auto-completed after reaching maximum iterations",
+                        isUser: false,
+                        isSystemNote: true,
+                        timestamp: new Date().toISOString(),
+                        threadTs: context?.threadTs,
+                        fromTool: true,
+                        toolName: "system_note",
+                        threadPosition: threadState.messages.length + 1
+                    });
+                }
             }
         } catch (finishError) {
-            console.log(`Error auto-completing after max iterations: ${finishError.message}`);
+            console.log(`Error auto-completing request: ${finishError.message}`);
+            // Continue even if auto-completion fails
         }
     }
 }
@@ -496,36 +592,36 @@ async function processButtonInteraction(payload) {
     
     // UPDATED: Check if we can find button metadata in the thread state
     let buttonMetadata = {};
-
-    // First check for exact match on actionId
-    if (threadState.buttonRegistry && threadState.buttonRegistry[actionId]) {
-      buttonMetadata = threadState.buttonRegistry[actionId];
+    
+    if (threadState.buttonMetadataMap && threadState.buttonMetadataMap[actionId]) {
+      buttonMetadata = threadState.buttonMetadataMap[actionId];
       console.log(`Found button metadata for exact match on ${actionId}`);
-    } else if (threadState.buttonRegistry) {
-      // Check for partial matches - the action prefix is used as the key, 
-      // but the actionId might include the index suffix with _0, _1, etc.
-      const actionPrefix = actionId.split('_').slice(0, -1).join('_');
-      if (threadState.buttonRegistry[actionPrefix]) {
-        buttonMetadata = threadState.buttonRegistry[actionPrefix];
-        console.log(`Found button metadata for prefix match: ${actionPrefix}`);
-      } else {
-        // Last resort: check if any of the registry entries match part of the actionId
-        const registryKeys = Object.keys(threadState.buttonRegistry);
-        for (const key of registryKeys) {
-          if (actionId.includes(key) || key.includes(actionId)) {
-            buttonMetadata = threadState.buttonRegistry[key];
-            console.log(`Found button metadata for partial match: ${key}`);
-            break;
-          }
+    } else {
+      // Try to find a partial match
+      for (const key in threadState.buttonMetadataMap || {}) {
+        if (key.includes(actionId) || actionId.includes(key)) {
+          buttonMetadata = threadState.buttonMetadataMap[key];
+          console.log(`Found button metadata for partial match ${key} <-> ${actionId}`);
+          break;
         }
       }
-    } 
-
-    if (Object.keys(buttonMetadata).length === 0) {
-      console.log(`No button metadata found for ${actionId} in thread state`);
     }
     
-    // Set context in the thread state
+    // Add a loading reaction immediately to provide visual feedback
+    try {
+      const slackClient = getSlackClient();
+      // Add a temporary loading message to indicate processing
+      await slackClient.reactions.add({
+        channel: channelId,
+        timestamp: messageTs,
+        name: 'hourglass_flowing_sand' // Loading indicator emoji
+      });
+    } catch (reactionError) {
+      // Non-critical error, just log it
+      console.log(`⚠️ Could not add loading reaction: ${reactionError.message}`);
+    }
+    
+    // Build context object with all the information
     const context = {
       userId,
       channelId,
@@ -534,9 +630,6 @@ async function processButtonInteraction(payload) {
       actionId,
       actionValue,
       buttonText,
-      buttonName: buttonText,
-      messageType: 'button_interaction',
-      text: `Clicked: ${buttonText}`, // Include button text in the context for the LLM
       isButtonClick: true
     };
     
@@ -551,7 +644,7 @@ async function processButtonInteraction(payload) {
     // Create a simulation of a user message with the button click info
     const buttonClickMessage = {
       user: userId,
-      text: `Clicked: ${buttonText}`,
+      text: buttonText, // Use only the button text, not "Clicked: buttonText"
       isUser: true,
       isButtonClick: true, // Mark as button click
       timestamp: Date.now(),

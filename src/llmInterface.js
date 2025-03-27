@@ -4,6 +4,184 @@ const { logError, formatErrorForLLM } = require('./errors.js');
 const fetch = require('node-fetch');
 const { getToolsForLLM } = require('./tools');
 
+// Shared constants for message formatting to avoid duplication
+const COMMUNICATION_STYLE = `- Be enthusiastic, cheerful, and energetic in your responses! 🎉
+- Use emojis frequently to add personality and fun to your messages 😊 💯 ✨
+- Be conversational and friendly, showing excitement when helping users
+- Use exclamation points to convey enthusiasm where appropriate!
+- Express positivity with phrases like "Great question!" or "I'd love to help with that!"
+- Include emoji reactions to emphasize important points or show excitement
+- Use markdown formatting for readability and to make messages visually appealing
+- Format code with \`\`\`language\\n code \`\`\` blocks
+- Keep your enthusiasm balanced - be excited but still professional
+- Use markdown (*bold*, _italic_) for basic formatting and specialized tags ([header]...[!header]) for complex elements
+- Sound genuinely happy to be helping the user with their questions`;
+
+const CRITICAL_BEHAVIOR = `1. YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
+2. NEVER send more than one message per user request unless explicitly needed
+3. ALWAYS call finishRequest after sending your response
+4. NEVER repeat a postMessage with the same content
+5. ALWAYS check if you've already responded before sending a new message
+6. Each user message should get exactly ONE response from you
+7. NEVER include raw code or function calls in your message content
+8. ALWAYS use the standardized JSON format for tool calls as shown below
+9. IMPORTANT: Text written outside of tool calls will NOT be shown to the user
+10. ALL your responses to users MUST go through the postMessage tool
+11. SEND ONLY ONE TOOL CALL AT A TIME - Do not include multiple tool calls in one response
+12. WHEN HANDLING ERRORS: Never use hardcoded responses. Always decide what to tell the user based on the error context.`;
+
+const BBCODE_FORMATTING = `### Markdown (for basic formatting):
+- *bold* for bold text
+- _italic_ for italic text
+- \`code\` for inline code
+- \`\`\`language
+  code block
+  \`\`\` for code blocks
+- > text for blockquotes
+- * or - for bullet lists
+- 1. 2. 3. for numbered lists
+
+### BBCode (for specialized formatting):
+- (header)Header text(!header) for section headers
+- (context)Context information(!context) for smaller helper text
+- (list)
+* Bullet point 1
+* Bullet point 2
+(!list) for custom lists
+- (divider) for horizontal dividers
+- (usercontext)USER1ID,USER2ID,USER3ID(!usercontext) for displaying users in a special context block
+  * IMPORTANT: When asked to use "user context" format, THIS is what you should use
+  * Example: (usercontext)U123456(!usercontext) creates a dedicated user mention block
+  * Do NOT confuse with regular user mentions (<@USER_ID>) used inline in text
+- (section:image_url:alt_text)Content with an image accessory(!section) for sections with images`;
+
+const TOOL_CALL_FORMAT = `\`\`\`json
+{
+  "tool": "toolName",
+  "reasoning": "Brief explanation of why you're using this tool",
+  "parameters": {
+    "param1": "value1",
+    "param2": "value2"
+  }
+}
+\`\`\``;
+
+const COMPANY_INFO = `- You work at CloudWalk, a fintech company specializing in payment solutions
+- CloudWalk's main products include "JIM" and "InfinitePay"
+- Most employees are Brazilian and based in Brazil, though some work remotely from other countries
+- The company focuses on payment processing, financial technology, and related services`;
+
+const FORMAT_REQUIREMENTS = `1. ALL tool calls must be in \`\`\`json code blocks
+2. ALWAYS wrap tool calls in \`\`\`json code blocks
+3. NEVER mix formats - use ONLY this format for ALL tool calls
+4. NEVER prefix tool names with "functions." or any other namespace
+5. EVERY tool call MUST include a reasoning parameter
+6. Text outside tool calls is NOT sent to users
+7. Send only ONE tool call per response - DO NOT include multiple tool calls
+8. For a normal user interaction: first send postMessage, then after receiving a response, send finishRequest`;
+
+const REMEMBER_CRITICAL = `- YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
+- All your responses to users MUST go through the postMessage tool 
+- Send only ONE tool call at a time - DO NOT send multiple tool calls in the same response
+- Wait for each tool call to complete before sending another one
+- After sending a postMessage, always send a finishRequest to complete the interaction`;
+
+/**
+ * Ensures that BBCode-style parentheses in examples are properly escaped for JSON
+ * @param {string} text - Text containing parentheses BBCode
+ * @returns {string} - Text with properly escaped parentheses for JSON contexts
+ */
+function escapeParenthesesForJson(text) {
+  if (!text) return text;
+  
+  // Replace unescaped parentheses in BBCode patterns with escaped ones
+  return text
+    .replace(/\(header\)/g, '\\(header\\)')
+    .replace(/\(!header\)/g, '\\(!header\\)')
+    .replace(/\(context\)/g, '\\(context\\)')
+    .replace(/\(!context\)/g, '\\(!context\\)')
+    .replace(/\(list\)/g, '\\(list\\)')
+    .replace(/\(!list\)/g, '\\(!list\\)')
+    .replace(/\(divider\)/g, '\\(divider\\)')
+    .replace(/\(usercontext\)/g, '\\(usercontext\\)')
+    .replace(/\(!usercontext\)/g, '\\(!usercontext\\)')
+    .replace(/\(section:/g, '\\(section:')
+    .replace(/\(!section\)/g, '\\(!section\\)');
+}
+
+// Original MESSAGE_FORMATTING_EXAMPLE
+const MESSAGE_FORMATTING_EXAMPLE = `{
+  "tool": "postMessage",
+  "reasoning": "Responding with formatted information",
+  "parameters": {
+    "text": "(header)Your Header(!header)\\n\\nHere's some *bold text* and _italic text_ and \`inline code\`.\\n\\n(list)\\n* Item 1\\n* Item 2\\n* Item 3\\n(!list)\\n\\n> This is an important quote\\n\\n\\\`\\\`\\\`javascript\\nconst x = 1;\\nconsole.log(x);\\n\\\`\\\`\\\`\\n\\n(context)This additional information appears in smaller text(!context)\\n\\n(header)Section Title(!header)",
+    "color": "blue"
+  }
+}`;
+
+// Update the MESSAGE_FORMATTING_EXAMPLE to use escaped parentheses
+const ESCAPED_MESSAGE_EXAMPLE = escapeParenthesesForJson(MESSAGE_FORMATTING_EXAMPLE);
+
+// Create the original TOOL_USAGE_EXAMPLES constant
+const TOOL_USAGE_EXAMPLES = `Example 1: First send a message to the user:
+\`\`\`json
+{
+  "tool": "postMessage",
+  "reasoning": "Responding to the user's greeting",
+  "parameters": {
+    "text": "(header)Hello there!(!header)\\n\\nI'm *happy* to help you today. What can I do for you? \\n\\n(header)Available Options(!header)\\n\\n* Ask a question\\n* Get information\\n* Request assistance\\n\\n⚡ I can help with a variety of topics and questions.",
+    "color": "blue"
+  }
+}
+\`\`\`
+
+Wait for this tool call to complete before sending another one.
+
+Example 2: After the postMessage completes, send a finishRequest:
+\`\`\`json
+{
+  "tool": "finishRequest",
+  "reasoning": "The conversation is complete for this turn",
+  "parameters": {
+    "summary": "Responded to user's question about Slack APIs"
+  }
+}
+\`\`\``;
+
+// Create the escaped version for use in system message JSON
+const ESCAPED_TOOL_USAGE_EXAMPLES = escapeParenthesesForJson(TOOL_USAGE_EXAMPLES);
+
+const MESSAGE_FORMATTING_GUIDELINES = `You have two ways to format messages:
+
+1. BASIC FORMATTING:
+Create simple messages using these parameters:
+- text: Your main message content with formatting options
+- color: Message accent color (blue, green, red, orange, purple or hex code)
+
+2. USING HYBRID FORMATTING:
+We use a hybrid approach combining standard Markdown and specialized BBCode-style tags:
+
+${BBCODE_FORMATTING}
+
+USER MENTIONS FORMATTING:
+- For direct user mentions in text: <@USERID> (e.g., "Hello <@U123456>")
+- For user context blocks: (usercontext)U123456(!usercontext) (no @ symbol)
+- NEVER use plain @UserID format as it won't be properly formatted in Slack
+
+USER CONTEXT BLOCK EXAMPLES:
+- When asked to use "user context formatting", use this format:
+  (usercontext)U123456(!usercontext)
+- For multiple users:
+  (usercontext)U123456,U789012(!usercontext)
+- This creates a special block that highlights the user, different from a simple mention.
+
+EXAMPLE:
+\`\`\`
+${ESCAPED_MESSAGE_EXAMPLE}
+\`\`\`
+
+IMPORTANT: Do NOT attempt to specify Slack blocks directly. Use only the formatting methods above.`;
+
 /**
  * Sends the thread state to the LLM and gets the next action to take
  * @param {Object} threadState - The current thread state
@@ -38,6 +216,9 @@ async function getNextAction(threadState) {
     console.log("\n--- Content being sent to LLM ---");
     if (context && context.text) {
       console.log(`User's query: "${context.text}"`);
+      if (context.originalText) {
+        console.log(`Original (unfiltered) query: "${context.originalText}"`);
+      }
     } else {
       console.log("No user query found in context!");
     }
@@ -191,201 +372,101 @@ function filterDevPrefix(message) {
  * @returns {string} - Formatted system message
  */
 function getSystemMessage(context = {}) {
-    // Make sure context exists and has expected properties
-    const ctx = context || {};
+  // Make sure context exists and has expected properties
+  const ctx = context || {};
+  
+  // Get registered tools for dynamically generating the tool list
+  let toolsList = '';
+  try {
+    const registeredTools = getToolsForLLM();
     
-    // Get registered tools for dynamically generating the tool list
-    let toolsList = '';
-    try {
-        const registeredTools = getToolsForLLM();
-        
-        // Create a numbered list of tools
-        if (registeredTools && registeredTools.length > 0) {
-            toolsList = registeredTools
-                .map((tool, index) => `${index + 1}. ${tool.name} - ${tool.description}`)
-                .join('\n');
-        } else {
-            // Fallback if tools aren't available
-            toolsList = '1. postMessage - Send a message to the user\n2. finishRequest - End your turn in the conversation';
-        }
-    } catch (error) {
-        console.log('Error getting tools for system message:', error.message);
-        // Fallback if there's an error
-        toolsList = '1. postMessage - Send a message to the user\n2. finishRequest - End your turn in the conversation';
+    // Create a numbered list of tools
+    if (registeredTools && registeredTools.length > 0) {
+      toolsList = registeredTools
+        .map((tool, index) => `${index + 1}. ${tool.name} - ${tool.description}`)
+        .join('\n');
+    } else {
+      // Fallback if tools aren't available
+      toolsList = '1. postMessage - Send a message to the user\n2. finishRequest - End your turn in the conversation';
     }
-    
-    // Get current date and time in Brazil (Brasília timezone)
-    const now = new Date();
-    const brazilTime = new Intl.DateTimeFormat('pt-BR', {
-        timeZone: 'America/Sao_Paulo',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        weekday: 'long',
-        hour: 'numeric',
-        minute: 'numeric',
-        hour12: false
-    }).format(now);
-    
-    return `Hi there! You're Aya, an enthusiastic and helpful AI assistant in Slack! 🎉 This is a conversation between you and users.
+  } catch (error) {
+    console.log('Error getting tools for system message:', error.message);
+    // Fallback if there's an error
+    toolsList = '1. postMessage - Send a message to the user\n2. finishRequest - End your turn in the conversation';
+  }
+  
+  // Get current date and time in Brazil
+  const brazilTime = getBrazilDateTime();
+  
+  return `Hi there! You're Aya, an enthusiastic and helpful AI assistant in Slack! 🎉 This is a conversation between you and users.
 
 IMPORTANT CONTEXT:
 You're in a ${ctx.isDirectMessage ? 'direct message' : 'thread'} in Slack.
-User ID: ${ctx.userId || 'unknown'}
-Channel: ${ctx.channelId || 'unknown'}
-${ctx.threadTs ? `Thread: ${ctx.threadTs}` : ''}
-Current Date/Time in Brazil: ${brazilTime}
+- User ID: ${ctx.userId || 'unknown'}
+- Channel: ${ctx.channelId || 'unknown'}
+- ${ctx.threadTs ? `Thread: ${ctx.threadTs}` : ''}
+- Current Date/Time in Brazil: ${brazilTime}
+
+⚠️ USER MENTION FORMAT: Always use <@USER_ID> format for user mentions (e.g., <@U123456>)
+   NEVER use @USER_ID or plain USER_ID or <@|USER_ID> formats, as they WON'T work in Slack.
+
+⚠️ USER CONTEXT BLOCK FORMAT:
+   When asked to use "user context formatting" or "user context blocks", use this special format:
+   (usercontext)${ctx.userId || 'USER_ID'}(!usercontext)
+   Example: (usercontext)${ctx.userId || 'U123456'}(!usercontext)
+   This is DIFFERENT from a normal user mention (<@USER_ID>) within text.
 
 Company Information:
-- You work at CloudWalk, a fintech company specializing in payment solutions.
-- CloudWalk's main products include "Jim" and "InfinitePay".
-- Most employees are Brazilian and based in Brazil, though some work remotely from other countries.
-- The company focuses on payment processing, financial technology, and related services.
-
+${COMPANY_INFO}
 
 COMMUNICATION STYLE:
-- Be enthusiastic and energetic! Show excitement when helping users! 🎉
-- Use emojis frequently to add personality and fun to your messages 😊 ✨
-- Express positivity with phrases like "Great question!" or "I'd love to help with that!"
-- Include emoji reactions to emphasize important points or show excitement
+${COMMUNICATION_STYLE}
 
 CRITICAL INSTRUCTIONS:
-1. DO NOT send multiple similar messages - ONE response per user query
-2. ALWAYS communicate with users by calling tools
-3. NEVER output direct content or messages
-4. ALWAYS check the conversation history to avoid duplicating messages
-5. AFTER creating a button message, DO NOT create another one with the same options
-6. After sending a message, call finishRequest to end your turn
+${CRITICAL_BEHAVIOR}
 
 YOUR TOOLS:
 ${toolsList}
 
 RICH FORMATTING CAPABILITIES:
-When using postMessage, you have access to many formatting options:
-- Emoji showcase: Use '!emojis:emoji1,emoji2,emoji3' for displaying emojis in a row
-- Big emoji emphasis: Use '!big-emoji:emoji_name' for highlighting with a large emoji
-- Tables: Use 'table' parameter with headers and rows for structured data
-- Rich Headers: Use 'richHeader' parameter with text and emoji/icon
-- Multi-Column Layout: Use 'columns' parameter for side-by-side content
-- Interactive Buttons: Use 'actions' parameter with array of button objects
-- Fields: Use 'fields' parameter for two-column layout of key-value pairs
+You have two formatting approaches for rich text:
+
+1. MARKDOWN FOR COMMON FORMATTING:
+- *bold* for bold text
+- _italic_ for italic text
+- \`code\` for inline code
+- \`\`\`language\\ncode\\n\`\`\` for code blocks
+- > text for blockquotes
+- * or - for bullet lists
+- 1. 2. 3. for numbered lists
+
+${BBCODE_FORMATTING}
+
+EXAMPLE OF USER CONTEXT BLOCK:
+(header)Example User Context Block(!header)
+Here's a message specifically for you: (usercontext)${ctx.userId || 'U123456'}(!usercontext)
+This will display your user profile picture and mention in a special context block!
+
+Additional formatting options:
+- Text color: Set the "color" parameter to blue, green, red, etc. for message accent color
+- Text: Use header tags (header)Title(!header) within your text content for headings
+- Fields: Use "fields" parameter for structured data as [{ title: 'Field name', value: 'Field value' }]
+- Buttons: Use "buttons" parameter with standard button definitions
 
 TOOL CALL FORMAT:
-// DO NOT USE CODE BLOCKS. Return a JSON object directly like this:
-{
-  "tool": "toolName",
-  "parameters": {
-    "param1": "value1",
-    "reasoning": "Brief explanation of why you're using this tool"
-  }
-}
+Use this exact JSON format for EACH tool call (send only one at a time):
+${TOOL_CALL_FORMAT}
 
-⚠️ CRITICAL: DO NOT WRAP YOUR RESPONSE IN CODE BLOCKS OR MARKDOWN. Just return the JSON object directly. ⚠️
+IMPORTANT: ALWAYS include a "tool" field, a "reasoning" field, and a "parameters" object. The reasoning field should ALWAYS be at the top level, not inside parameters.
 
-IMPORTANT PARAMETERS NOTES:
-- For parameters that require arrays or objects, provide them as proper JSON arrays/objects, NOT as string representations.
-- CORRECT: "buttons": [{"text": "Option 1", "value": "opt1"}, {"text": "Option 2", "value": "opt2"}]
-- INCORRECT: "buttons": "[{\\"text\\": \\"Option 1\\", \\"value\\": \\"opt1\\"}, {\\"text\\": \\"Option 2\\", \\"value\\": \\"opt2\\"}]"
-- Always include a "reasoning" parameter in all tool calls to explain your decision.
-- All messages MUST include a color parameter (use hex codes like #36C5F0 or named colors: good=green, warning=yellow, danger=red)
+DO NOT use any other format for tool calls. ONLY use the format shown above.
 
-BUTTON CREATION GUIDELINES:
-1. When asked to provide options, create ONLY ONE button message
-2. DO NOT create multiple button messages with similar options
-3. After creating buttons, call finishRequest - don't create more messages
-4. When a user clicks a button, acknowledge their choice with a postMessage
+EXAMPLES OF CORRECT TOOL USAGE SEQUENCE:
 
-CONVERSATION FLOW:
-- User makes a request -> You call postMessage or createButtonMessage -> You call finishRequest
-- User clicks a button -> You acknowledge their choice with postMessage -> You call finishRequest
-- ONE response cycle per user action
+${ESCAPED_TOOL_USAGE_EXAMPLES}
 
-EXAMPLES OF CORRECT FORMAT:
-
-EXAMPLE 1 - Posting a message with emojis:
-{
-  "tool": "postMessage",
-  "parameters": {
-    "title": "Here's the information you requested! ✨",
-    "text": "I found the answer to your question! 🎉\n\nLet me share these details with you:\n\n!emojis:rocket,star,tada\n\n> Pro tip: You can always ask for more help if needed! 💡",
-    "color": "blue",
-    "reasoning": "Responding with requested information in an enthusiastic way"
-  }
-}
-
-EXAMPLE 2 - Creating a button message with emoji:
-{
-  "tool": "createButtonMessage",
-  "parameters": {
-    "title": "Choose an option! 🌟",
-    "text": "Please select one of the following options:\n\n!big-emoji:thinking_face",
-    "buttons": [
-      {"text": "Yes! ✅", "value": "yes"},
-      {"text": "No thanks ❌", "value": "no"},
-      {"text": "Maybe later 🤔", "value": "maybe"}
-    ],
-    "actionPrefix": "choice",
-    "reasoning": "Presenting the user with options to choose from in an engaging way"
-  }
-}
-
-EXAMPLE 3 - Rich formatted message with emojis:
-{
-  "tool": "postMessage",
-  "parameters": {
-    "title": "Team Roster 👥",
-    "text": "Here are the team members:\n\n!emojis:woman_technologist,man_technologist,woman_office_worker",
-    "color": "#36C5F0",
-    "fields": [
-      {"title": "Development Team 💻", "value": "John, Sarah, Miguel"},
-      {"title": "Design Team 🎨", "value": "Alex, Jamie, Taylor"}
-    ],
-    "reasoning": "Displaying team information with emojis for visual appeal"
-  }
-}
-
-EXAMPLE 4 - Enthusiastic response with big emoji:
-{
-  "tool": "postMessage",
-  "parameters": {
-    "title": "Great news! 🎊",
-    "text": "Your request has been completed successfully!\n\n!big-emoji:partying_face\n\nIs there anything else you'd like help with today?",
-    "color": "#2EB67D",
-    "reasoning": "Confirming task completion with positive, enthusiastic tone"
-  }
-}
-
-EXAMPLE 5 - Creating an emoji vote with enthusiasm:
-{
-  "tool": "createEmojiVote",
-  "parameters": {
-    "title": "Time to vote! 🗳️",
-    "text": "React with an emoji to vote for your favorite:\n\n!emojis:coffee,tea,milk",
-    "options": [
-      {"emoji": "coffee", "text": "Coffee ☕"},
-      {"emoji": "tea", "text": "Tea 🍵"},
-      {"emoji": "milk", "text": "Milk 🥛"}
-    ],
-    "reasoning": "Creating an engaging poll for user preferences"
-  }
-}
-
-EXAMPLE 6 - Finishing request (REQUIRED after posting a message):
-{
-  "tool": "finishRequest",
-  "parameters": {
-    "summary": "Responded to user request for dinner options with enthusiasm",
-    "reasoning": "Task has been completed, ending the conversation turn"
-  }
-}
-
-IMPORTANT REMINDERS:
-1. DO NOT wrap your tool call in markdown code blocks
-2. Return ONLY the bare JSON object
-3. Do not include \`\`\`json or \`\`\` markers
-4. Always check the thread history to avoid duplicating messages
-5. If you've already responded to the user, don't send a similar message again
-6. After creating a button message, call finishRequest - don't create more buttons`;
+⚠️ REMEMBER (CRITICAL): 
+${REMEMBER_CRITICAL}`;
 }
 
 /**
@@ -400,7 +481,7 @@ function formatMessagesForLLM(threadState) {
   const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
   
   // Add system message
-  const systemMessage = getSystemInstructions(context || {});
+  const systemMessage = getSystemMessage(context || {});
   messages.push({
     role: 'system',
     content: systemMessage,
@@ -439,43 +520,50 @@ function formatMessagesForLLM(threadState) {
     console.log(`Thread history: ${threadState.messages.length} messages being imported`);
     
     for (const message of threadState.messages) {
+      // Process all messages, including those with dev prefix
+      // (The dev prefix should already be stripped at this point)
+      
       // Check if this is the current user's message (matches the context)
       if (context && message.isUser && message.text === context.text) {
         currentMessageFound = true;
       }
       
-      let prefix = '';
-      let positionDisplay = '';
-      
-      // Include chronological position if available
-      if (message.threadPosition) {
-        positionDisplay = ` [MESSAGE #${message.threadPosition}]`;
-      }
-
       // Only add prefixes for non-system messages
       if (!message.isSystemNote) {
-        if (message.isParentMessage) {
-          prefix = `THREAD PARENT MESSAGE${positionDisplay}:\n`;
-        } else if (message.isButtonClick) {
-          // Special formatting for button clicks
-          prefix = `BUTTON INTERACTION${positionDisplay}:\n`;
+        // Determine if message is from the bot or a user
+        if (message.isUser) {
+          if (message.isButtonClick) {
+            // Format button clicks distinctively
+            messages.push({
+              role: 'user',
+              content: `USER SELECTED: ${message.text}`
+            });
+          } else {
+            // Simple format for user messages - no redundant prefixes
+            messages.push({
+              role: 'user',
+              content: message.text || 'No text content'
+            });
+          }
         } else {
-          prefix = `THREAD MESSAGE${positionDisplay}:\n`;
-        }
-      }
-
-      // Determine if message is from the bot or a user
-      if (message.isUser) {
-        if (message.isButtonClick) {
-          // Format button clicks distinctively
+          // For bot messages, format with clear indication this was already sent
+          prevBotMessageCount++;
+          
+          let sentMessage = '';
+          if (message.title) {
+            sentMessage += `Title: "${message.title}"\n`;
+          }
+          
+          // Use the description field if available (for messages with attachments/formatting)
+          if (message.description) {
+            sentMessage += message.description;
+          } else {
+            sentMessage += `Content: "${message.text || 'No text content'}"`;
+          }
+          
           messages.push({
-            role: 'user',
-            content: `${prefix}USER BUTTON CLICK: ${message.text}`
-          });
-        } else {
-          messages.push({
-            role: 'user',
-            content: `${prefix}USER MESSAGE: ${message.text || 'No text content'}`
+            role: 'assistant',
+            content: `PREVIOUSLY SENT: ${sentMessage}`
           });
         }
       } else if (message.isSystemNote) {
@@ -488,20 +576,6 @@ function formatMessagesForLLM(threadState) {
             content: message.text
           });
         }
-      } else {
-        // For bot messages, format with very clear indication this was already sent
-        prevBotMessageCount++;
-        
-        let sentMessage = '';
-        if (message.title) {
-          sentMessage += `Title: "${message.title}"\n`;
-        }
-        sentMessage += `Content: "${message.text || 'No text content'}"`;
-        
-        messages.push({
-          role: 'assistant',
-          content: `⚠️ PREVIOUSLY SENT MESSAGE (#${prevBotMessageCount}) using ${message.toolName || 'unknown tool'}:\n${sentMessage}\n\nDO NOT DUPLICATE THIS MESSAGE. The user already sees this message.`
-        });
       }
     }
   }
@@ -511,12 +585,20 @@ function formatMessagesForLLM(threadState) {
   if (context && context.text && !currentMessageFound) {
     console.log("Adding current message to context (wasn't found in message history)");
     
-    let prefix = 'CURRENT USER REQUEST: ';
+    // Check one more time through a text comparison - sometimes the object equality check might fail
+    // This fixes cases where the message was added to thread state but using different objects
+    const isDuplicate = threadState.messages && threadState.messages.some(msg => 
+      msg.isUser && msg.text === context.text
+    );
     
-    messages.push({
-      role: 'user',
-      content: `${prefix}${context.text || 'No text content'}`
-    });
+    if (!isDuplicate) {
+      messages.push({
+        role: 'user',
+        content: context.text || 'No text content'
+      });
+    } else {
+      console.log("Found duplicate message during secondary check - not adding again");
+    }
   } else {
     console.log("Current user message already included in thread history, not adding again");
   }
@@ -526,25 +608,15 @@ function formatMessagesForLLM(threadState) {
     // Add a clear notice about button clicks
     messages.push({
       role: 'system',
-      content: `⚠️ IMPORTANT: The user clicked a button with action ID "${context.actionId}" and value "${context.actionValue}". 
-Respond to this button click directly.
-
-1. Do NOT create new buttons - the user has already made their choice
-2. Use postMessage to acknowledge their selection
-3. Provide a response based on their button choice
-4. End the conversation turn with finishRequest`
+      content: `The user clicked a button with action ID "${context.actionId}" and value "${context.actionValue}". Respond to this button click directly.`
     });
   }
 
-  // Add a final reminder if we've already posted messages
+  // Add a single reminder if we've already posted messages - no need for multiple warnings
   if (prevBotMessageCount > 0) {
     messages.push({
       role: 'system',
-      content: `⚠️ FINAL WARNING: You have already sent ${prevBotMessageCount} message(s) in this conversation as shown above. 
-DO NOT send duplicate messages or create similar button options. The user already sees your previous message(s).
-
-If you already created buttons, DO NOT create more buttons or suggest options again.
-The user is waiting for your existing message to be processed.`
+      content: `You have already sent ${prevBotMessageCount} message(s) in this conversation. Do not send duplicate messages.`
     });
   }
   
@@ -599,17 +671,21 @@ function formatToolResponse(toolName, args, response) {
   try {
     let formattedResponse;
     
+    // Add reasoning to all responses if available
+    const reasoning = args?.reasoning || "No reasoning provided";
+    
     if (toolName === 'postMessage') {
       // For postMessage, show what was sent to the user
       formattedResponse = {
         message_sent: true,
-        title: args.title,
-        text: args.text ? (args.text.length > 100 ? args.text.substring(0, 100) + '...' : args.text) : null
+        reasoning: reasoning,
+        text: args?.text ? (args.text.length > 100 ? args.text.substring(0, 100) + '...' : args.text) : null
       };
     } else if (toolName === 'getThreadHistory') {
       // For getThreadHistory, show summary of what was retrieved
       formattedResponse = {
         thread_history_retrieved: true,
+        reasoning: reasoning,
         messages_count: response?.messagesRetrieved || 0,
         has_parent: response?.threadStats?.parentMessageRetrieved || false
       };
@@ -617,20 +693,21 @@ function formatToolResponse(toolName, args, response) {
       // For finishRequest, just confirm it was completed
       formattedResponse = {
         request_completed: true,
-        summary: args.summary || "Request completed"
+        reasoning: reasoning,
+        summary: args?.summary || "Request completed"
       };
     } else {
       // For other tools, simplify the response
       if (response && typeof response === 'object') {
         if (response.ok !== undefined) {
           // It's likely a Slack API response, simplify it
-          formattedResponse = { success: true };
+          formattedResponse = { success: true, reasoning: reasoning };
         } else {
           // Use the response as is, but ensure it's not overly complex
-          formattedResponse = response;
+          formattedResponse = { ...response, reasoning: reasoning };
         }
       } else {
-        formattedResponse = response || { success: true };
+        formattedResponse = { success: true, reasoning: reasoning, response: response };
       }
     }
     
@@ -642,218 +719,6 @@ function formatToolResponse(toolName, args, response) {
       error_formatting: e.message 
     });
   }
-}
-
-/**
- * Gets the system instructions for the LLM
- * @param {Object} context - Additional context to include in the instructions
- * @returns {string} - System instructions
- */
-function getSystemInstructions(context) {
-  const botUserID = context?.botUserID || 'YOUR_SLACK_BOT_ID';
-  
-  // Get registered tools for dynamically generating the tool list
-  let toolsWithDetails = '';
-  try {
-    const registeredTools = getToolsForLLM();
-    
-    // Generate a more descriptive list of tools with their parameters
-    if (registeredTools && registeredTools.length > 0) {
-      toolsWithDetails = registeredTools.map(tool => {
-        // Create a brief parameters description
-        const paramsList = Object.entries(tool.parameters || {})
-          .filter(([paramName]) => paramName !== 'reasoning') // Don't include reasoning
-          .map(([paramName, description]) => {
-            const isRequired = !description || !description.toLowerCase().includes('optional');
-            return `    - ${paramName}${isRequired ? ' (required)' : ' (optional)'}: ${description || 'No description available'}`;
-          })
-          .join('\n');
-          
-        return `- ${tool.name}: ${tool.description || 'No description available'}\n  Parameters:\n${paramsList}`;
-      }).join('\n\n');
-    } else {
-      // Fallback if tools aren't available
-      toolsWithDetails = '- postMessage: Send a message to the user\n  Parameters:\n    - text (required): Message text content\n    - title (optional): Title for the message\n\n- finishRequest: End your turn in the conversation\n  Parameters:\n    - summary (required): Brief summary of completed action';
-    }
-  } catch (error) {
-    console.log('Error getting tools for system instructions:', error.message);
-    // Fallback if there's an error
-    toolsWithDetails = '- postMessage: Send a message to the user\n  Parameters:\n    - text (required): Message text content\n    - title (optional): Title for the message\n\n- finishRequest: End your turn in the conversation\n  Parameters:\n    - summary (required): Brief summary of completed action';
-  }
-  
-  // Get current date and time in Brazil (Brasília timezone)
-  const now = new Date();
-  const brazilTime = new Intl.DateTimeFormat('pt-BR', {
-      timeZone: 'America/Sao_Paulo',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      weekday: 'long',
-      hour: 'numeric',
-      minute: 'numeric',
-      hour12: false
-  }).format(now);
-  
-  return `You are Aya, a helpful assistant in Slack.
-
-IMPORTANT CONTEXT:
-- You work at CloudWalk, a fintech company specializing in payment solutions
-- CloudWalk's main products include "Jim" and "InfinitePay"
-- Most employees are Brazilian and based in Brazil, though some work remotely from other countries
-- The company focuses on payment processing, financial technology, and related services
-- Current Date/Time in Brazil: ${brazilTime}
-
-COMMUNICATION STYLE:
-- Be enthusiastic, cheerful, and energetic in your responses! 🎉
-- Use emojis frequently to add personality and fun to your messages 😊 💯 ✨
-- Be conversational and friendly, showing excitement when helping users
-- Use exclamation points to convey enthusiasm where appropriate!
-- Express positivity with phrases like "Great question!" or "I'd love to help with that!"
-- Include emoji reactions to emphasize important points or show excitement
-- Use markdown formatting for readability and to make messages visually appealing
-- Format code with \`\`\`language\n code \`\`\` blocks
-- Keep your enthusiasm balanced - be excited but still professional
-- Use our new emoji formatting features like !emojis: and !big-emoji: for emphasis
-- Sound genuinely happy to be helping the user with their questions
-
-WORKFLOW:
-1. When someone messages you, understand their request with enthusiasm
-2. Use available tools to respond appropriately 
-3. Post your response in the thread using the postMessage tool with engaging formatting
-4. Use the finishRequest tool when you're done to signal completion
-5. If errors occur, handle them gracefully without exposing technical details to users
-
-⚠️ CRITICAL BEHAVIOR REQUIREMENTS (READ CAREFULLY) ⚠️:
-1. YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
-2. NEVER send more than one message per user request unless explicitly needed
-3. ALWAYS call finishRequest after sending your response
-4. NEVER repeat a postMessage with the same content
-5. ALWAYS check if you've already responded before sending a new message
-6. Each user message should get exactly ONE response from you
-7. NEVER include raw code or function calls in your message content
-8. ALWAYS use the standardized JSON format for tool calls as shown below
-9. IMPORTANT: Text written outside of tool calls will NOT be shown to the user
-10. ALL your responses to users MUST go through the postMessage tool
-11. SEND ONLY ONE TOOL CALL AT A TIME - Do not include multiple tool calls in one response
-12. WHEN HANDLING ERRORS: Never use hardcoded responses. Always decide what to tell the user based on the error context.
-
-AVAILABLE TOOLS:
-
-${toolsWithDetails}
-
-FORMAT REQUIREMENTS FOR TOOLS:
-1. ALL tool calls must be in \`\`\`json code blocks
-2. ALWAYS wrap tool calls in \`\`\`json code blocks
-3. NEVER mix formats - use ONLY this format for ALL tool calls
-4. NEVER prefix tool names with "functions." or any other namespace
-5. EVERY tool call MUST include a reasoning parameter
-6. Text outside tool calls is NOT sent to users
-7. Send only ONE tool call per response - DO NOT include multiple tool calls
-8. For a normal user interaction: first send postMessage, then after receiving a response, send finishRequest
-
-TOOL CALLING FORMAT (YOU MUST USE THIS FORMAT FOR ALL RESPONSES):
-Use this exact JSON format for EACH tool call (send only one at a time):
-\`\`\`json
-{
-  "tool": "toolName",
-  "parameters": {
-    "param1": "value1",
-    "param2": "value2",
-    "reasoning": "Brief explanation of why you're using this tool"
-  }
-}
-\`\`\`
-
-IMPORTANT: ALWAYS include a "tool" field and a "parameters" object with a "reasoning" field.
-
-DO NOT use any other format for tool calls. ONLY use the format shown above.
-
-MESSAGE FORMATTING GUIDELINES:
-You have two ways to format messages:
-
-1. USING ABSTRACTED FORMATTING ELEMENTS:
-Create well-formatted messages using these abstracted elements:
-- title: Add a main heading to your message
-- text: Your main message content with markdown support
-- subtitle: Optional smaller text below the title
-- color: Message accent color (blue, green, red, orange, purple or hex code)
-- elements: Rich formatting elements like:
-  * { type: 'header', text: 'Section Header' }
-  * { type: 'divider' }
-  * { type: 'bullet_list', items: ['Item 1', 'Item 2', 'Item 3'] }
-  * { type: 'numbered_list', items: ['Step 1', 'Step 2', 'Step 3'] }
-  * { type: 'quote', text: 'Important quote text' }
-  * { type: 'code', language: 'javascript', code: 'const x = 1;' }
-  * { type: 'context', text: 'Additional information' }
-- fields: For structured data as [{ title: 'Field name', value: 'Field value' }]
-- actions: For basic buttons without tracking as [{ text: 'Button Text', value: 'button_value' }]
-
-2. USING DIRECT SLACK BLOCKS (RECOMMENDED):
-You can pass Slack Block Kit blocks directly for more control:
-\`\`\`json
-{
-  "tool": "postMessage",
-  "parameters": {
-    "blocks": [
-      {
-        "type": "header",
-        "text": {
-          "type": "plain_text",
-          "text": "Your Header",
-          "emoji": true
-        }
-      },
-      {
-        "type": "divider"
-      },
-      {
-        "type": "section",
-        "text": {
-          "type": "mrkdwn",
-          "text": "*Bold text* and _italic text_ and \`code\`"
-        }
-      }
-    ],
-    "text": "Fallback text for notifications",
-    "reasoning": "Explaining why you're sending this message"
-  }
-}
-\`\`\`
-
-EXAMPLES OF CORRECT TOOL USAGE SEQUENCE:
-
-Example 1: First send a message to the user:
-\`\`\`json
-{
-  "tool": "postMessage",
-  "parameters": {
-    "title": "Hello there!",
-    "text": "I'm happy to help you today. What can I do for you?",
-    "color": "blue",
-    "reasoning": "Responding to the user's greeting"
-  }
-}
-\`\`\`
-
-Wait for this tool call to complete before sending another one.
-
-Example 2: After the postMessage completes, send a finishRequest:
-\`\`\`json
-{
-  "tool": "finishRequest",
-  "parameters": {
-    "summary": "Responded to user's question about Slack APIs",
-    "reasoning": "The conversation is complete for this turn"
-  }
-}
-\`\`\`
-
-⚠️ REMEMBER (CRITICAL): 
-- YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
-- All your responses to users MUST go through the postMessage tool 
-- Send only ONE tool call at a time - DO NOT send multiple tool calls in the same response
-- Wait for each tool call to complete before sending another one
-- After sending a postMessage, always send a finishRequest to complete the interaction`;
 }
 
 /**
@@ -901,101 +766,69 @@ async function parseToolCallFromResponse(llmResponse) {
             console.log("Removed code block formatting from arguments");
           }
           
-          // Now try to parse the cleaned arguments
+          // Sanitize control characters that can break JSON parsing
+          cleanedArgs = cleanedArgs.replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, '');
+          
+          // Fix common JSON syntax issues
+          cleanedArgs = cleanedArgs
+            .replace(/,\s*}/g, '}')                // Remove trailing commas in objects
+            .replace(/,\s*\]/g, ']')               // Remove trailing commas in arrays
+            .replace(/\\'/g, "'")                  // Replace escaped single quotes
+            .replace(/\\"/g, '"')                  // Fix double escaped quotes
+            .replace(/\\\\/g, '\\')                // Fix double backslashes
+            .replace(/([^\\])\\n/g, '$1\\\\n');    // Fix incorrectly escaped newlines
+          
+          // Special handling for parentheses format in text strings
+          // This regex looks for patterns like (header)text(!header) within JSON string values
+          // and ensures the parentheses are properly escaped
+          cleanedArgs = cleanedArgs.replace(/"(text|content)"\s*:\s*"(.*?)"/g, (match, propName, textValue) => {
+            // Replace unescaped parentheses in the text value with escaped ones
+            let escapedText = textValue
+              .replace(/\\\(/g, '{{ESCAPED_LEFT_PAREN}}') // Save already escaped parentheses
+              .replace(/\\\)/g, '{{ESCAPED_RIGHT_PAREN}}')
+              .replace(/\(/g, '\\(')  // Escape unescaped left parentheses
+              .replace(/\)/g, '\\)')  // Escape unescaped right parentheses
+              .replace(/{{ESCAPED_LEFT_PAREN}}/g, '\\(')  // Restore with proper escaping
+              .replace(/{{ESCAPED_RIGHT_PAREN}}/g, '\\)');
+            
+            return `"${propName}":"${escapedText}"`;
+          });
+          
+          // Add quotes to unquoted property names as the final step
+          cleanedArgs = cleanedArgs.replace(/([a-zA-Z0-9_$]+):/g, '"$1":');
+          
+          console.log("Sanitized JSON arguments, attempting to parse...");
+          
+          // Parse the cleaned JSON
           parameters = JSON.parse(cleanedArgs);
-          
-          // Log successful parsing
           console.log("Successfully parsed tool parameters");
-        } catch (parseError) {
-          console.log(`Error parsing tool parameters: ${parseError}`);
+        } catch (error) {
+          console.log(`Error parsing tool parameters: ${error.message}`);
+          console.log("Failed JSON:", toolCall.function.arguments.substring(0, 200) + "...");
           
-          // Special handling for malformed JSON - attempt to clean and extract
-          const argsText = toolCall.function.arguments;
-          
-          // Try to detect if there's a markdown code block present
-          if (argsText.includes("```json") || argsText.includes("```")) {
-            console.log("Detected code block in arguments - attempting cleanup");
-            
-            // Remove code block formatting first
-            const cleanedArgs = argsText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-            
-            // Extract the JSON object/array
-            const jsonStart = Math.max(cleanedArgs.indexOf("{"), cleanedArgs.indexOf("["));
-            const jsonEnd = Math.max(cleanedArgs.lastIndexOf("}"), cleanedArgs.lastIndexOf("]"));
-            
-            if (jsonStart >= 0 && jsonEnd >= 0) {
-              const extractedJson = cleanedArgs.substring(jsonStart, jsonEnd + 1);
-              
-              try {
-                // Try to parse the extracted content
-                const extractedParams = JSON.parse(extractedJson);
-                
-                // Check if this is a nested tool specification rather than just parameters
-                if (extractedParams.tool && extractedParams.parameters) {
-                  parameters = extractedParams.parameters;
-                  console.log(`Found nested tool call format: ${extractedParams.tool}`);
-                } else {
-                  parameters = extractedParams;
-                }
-                
-                console.log("Successfully extracted parameters from code block");
-              } catch (extractError) {
-                console.log(`Error parsing extracted JSON: ${extractError}`);
-                
-                // Last resort - try to find and extract individual parameters
-                try {
-                  // Look for a title in quotes
-                  const titleMatch = cleanedArgs.match(/"title":\s*"([^"]+)"/);
-                  const textMatch = cleanedArgs.match(/"text":\s*"([^"]+)"/);
-                  
-                  parameters = {
-                    title: titleMatch ? titleMatch[1] : "Options",
-                    text: textMatch ? textMatch[1] : "Please select an option:",
-                    reasoning: "Parameters extracted from malformed JSON"
-                  };
-                  
-                  // Try to extract buttons if present
-                  const buttonsMatch = cleanedArgs.match(/"buttons":\s*(\[\s*\{[^\]]+\]\s*)/);
-                  if (buttonsMatch) {
-                    try {
-                      // Try to clean and parse the buttons array
-                      const buttonsStr = buttonsMatch[1].replace(/'/g, '"').trim();
-                      const cleanedButtonsStr = buttonsStr.replace(/,\s*\]$/, ']'); // Fix trailing commas
-                      
-                      const buttons = JSON.parse(cleanedButtonsStr);
-                      if (Array.isArray(buttons)) {
-                        parameters.buttons = buttons;
-                      }
-                    } catch (btnError) {
-                      console.log(`Failed to parse buttons array: ${btnError}`);
-                      // Default buttons
-                      parameters.buttons = [
-                        { text: "Option 1", value: "option1" },
-                        { text: "Option 2", value: "option2" }
-                      ];
-                    }
-                  }
-                  
-                  console.log("Created fallback parameters from text extraction");
-                } catch (fallbackError) {
-                  console.log(`Fallback extraction failed: ${fallbackError}`);
-                  parameters = { 
-                    text: "I couldn't process that correctly. Here are some options:", 
-                    reasoning: "Parameter parsing failed completely" 
-                  };
-                }
-              }
-            } else {
-              // Default parameters if JSON boundaries not found
+          // Try again with a more aggressive approach for serious JSON errors
+          try {
+            console.log("Attempting more aggressive JSON repair...");
+            // Create a minimal valid JSON with just the text field
+            const textMatch = toolCall.function.arguments.match(/"text"\s*:\s*"(.*?)(?<!\\)"/);
+            if (textMatch && textMatch[1]) {
+              // Extract just the text content and create a simple valid JSON
               parameters = { 
-                text: "Here are some options:", 
-                reasoning: "Failed to find valid JSON in the tool call" 
+                text: textMatch[1],
+                reasoning: "Recovered from JSON parsing error"
+              };
+              console.log("Recovered text content from damaged JSON");
+            } else {
+              // Fallback when we can't even extract the text
+              parameters = { 
+                text: "I couldn't process that correctly. Please try again with a simpler request.", 
+                reasoning: "Parameter parsing failed" 
               };
             }
-          } else {
-            // No code blocks, but still failed to parse
+          } catch (secondError) {
+            // Ultimate fallback for catastrophic parsing failures
             parameters = { 
-              text: "Here are some options:", 
+              text: "I couldn't process that correctly. Please try again with a simpler request.", 
               reasoning: "Parameter parsing failed" 
             };
           }
@@ -1008,11 +841,29 @@ async function parseToolCallFromResponse(llmResponse) {
         
         toolCalls.push({
           tool: toolName,
-          parameters
+          parameters,
+          reasoning: parameters.reasoning
         });
       }
       
       console.log(`Successfully extracted ${toolCalls.length} tool calls from native format`);
+      
+      // Final standardization: For each tool call, ensure reasoning is at the top level
+      for (const toolCall of toolCalls) {
+        // If there's no top-level reasoning but there is parameters.reasoning, move it to top level
+        if (!toolCall.reasoning && toolCall.parameters?.reasoning) {
+          toolCall.reasoning = toolCall.parameters.reasoning;
+          delete toolCall.parameters.reasoning;
+          console.log('Moved reasoning from parameters to top level');
+        }
+        
+        // If there's no reasoning at all, add a default
+        if (!toolCall.reasoning) {
+          toolCall.reasoning = "Auto-generated reasoning for tool call";
+          console.log('Added default reasoning at top level');
+        }
+      }
+      
       return { toolCalls };
     } else {
       // Handle case where tool calls aren't present
@@ -1026,7 +877,8 @@ async function parseToolCallFromResponse(llmResponse) {
             parameters: {
               text: assistantMessage.content,
               reasoning: "Converting regular message to tool call"
-            }
+            },
+            reasoning: "Converting regular message to tool call"
           }]
         };
       } else {
@@ -1037,6 +889,24 @@ async function parseToolCallFromResponse(llmResponse) {
     console.log(`Error parsing tool call: ${error.message}`);
     throw error;
   }
+}
+
+/**
+ * Gets the current date and time in Brazil (Brasília timezone)
+ * @returns {string} - Formatted date and time string
+ */
+function getBrazilDateTime() {
+    const now = new Date();
+    return new Intl.DateTimeFormat('pt-BR', {
+        timeZone: 'America/Sao_Paulo',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        weekday: 'long',
+        hour: 'numeric',
+        minute: 'numeric',
+        hour12: false
+    }).format(now);
 }
 
 /**
@@ -1142,6 +1012,9 @@ function getAvailableTools() {
     
     // Add parameters as properties
     Object.entries(tool.parameters).forEach(([paramName, description]) => {
+      // Skip the reasoning parameter as it's now at the top level
+      if (paramName === 'reasoning') return;
+      
       // If description doesn't contain "optional", add to required
       if (!description.toLowerCase().includes('optional')) {
         required.push(paramName);
@@ -1195,54 +1068,41 @@ function getAvailableTools() {
       }
     });
     
-    // Add reasoning parameter to all tools
-    properties.reasoning = {
-      type: 'string',
-      description: 'Explain briefly why you are using this tool. This field is required for all tool calls.'
-    };
-    
-    // Reasoning should always be required
-    if (!required.includes('reasoning')) {
-      required.push('reasoning');
-    }
-    
-    // Build function schema
-    const functionSchema = {
-      name: tool.name, // Do not change this as it's used for tool lookup
-      description: tool.description,
-      parameters: {
-        type: 'object',
-        properties: properties,
-        required: required
-      }
-    };
-    
-    // Add examples if available
-    if (tool.examples && tool.examples.length > 0) {
-      functionSchema.examples = tool.examples.map(example => ({
-        role: 'assistant',
-        content: [
-          {
-            type: 'function',
-            function: {
-              name: tool.name,
-              arguments: example.code
-            }
-          }
-        ]
-      }));
-    }
-    
-    // Use a format that matches our custom JSON format more closely
-    // This helps prevent the model from adding "functions." prefix
+    // Create the top level function definition with required parameters
     return {
       type: 'function',
-      function: functionSchema
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: {
+          type: 'object',
+          properties,
+          required
+        }
+      }
     };
   });
 }
 
 module.exports = {
   getNextAction,
-  processJsonStringParameters
+  processJsonStringParameters,
+  formatToolResponse,
+  getBrazilDateTime,
+  escapeParenthesesForJson,
+  
+  // Export constants for potential reuse in other modules
+  constants: {
+    COMMUNICATION_STYLE,
+    CRITICAL_BEHAVIOR,
+    BBCODE_FORMATTING,
+    TOOL_CALL_FORMAT,
+    COMPANY_INFO,
+    FORMAT_REQUIREMENTS,
+    REMEMBER_CRITICAL,
+    MESSAGE_FORMATTING_EXAMPLE,
+    ESCAPED_MESSAGE_EXAMPLE,
+    TOOL_USAGE_EXAMPLES,
+    ESCAPED_TOOL_USAGE_EXAMPLES
+  }
 };

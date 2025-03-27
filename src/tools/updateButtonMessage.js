@@ -226,104 +226,67 @@ async function updateButtonMessage(args, threadState) {
       originalColor = originalMessage.attachments[0].color || formattedColor;
     }
     
-    // Find and update the buttons in blocks or attachments
-    let blocks = [];
-    let updated = false;
+    // Step 2: Update the message blocks to indicate the selected button
+    let blocks = originalMessage.blocks ? [...originalMessage.blocks] : [];
     
-    // Process existing blocks in the message or attachments
-    if (originalMessage.blocks && originalMessage.blocks.length > 0) {
-      blocks = JSON.parse(JSON.stringify(originalMessage.blocks));
-    } else if (originalMessage.attachments && originalMessage.attachments.length > 0 && 
-               originalMessage.attachments[0].blocks) {
-      blocks = JSON.parse(JSON.stringify(originalMessage.attachments[0].blocks));
-    }
+    // Check if we have button blocks and find the actions block with buttons
+    const actionsBlockIndex = blocks.findIndex(block => 
+      block.type === 'actions' && 
+      block.elements && 
+      block.elements.some(el => el.type === 'button')
+    );
     
-    // Update buttons in the blocks
-    if (blocks.length > 0) {
-      // Look for action blocks that contain buttons
-      for (let i = 0; i < blocks.length; i++) {
-        const block = blocks[i];
-        if (block.type === 'actions' && block.elements) {
-          // Go through all button elements
-          for (let j = 0; j < block.elements.length; j++) {
-            const element = block.elements[j];
-            if (element.type === 'button') {
-              // If this is the selected button, mark it
-              if (element.value === selectedValue) {
-                // Update button style and text
-                element.style = 'primary';
-                
-                // Add ✓ to text if it doesn't already have it
-                if (!element.text.text.includes('✓')) {
-                  element.text.text = `✓ ${element.text.text}`;
-                }
-                
-                updated = true;
-              } else {
-                // For other buttons, reset style or gray them out
-                element.style = 'default';
-                
-                // If text has checkmark, remove it
-                if (element.text.text.includes('✓')) {
-                  element.text.text = element.text.text.replace('✓ ', '');
-                }
-                
-                // Disable other buttons
-                element.disabled = true;
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    // If no buttons were found or updated, add a selection text
-    if (!updated) {
-      console.log('⚠️ No button blocks found, adding selection text to message');
+    // If we found an actions block, update the buttons to show which was selected
+    if (actionsBlockIndex !== -1) {
+      // Get the original actions block
+      const actionsBlock = blocks[actionsBlockIndex];
       
-      // Find the specific button text if available in registry
-      let buttonText = selectedValue;
-      if (threadState.buttonRegistry) {
-        // Look through all registry entries for a matching value
-        for (const prefix in threadState.buttonRegistry) {
-          const registry = threadState.buttonRegistry[prefix];
-          if (registry.buttons) {
-            const matchingButton = registry.buttons.find(b => b.value === selectedValue);
-            if (matchingButton && matchingButton.text) {
-              buttonText = matchingButton.text;
-              break;
-            }
+      // If the block has buttons, update them
+      if (actionsBlock.elements && actionsBlock.elements.some(el => el.type === 'button')) {
+        // Find the selected button's text for better display
+        let selectedButtonText = "";
+        actionsBlock.elements.forEach(button => {
+          if (button.value === selectedValue) {
+            selectedButtonText = button.text.text || selectedValue;
           }
-        }
+        });
+        
+        // Create a new section block that shows the selection
+        const selectionSection = {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `✅ Opção selecionada: *${selectedButtonText}*`
+          }
+        };
+        
+        // Insert the selection section right after the actions block
+        blocks.splice(actionsBlockIndex + 1, 0, selectionSection);
+        
+        // Optionally disable the buttons to prevent further clicks
+        // by replacing the actions block with a plain message
+        blocks[actionsBlockIndex] = {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `_Buttons have been disabled after selection_`
+          }
+        };
       }
+    } else {
+      console.log(`⚠️ No button blocks found, adding selection text to message`);
       
-      // Just preserve the existing blocks for title and text information
-      // and add a new section showing the selection
+      // Create a new section showing the selection
       const newSection = {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `✓ Opção selecionada: *${buttonText}*`
+          text: `✅ Opção selecionada: *${selectedValue}*`
         }
       };
       
-      // If we have preserved blocks from the original content, examine them
-      // to avoid duplicating content
-      if (blocks.length > 0) {
-        // If the blocks already have our selection text, don't add it again
-        const selectionExists = blocks.some(block => 
-          block.type === 'section' && 
-          block.text && 
-          block.text.text && 
-          block.text.text.includes('Opção selecionada')
-        );
-        
-        if (!selectionExists) {
-          blocks.push(newSection);
-        }
-      } else {
-        blocks = [newSection];
-      }
+      // Add this section to the blocks
+      blocks.push(newSection);
     }
     
     // Update message using proper attachment structure to maintain color bar

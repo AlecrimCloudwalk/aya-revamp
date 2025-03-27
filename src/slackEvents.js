@@ -3,6 +3,7 @@ const { DEV_MODE } = require('./config.js');
 const { getThreadState } = require('./threadState.js');
 const { handleIncomingSlackMessage, handleButtonClick, processButtonInteraction } = require('./orchestrator');
 const { logError } = require('./errors.js');
+const { getSlackClient } = require('./slackClient.js');
 
 /**
  * Checks if a message should be processed in development mode
@@ -28,7 +29,16 @@ function createMessageContext(message = {}, context = {}) {
   ctx.timestamp = message.ts || ctx.timestamp;
   ctx.channelId = message.channel || ctx.channelId;
   ctx.userId = message.user || ctx.userId;
-  ctx.text = message.text || ctx.text;
+  
+  // Filter out dev prefix '!@#' from the text
+  let processedText = message.text || ctx.text || '';
+  if (processedText.startsWith('!@#')) {
+    // Simply remove the prefix without logging
+    processedText = processedText.substring(3).trim();
+  }
+  
+  // Set the filtered text
+  ctx.text = processedText;
   
   // Determine if this is a threaded message
   if (message.thread_ts) {
@@ -49,7 +59,7 @@ function createMessageContext(message = {}, context = {}) {
   
   // Add current message data for LLM context
   ctx.currentMessage = {
-    text: message.text,
+    text: processedText,
     timestamp: message.ts,
     threadPosition: message.thread_ts ? null : 1  // First message in thread is position 1
   };
@@ -171,6 +181,18 @@ function setupSlackEvents(app) {
     try {
       // Acknowledge receipt of the button action
       await ack();
+      
+      // Add loading reaction immediately
+      try {
+        const slackClient = getSlackClient();
+        await slackClient.reactions.add({
+          channel: body.channel.id,
+          timestamp: body.message.ts,
+          name: 'hourglass_flowing_sand'
+        });
+      } catch (reactionError) {
+        console.log(`Could not add loading reaction in event handler: ${reactionError.message}`);
+      }
       
       // Log the entire payload for debugging
       console.log('Button click event payload:', JSON.stringify({

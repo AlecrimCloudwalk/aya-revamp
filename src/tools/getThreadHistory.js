@@ -11,6 +11,37 @@ const { logError } = require('../errors.js');
  */
 async function getThreadHistory(args = {}, threadState) {
   try {
+    // Handle potential nested parameters structure 
+    if (args.parameters && !args.limit) {
+      console.log('Detected nested parameters structure, extracting inner parameters');
+      args = args.parameters;
+    }
+    
+    // Extract the top-level reasoning (no need to filter it out)
+    const reasoning = args.reasoning;
+    
+    // Filter out non-standard fields
+    const validFields = [
+      'limit', 'threadTs', 'includeParent'
+    ];
+    
+    const filteredArgs = {};
+    for (const key of validFields) {
+      if (args[key] !== undefined) {
+        filteredArgs[key] = args[key];
+      }
+    }
+    
+    // Log any filtered fields for debugging (excluding reasoning which we expect at top level)
+    const filteredKeys = Object.keys(args)
+      .filter(key => !validFields.includes(key) && key !== 'reasoning');
+    if (filteredKeys.length > 0) {
+      console.log(`Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
+    }
+    
+    // Use filtered args from now on
+    args = filteredArgs;
+    
     // Default arguments
     const {
       limit = 20
@@ -77,6 +108,11 @@ async function getThreadHistory(args = {}, threadState) {
         
         // Format text content
         let formattedText = message.text || '';
+        
+        // Filter out dev prefix '!@#' from the text
+        if (formattedText.startsWith('!@#')) {
+          formattedText = formattedText.substring(3).trim();
+        }
         
         // Always process attachments
         if (message.attachments?.length) {

@@ -7,8 +7,7 @@ const { logError } = require('../errors.js');
  * Creates a message with emoji voting options
  * 
  * @param {Object} args - Arguments for the emoji vote message
- * @param {string} args.title - Title of the vote
- * @param {string} args.text - Vote description/question
+ * @param {string} args.text - Vote description/question with [header] for title
  * @param {Array} args.options - Array of emoji voting options
  * @param {string} args.color - Color of the message sidebar (optional)
  * @param {string} args.threadTs - Thread timestamp to reply in (optional)
@@ -17,7 +16,7 @@ const { logError } = require('../errors.js');
  */
 async function createEmojiVote(args, threadState) {
   try {
-    const { title, text, options, color, threadTs } = args;
+    const { text, options, color, threadTs } = args;
     
     // Get context from metadata
     const context = threadState.getMetadata('context');
@@ -55,7 +54,6 @@ async function createEmojiVote(args, threadState) {
     
     // Format the message
     const message = formatSlackMessage({
-      title,
       text: fullText,
       color: color || '#0078D7'
     });
@@ -89,7 +87,6 @@ async function createEmojiVote(args, threadState) {
     
     // Register this vote
     threadState.voteRegistry[voteId] = {
-      title,
       text,
       options: parsedOptions,
       messageTs: response.ts,

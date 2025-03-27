@@ -54,7 +54,6 @@ function normalizeColor(color) {
  * 
  * @param {Object} args - Arguments for updating the message
  * @param {string} args.messageTs - Timestamp of the message to update
- * @param {string} args.title - New title for the message
  * @param {string} args.text - New text content for the message
  * @param {string} args.color - Color for the message (optional)
  * @param {Array} args.fields - Array of field objects (optional)
@@ -67,14 +66,14 @@ function normalizeColor(color) {
 async function updateMessage(args, threadState) {
   try {
     // Handle potential nested parameters structure 
-    if (args.parameters && !args.messageTs && !args.text && !args.title) {
+    if (args.parameters && !args.messageTs && !args.text) {
       console.log('⚠️ Detected nested parameters structure, extracting inner parameters');
       args = args.parameters;
     }
     
     // Filter out non-standard fields
     const validFields = [
-      'messageTs', 'title', 'text', 'color', 'fields', 
+      'messageTs', 'text', 'color', 'fields', 
       'actions', 'removeButtons', 'selectedButtonText', 'channel'
     ];
     
@@ -97,7 +96,6 @@ async function updateMessage(args, threadState) {
     // Extract parameters
     const { 
       messageTs, 
-      title, 
       text, 
       color = 'blue', 
       fields, 
@@ -115,8 +113,8 @@ async function updateMessage(args, threadState) {
       throw new Error('Message timestamp (messageTs) is required');
     }
     
-    if (!text && !fields && !title) {
-      throw new Error('Either text, title, or fields must be provided');
+    if (!text && !fields) {
+      throw new Error('Either text or fields must be provided');
     }
     
     // Get context from metadata
@@ -232,17 +230,6 @@ async function updateMessage(args, threadState) {
     // Start building our message blocks
     const blocks = [];
     
-    // Add title as a section with bold text if provided
-    if (title) {
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*${title}*`
-        }
-      });
-    }
-    
     // Add main text content if provided
     if (text) {
       blocks.push({
@@ -324,7 +311,7 @@ async function updateMessage(args, threadState) {
       attachments: [{
         color: formattedColor,
         blocks: blocks,
-        fallback: title || text || "Updated message"
+        fallback: text || "Updated message"
       }]
     };
     
@@ -337,7 +324,6 @@ async function updateMessage(args, threadState) {
     }
     threadState.updatedMessages[updateKey] = {
       timestamp: new Date().toISOString(),
-      title, 
       text
     };
     

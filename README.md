@@ -297,7 +297,7 @@ Aya is designed to be an enthusiastic, cheerful, and energetic assistant! 🎉
 
 Aya has built-in awareness of:
 - **Current Date/Time**: Automatically provides Brazilian date and time (Brasília timezone)
-- **Company Information**: Knows about CloudWalk, its products (Jim, InfinitePay), and that most employees are Brazilian
+- **Company Information**: Knows about CloudWalk, its products (JIM, InfinitePay), and that most employees are Brazilian
 - **Conversation History**: Understands the thread context in Slack conversations
 - **User Information**: Recognizes user IDs and channels
 

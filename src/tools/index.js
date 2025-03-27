@@ -14,11 +14,10 @@ const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
 const toolRegistry = {
   postMessage: {
     name: 'postMessage',
-    description: 'Posts a message to Slack with rich formatting options. Always use this tool for all user responses. Supports markdown-style formatting and easy-to-use interactive elements.',
+    description: 'Posts a message to Slack with rich formatting options. Always use this tool for all user responses. Supports BBCode-style formatting tags and easy-to-use interactive elements.',
     function: postMessage,
     parameters: {
-      title: 'Main message title displayed as a header',
-      text: 'Main message content with rich formatting. Supports Slack markdown (*bold*, _italic_, `code`) and special markers: # Header, --- for dividers, > for context blocks, !image:url:alt_text',
+      text: 'Main message content with hybrid formatting. Use Markdown for basic formatting (*bold*, _italic_, `code`) and BBCode-style tags for specialized elements ([header]...[!header], [context]...[!context], etc.). See formatting.md for details.',
       color: 'Color for the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
       buttons: 'Array of button definitions - can be simple strings or objects with text, style ("primary"/"danger"), url, or value properties',
       fields: 'Two-column layout items as array of {title, value} objects or simple strings',
@@ -28,20 +27,20 @@ const toolRegistry = {
     isAsync: false,
     examples: [
       {
-        description: 'Basic message with title and text',
-        code: '{ title: "Important Update", text: "Meeting scheduled for tomorrow at 2pm.", color: "#3AA3E3" }'
+        description: 'Basic message with text',
+        code: '{ text: "Meeting scheduled for tomorrow at 2pm.", color: "#3AA3E3" }'
       },
       {
         description: 'Message with structured data in a table',
-        code: '{ title: "Team Roster", table: { headers: ["Name", "Role"], rows: [["John", "Developer"], ["Sarah", "Designer"]] }, color: "good" }'
+        code: '{ text: "[header]Team Roster[!header]", table: { headers: ["Name", "Role"], rows: [["John", "Developer"], ["Sarah", "Designer"]] }, color: "good" }'
       },
       {
         description: 'Interactive message with buttons',
-        code: '{ title: "Action Required", text: "Please select an option:", actions: [{ text: "Approve", value: "approve", style: "primary" }, { text: "Reject", value: "reject", style: "danger" }], color: "#E01E5A" }'
+        code: '{ text: "[header]Action Required[!header]\\n\\nPlease select an option:", actions: [{ text: "Approve", value: "approve", style: "primary" }, { text: "Reject", value: "reject", style: "danger" }], color: "#E01E5A" }'
       },
       {
         description: 'Status message with timeline',
-        code: '{ title: "Project Status", timeline: [{ title: "Planning", status: "completed" }, { title: "Development", status: "current" }, { title: "Testing", status: "pending" }], color: "#2EB67D" }'
+        code: '{ text: "[header]Project Status[!header]", timeline: [{ title: "Planning", status: "completed" }, { title: "Development", status: "current" }, { title: "Testing", status: "pending" }], color: "#2EB67D" }'
       }
     ]
   },
@@ -70,8 +69,7 @@ const toolRegistry = {
     description: 'Creates an interactive message with buttons for user input',
     function: createButtonMessage,
     parameters: {
-      title: 'Title of the message',
-      text: 'Message text content',
+      text: 'Message text content with header and description',
       color: 'Color of the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
       buttons: 'Array of button objects with text and value properties, e.g. [{text: "Option 1", value: "opt1"}, {text: "Option 2", value: "opt2"}]',
       threadTs: 'Thread timestamp to reply in (optional)',
@@ -85,8 +83,7 @@ const toolRegistry = {
     function: updateMessage,
     parameters: {
       messageTs: 'Timestamp of the message to update',
-      title: 'New title for the message',
-      text: 'New text content for the message',
+      text: 'New text content for the message with [header] tags for headings',
       color: 'Color for the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
       fields: 'Array of field objects (optional)',
       actions: 'New array of button objects (optional)',
@@ -111,8 +108,7 @@ const toolRegistry = {
     description: 'Creates a message with emoji voting options',
     function: createEmojiVote,
     parameters: {
-      title: 'Title of the vote',
-      text: 'Vote description/question',
+      text: 'Vote description/question with [header] for title',
       options: 'Array of emoji voting options with text and emoji properties',
       color: 'Color of the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
       threadTs: 'Thread timestamp to reply in (optional)'
@@ -158,8 +154,18 @@ const getTool = (name) => {
   const cleanName = name.replace(/^functions\./, '');
   
   if (!toolRegistry[cleanName]) {
+    // Enhanced error message with available tools for debugging
+    const availableTools = Object.keys(toolRegistry).join(', ');
+    console.error(`Tool "${cleanName}" not found in registry. Available tools: ${availableTools}`);
     throw new Error(`Tool "${cleanName}" not found in registry`);
   }
+  
+  // Check if the function is actually defined
+  if (!toolRegistry[cleanName].function) {
+    console.error(`Tool "${cleanName}" exists in registry but has no function implementation`);
+    throw new Error(`Tool "${cleanName}" implementation is missing`);
+  }
+  
   return toolRegistry[cleanName].function;
 };
 
@@ -203,5 +209,7 @@ module.exports = {
   updateMessage,
   updateButtonMessage,
   createEmojiVote,
-  getVoteResults
+  getVoteResults,
+  // Add the full registry for direct inspection
+  toolRegistry
 }; 

@@ -1,4 +1,10 @@
 // Tool for creating interactive messages with buttons
+// 
+// MANDATORY RULES:
+// 1. The text field outside of blocks and attachments MUST ALWAYS be empty ("") to prevent duplicate text
+// 2. All message content MUST be placed inside an attachments block to ensure proper vertical colored bar display
+// 3. Never place content directly in blocks at the top level, always use attachments with blocks inside
+//
 const { formatSlackMessage } = require('../slackFormat.js');
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
@@ -53,8 +59,7 @@ function normalizeColor(color) {
  * Creates a message with interactive buttons
  * 
  * @param {Object} args - Arguments for the button message
- * @param {string} args.title - Title of the message
- * @param {string} args.text - Message content
+ * @param {string} args.text - Message content with [header] for title
  * @param {string} args.color - Color of the message (optional)
  * @param {Array|string} args.buttons - Array of button objects or JSON string representing buttons
  * @param {string} args.callbackId - Unique identifier for this set of buttons
@@ -67,15 +72,18 @@ async function createButtonMessage(args, threadState) {
     console.log('⚠️ createButtonMessage args:', JSON.stringify(args, null, 2));
     
     // Handle potential nested parameters structure 
-    if (args.parameters && !args.text && !args.title && !args.buttons) {
+    if (args.parameters && !args.text && !args.buttons) {
       console.log('⚠️ Detected nested parameters structure, extracting inner parameters');
       args = args.parameters;
     }
     
+    // Extract the top-level reasoning (no need to filter it out)
+    const reasoning = args.reasoning;
+    
     // Filter out non-standard fields that shouldn't be sent to Slack
-    // This prevents fields like 'reasoning' from being incorrectly included
+    // Note: reasoning is now expected at the top level, not in parameters
     const validFields = [
-      'text', 'title', 'color', 'buttons', 'callbackId', 
+      'text', 'color', 'buttons', 'callbackId', 
       'actionPrefix', 'threadTs', 'channel'
     ];
     
@@ -86,8 +94,9 @@ async function createButtonMessage(args, threadState) {
       }
     }
     
-    // Log any filtered fields for debugging
-    const filteredKeys = Object.keys(args).filter(key => !validFields.includes(key));
+    // Log any filtered fields for debugging (excluding reasoning which we expect at top level)
+    const filteredKeys = Object.keys(args)
+      .filter(key => !validFields.includes(key) && key !== 'reasoning');
     if (filteredKeys.length > 0) {
       console.log(`⚠️ Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
     }
@@ -96,7 +105,6 @@ async function createButtonMessage(args, threadState) {
     args = filteredArgs;
     
     // Extract parameters with validation - use let for variables we'll modify later
-    let title = args.title || 'Interactive Message';
     let text = args.text || 'Please select an option';
     let buttons = args.buttons || [];
     let color = args.color || 'blue';
@@ -198,28 +206,27 @@ async function createButtonMessage(args, threadState) {
       throw new Error('Channel ID not available in thread context or args');
     }
     
+    console.log(`Using channel ID: ${channelId}`);
+    console.log(`Using thread timestamp: ${threadTimestamp || 'none (new thread)'}`);
+    
     // Check for potential duplicates in the button registry
     if (threadState.buttonRegistry) {
       const existingButtons = Object.values(threadState.buttonRegistry);
       
-      // Look for a similar button set (same title, text, and similar buttons)
+      // Look for a similar button set (similar text and buttons)
       const potentialDuplicate = existingButtons.find(registry => {
-        // Check if title and text are the same or very similar
-        const titleMatch = registry.title === title || 
-                          (title && registry.title && 
-                          (title.includes(registry.title) || registry.title.includes(title)));
-                          
+        // Check if text is the same or very similar
         const textMatch = registry.text === text || 
                          (text && registry.text && 
                          (text.includes(registry.text) || registry.text.includes(text)));
         
-        // If both title and text match, this is likely a duplicate
-        return titleMatch && textMatch;
+        // If text matches, this is likely a duplicate
+        return textMatch;
       });
       
       if (potentialDuplicate) {
-        console.log(`⚠️ Found potentially duplicate button message: "${title}"`);
-        console.log(`- Existing: "${potentialDuplicate.title}" from ${potentialDuplicate.timestamp}`);
+        console.log(`⚠️ Found potentially duplicate button message`);
+        console.log(`- Existing: from ${potentialDuplicate.timestamp}`);
         
         // Return the existing button info instead of creating a new one
         return {
@@ -237,52 +244,16 @@ async function createButtonMessage(args, threadState) {
     // Get Slack client
     const slackClient = getSlackClient();
     
-    // Generate a random actionPrefix if not provided
-    const actionPrefix = args.actionPrefix || `btn_${Date.now().toString()}_${Math.floor(Math.random() * 1000)}`;
+    // Generate a unique callback ID for this button set if not provided
+    const callbackId = args.callbackId || `buttons_${Date.now()}`;
     
-    // Add callback_id to each button for tracking
-    const actionsWithCallbackId = buttons.map((button, index) => {
-      // Create a unique action ID that encodes the necessary tracking info
-      const actionId = `${actionPrefix}_${index}`;
-      
-      // Store the metadata mapping in thread state for reference when button is clicked
-      if (!threadState.buttonMetadataMap) {
-        threadState.buttonMetadataMap = {};
-      }
-      
-      // Store the metadata mapped to the action_id
-      threadState.buttonMetadataMap[actionId] = {
-        callbackId: actionPrefix,
-        buttonIndex: index,
-        threadTs: threadTs || context?.threadTs,
-        channelId,
-        userId: context?.userId
-      };
-      
-      return {
-        text: button.text || `Button ${index + 1}`,
-        value: button.value || `${index}`,
-        style: button.style,
-        action_id: actionId
-      };
-    });
+    // Generate a unique prefix for action IDs if needed
+    const actionPrefix = args.actionPrefix || callbackId;
     
-    // Create blocks to be placed inside the attachment
+    // Create the message blocks
     const blocks = [];
     
-    // Add title as a section with bold text (not header block)
-    // This matches postMessage.js approach for consistency
-    if (title) {
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*${title}*`
-        }
-      });
-    }
-    
-    // Add section with text if provided
+    // Add main text content
     if (text) {
       blocks.push({
         type: 'section',
@@ -293,10 +264,11 @@ async function createButtonMessage(args, threadState) {
       });
     }
     
-    // Add buttons as actions block
+    // Add actions/buttons
     blocks.push({
       type: 'actions',
-      elements: actionsWithCallbackId.map(button => ({
+      block_id: `actions_${actionPrefix}`,
+      elements: buttons.map((button, index) => ({
         type: 'button',
         text: {
           type: 'plain_text',
@@ -304,81 +276,54 @@ async function createButtonMessage(args, threadState) {
           emoji: true
         },
         value: button.value,
-        action_id: button.action_id,
-        style: button.style || undefined
+        action_id: `${actionPrefix}_action_${index}`,
+        style: button.style || undefined // Default: no style (gray)
       }))
     });
     
-    // Message structure for Slack API:
-    // 1. empty text field to prevent duplication
-    // 2. blocks go inside the colored attachment
-    // 3. color goes on the attachment
-    // This structure ensures we get the colored vertical bar and no duplicated content
-    
-    // Prepare message options using attachments for color bar
-    const messageOptions = {
+    // If we're in a thread, use the thread_ts
+    const messageParams = {
       channel: channelId,
-      text: "", // Empty string for fallback, content will be in blocks inside attachment
+      blocks: blocks,
+      text: "", // Empty text to prevent duplication
       attachments: [{
         color: formattedColor,
-        blocks: blocks,
-        fallback: title || text || "Button message"
+        fallback: text || "Button message"
       }]
     };
     
-    // Add thread_ts if we have a valid thread timestamp
+    // Update with Slack's recommended approach (using Block Kit blocks in attachments)
+    messageParams.attachments = [{
+      color: formattedColor,
+      blocks: blocks,
+      fallback: text || "Button message"
+    }];
+    
+    // Clear the blocks at the top level to prevent duplication
+    messageParams.blocks = [];
+    
+    // Add thread_ts if needed
     if (threadTimestamp) {
-      messageOptions.thread_ts = threadTimestamp;
+      messageParams.thread_ts = threadTimestamp;
     }
     
-    // Debug logging
-    console.log('BUTTON MESSAGE - Message structure:');
-    console.log(JSON.stringify({
-      hasText: !!messageOptions.text,
-      textLength: messageOptions.text?.length,
-      hasAttachments: !!messageOptions.attachments && messageOptions.attachments.length > 0,
-      attachmentCount: messageOptions.attachments?.length || 0,
-      blockCount: messageOptions.attachments?.[0]?.blocks?.length || 0,
-      buttonCount: messageOptions.attachments?.[0]?.blocks?.find(b => b.type === 'actions')?.elements?.length || 0,
-      threadTs: messageOptions.thread_ts || null
-    }, null, 2));
-    
     // Send the message
-    const response = await slackClient.chat.postMessage(messageOptions);
+    const response = await slackClient.chat.postMessage(messageParams);
     
     // Store button metadata in thread state for later retrieval
     if (!threadState.buttonRegistry) {
       threadState.buttonRegistry = {};
     }
     
-    // Register this set of buttons
-    threadState.buttonRegistry[actionPrefix] = {
+    // Register this button set
+    threadState.buttonRegistry[callbackId] = {
+      text,
       buttons,
       messageTs: response.ts,
-      threadTs: threadTimestamp,
       channelId,
-      userId: context?.userId,
-      timestamp: new Date().toISOString(),
-      title,  // Store title for duplicate detection
-      text    // Store text for duplicate detection
+      callbackId,
+      timestamp: new Date().toISOString()
     };
-    
-    // Also register each button's specific action ID for easier lookup
-    actionsWithCallbackId.forEach((button, index) => {
-      const specificActionId = button.action_id;
-      threadState.buttonRegistry[specificActionId] = {
-        actionPrefix,
-        buttonIndex: index,
-        text: button.text,
-        value: button.value,
-        messageTs: response.ts,
-        threadTs: threadTimestamp,
-        channelId,
-        timestamp: new Date().toISOString()
-      };
-    });
-    
-    console.log(`Registered button set with action prefix: ${actionPrefix} and ${actionsWithCallbackId.length} individual buttons`);
     
     // Add metadata to button state for reference
     if (typeof threadState.setButtonState === 'function') {
@@ -412,6 +357,8 @@ async function createButtonMessage(args, threadState) {
       }
     };
   } catch (error) {
+    console.log(`❌ CRITICAL ERROR: ${error.message}`);
+    console.log('Stack trace:', error.stack);
     logError('Error creating button message', error, { args });
     throw error;
   }
