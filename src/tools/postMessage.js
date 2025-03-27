@@ -10,6 +10,21 @@ const { logError } = require('../errors.js');
 const { getSlackClient } = require('../slackClient.js');
 
 /**
+ * Conditionally log messages based on environment variables
+ * @param {string} message - The message to log
+ * @param {Object} [data] - Optional data to log
+ */
+function debugLog(message, data) {
+  if (process.env.DEBUG === 'true' || process.env.DEBUG_SLACK === 'true') {
+    if (data) {
+      console.log(message, data);
+    } else {
+      console.log(message);
+    }
+  }
+}
+
+/**
  * Convert named colors to proper hex values
  * @param {string} color - The color name or hex value
  * @returns {string} - A properly formatted color value
@@ -70,6 +85,12 @@ function processUserMentions(text) {
     return text;
   }
   
+  // Handle (usercontext) format which is our new preferred format
+  if (text.includes('(usercontext)')) {
+    console.log('🔍 Text contains usercontext format, keeping as is for block processing');
+    return text;
+  }
+  
   // First, normalize any improper format like <@|USER_ID> to proper format
   text = text.replace(/<@\|([A-Z0-9]+)>/g, '<@$1>');
   
@@ -79,12 +100,41 @@ function processUserMentions(text) {
     return text;
   }
   
+  // Skip processing URLs in angle brackets
+  // This ensures URLs like <https://example.com> remain intact
+  let processedText = '';
+  let currentPos = 0;
+  const urlRegex = /<(https?:\/\/[^>]+)>/g;
+  let match;
+  
+  while ((match = urlRegex.exec(text)) !== null) {
+    // Add text before the URL
+    processedText += processMentionsInSegment(text.substring(currentPos, match.index));
+    // Add the URL as is
+    processedText += match[0];
+    currentPos = match.index + match[0].length;
+  }
+  
+  // Process the remaining text
+  if (currentPos < text.length) {
+    processedText += processMentionsInSegment(text.substring(currentPos));
+  }
+  
+  return processedText || text;
+}
+
+/**
+ * Helper function to process mentions in a text segment
+ * @param {string} segment - Text segment to process
+ * @returns {string} - Processed text segment
+ */
+function processMentionsInSegment(segment) {
   // Convert plain @USER_ID to proper Slack mention format <@USER_ID>
-  text = text.replace(/@([A-Z0-9]+)\b/g, '<@$1>');
+  segment = segment.replace(/@([A-Z0-9]+)\b/g, '<@$1>');
   
   // Ensure any standalone USER_ID that looks like a user ID is properly formatted
   // This matches word boundaries to avoid capturing parts of other words/IDs
-  text = text.replace(/\b([A-Z][A-Z0-9]{7,})\b/g, (match, userId) => {
+  segment = segment.replace(/\b([A-Z][A-Z0-9]{7,})\b/g, (match, userId) => {
     // Only convert if it looks like a Slack user ID (starts with U or W typically)
     if (/^[UW][A-Z0-9]{8,}$/.test(userId)) {
       return `<@${userId}>`;
@@ -92,7 +142,7 @@ function processUserMentions(text) {
     return match; // Return unchanged if not a likely user ID
   });
   
-  return text;
+  return segment;
 }
 
 /**
@@ -155,46 +205,59 @@ function parseRichText(text) {
         const imageUrl = imageString.substring(0, firstColonIndex);
         const altText = imageString.substring(firstColonIndex + 1) || 'Image';
         
+        // Use an actual image block to display the image
         blocks.push({
           type: 'image',
           image_url: imageUrl,
           alt_text: altText
         });
+        
+        // Add a clickable link below the image using a section block
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `<${imageUrl}|${altText}>`
+          }
+        });
+        
+        console.log(`🖼️ Added image block with URL: ${imageUrl} and alt text: ${altText}`);
+      } else {
+        // If there's no colon after the URL, use the entire string as the URL
+        const imageUrl = imageString.trim();
+        if (imageUrl) {
+          blocks.push({
+            type: 'image',
+            image_url: imageUrl,
+            alt_text: 'Image'
+          });
+          
+          // Add a clickable link below the image
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `<${imageUrl}|View Image>`
+            }
+          });
+          
+          console.log(`🖼️ Added image block with URL: ${imageUrl} (no alt text provided)`);
+        }
       }
     } else if (trimmedParagraph.startsWith('!emojis:')) {
       // Emoji showcase (!emojis:basketball,snowboarder,checkered_flag)
       const emojiString = trimmedParagraph.substring(8).trim();
       const emojiNames = emojiString.split(',').map(e => e.trim());
       
-      if (emojiNames.length > 0) {
-        const richTextElements = [];
-        
-        emojiNames.forEach((emojiName, index) => {
-          // Add emoji
-          richTextElements.push({
-            type: 'emoji',
-            name: emojiName
-          });
-          
-          // Add space between emojis (except after the last one)
-          if (index < emojiNames.length - 1) {
-            richTextElements.push({
-              type: 'text',
-              text: ' '
-            });
-          }
-        });
-        
-        blocks.push({
-          type: 'rich_text',
-          elements: [
-            {
-              type: 'rich_text_section',
-              elements: richTextElements
-            }
-          ]
-        });
-      }
+      // Convert to simple text with emoji codes
+      const emojiText = emojiNames.map(name => `:${name}:`).join(' ');
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: emojiText
+        }
+      });
     } else if (trimmedParagraph.startsWith('!big-emoji:')) {
       // Single big emoji emphasis (!big-emoji:tada)
       const emojiName = trimmedParagraph.substring(11).trim();
@@ -485,7 +548,7 @@ function parseBBCodeToBlocks(text) {
       
       console.log(`👤 Processing user context with text: "${userIdsText}"`);
       
-      // Simple and direct approach - split by commas and create context elements
+      // Extract user IDs from the raw string
       const userIds = userIdsText.split(',')
         .map(id => id.trim())
         .filter(id => id);
@@ -505,52 +568,85 @@ function parseBBCodeToBlocks(text) {
         return;
       }
       
-      // Create elements array for the context block
-      const elements = [];
+      // Create elements for the context block
+      const userElements = [];
       
-      // Process each user ID or name (up to 10 to prevent overflow)
-      const displayUsers = userIds.slice(0, 10);
-      displayUsers.forEach(userId => {
-        console.log(`  - Processing user reference: "${userId}"`);
-        
-        // Directly use the text as provided - if it's already a mention, Slack will render it properly
-        // If it's a user ID without the mention format, add the mention format
-        let formattedMention = userId;
-        
-        // Check if it already has mention formatting
-        if (!userId.startsWith('<@') && !userId.endsWith('>')) {
-          // Check if it looks like a raw user ID (starts with U and has uppercase/numbers)
-          if (/^U[A-Z0-9]+$/i.test(userId)) {
-            formattedMention = `<@${userId}>`;
-            console.log(`  - Added mention formatting: ${formattedMention}`);
-          } else {
-            // Just use the name directly for display
-            console.log(`  - Using name as-is: ${userId}`);
-          }
+      // Get workspace ID for profile images
+      const workspaceId = getWorkspaceId();
+
+      // Add user elements for each valid user ID
+      for (const userId of userIds) {
+        if (userId && userId.match(/^[UW][A-Z0-9]+$/)) {
+          // Use user mentions directly which will show avatars in Slack
+          userElements.push({
+            type: "mrkdwn",
+            text: `<@${userId}>`
+          });
+          console.log(`  - Added user mention for ID: ${userId}`);
+        } else {
+          console.warn(`⚠️ Invalid user ID format: ${userId}`);
         }
-        
-        elements.push({
-          type: 'mrkdwn',
-          text: formattedMention
-        });
-      });
-      
-      // Show if more users were truncated
-      if (userIds.length > 10) {
-        elements.push({
-          type: 'mrkdwn',
-          text: `_and ${userIds.length - 10} more_`
-        });
       }
       
-      // Create and add the context block
-      blocks.push({
-        type: 'context',
-        elements: elements
-      });
+      // If we have description text, add it after the users
+      if (userContextData.description && userContextData.description.trim().length > 0) {
+        const descriptionText = userContextData.description.trim();
+        // Add the description as mrkdwn text element
+        userElements.push({
+          type: "mrkdwn",
+          text: descriptionText
+        });
+        console.log(`📝 Adding description text: "${descriptionText}"`);
+      }
       
-      console.log(`✅ Created user context block with ${elements.length} elements`);
+      // Only add the block if we have elements
+      if (userElements.length > 0) {
+        console.log(`👥 Adding context block with ${userElements.length} user mentions`);
+        
+        // For a user context block, we want to show the mentions AND add a message
+        // First, create the block with user mentions only
+        const contextBlock = {
+          type: 'context',
+          elements: userElements
+        };
+        
+        blocks.push(contextBlock);
+      } else {
+        console.log('⚠️ No valid user IDs found in usercontext block');
+      }
+      
       return;
+    } else if (trimmedParagraph.startsWith('!image-block:')) {
+      // Handle Markdown image syntax converted to image block
+      const imageString = trimmedParagraph.substring(13);
+      const firstColonIndex = imageString.indexOf(':');
+      
+      if (firstColonIndex > 0) {
+        const imageUrl = imageString.substring(0, firstColonIndex);
+        const altText = imageString.substring(firstColonIndex + 1) || 'Image';
+        
+        // Create a proper image block (will appear as an embedded image in Slack)
+        blocks.push({
+          type: 'image',
+          image_url: imageUrl,
+          alt_text: altText
+        });
+        
+        console.log(`🖼️ Added image block from Markdown syntax with URL: ${imageUrl} and alt text: ${altText}`);
+      } else {
+        // If there's no colon after the URL, use the entire string as the URL
+        const imageUrl = imageString.trim();
+        if (imageUrl) {
+          blocks.push({
+            type: 'image',
+            image_url: imageUrl,
+            alt_text: 'Image'
+          });
+          
+          console.log(`🖼️ Added image block from Markdown syntax with URL: ${imageUrl} (no alt text provided)`);
+        }
+      }
+      return; // Skip further processing for this paragraph
     } else if (trimmedParagraph.startsWith('!image:')) {
       // Image (!image:url:alt_text)
       const imageString = trimmedParagraph.substring(7);
@@ -560,15 +656,44 @@ function parseBBCodeToBlocks(text) {
         const imageUrl = imageString.substring(0, firstColonIndex);
         const altText = imageString.substring(firstColonIndex + 1) || 'Image';
         
-        // Don't use image blocks in attachments as they may not work well
-        // Instead use a simple link with an emoji indicator
+        // Use an actual image block to display the image
+        blocks.push({
+          type: 'image',
+          image_url: imageUrl,
+          alt_text: altText
+        });
+        
+        // Add a clickable link below the image using a section block
         blocks.push({
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: `🖼️ <${imageUrl}|${altText}>`
+            text: `<${imageUrl}|${altText}>`
           }
         });
+        
+        console.log(`🖼️ Added image block with URL: ${imageUrl} and alt text: ${altText}`);
+      } else {
+        // If there's no colon after the URL, use the entire string as the URL
+        const imageUrl = imageString.trim();
+        if (imageUrl) {
+          blocks.push({
+            type: 'image',
+            image_url: imageUrl,
+            alt_text: 'Image'
+          });
+          
+          // Add a clickable link below the image
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `<${imageUrl}|View Image>`
+            }
+          });
+          
+          console.log(`🖼️ Added image block with URL: ${imageUrl} (no alt text provided)`);
+        }
       }
     } else if (trimmedParagraph.startsWith('!emojis:')) {
       // Emoji showcase (!emojis:basketball,snowboarder,checkered_flag)
@@ -650,6 +775,14 @@ function parseBBCode(text) {
   // Do the same for inline code
   formattedText = formattedText.replace(/`([^`]+)`/g, (match, code) => {
     return '`' + code.replace(/\(/g, '{{LEFT_PAREN}}').replace(/\)/g, '{{RIGHT_PAREN}}') + '`';
+  });
+  
+  // Process Markdown image syntax ![alt](url) to a special image marker that will be converted to blocks
+  formattedText = formattedText.replace(/!\[(.*?)\]\((https?:\/\/[^()]+)\)/g, (match, alt, url) => {
+    console.log(`🖼️ Converting markdown image to Slack image block: "${match}" => "${alt}" -> "${url}"`);
+    // Create a special marker that will be processed later to create an image block
+    // We'll use !image-block: prefix to distinguish from regular hyperlinks
+    return `!image-block:${url}:${alt || 'Image'}`;
   });
   
   // Headers - (header)text(!header) or (h1)text(!h1)
@@ -734,18 +867,70 @@ function parseBBCode(text) {
   // Image references - (image:url:alt_text)
   // Use the replacement function to handle missing alt text
   formattedText = formattedText.replace(/\(image:(.*?)(?::(.*?))?\)/g, (match, url, alt) => {
-    return `!image:${url}:${alt || 'Image'}`;
+    debugLog(`🔄 Processing image tag with URL: ${url}`);
+    // Convert directly to Slack hyperlink format instead of !image: marker
+    return `<${url}|${alt || 'Image'}>`;
   });
   
   // For backward compatibility, also handle square bracket format
   formattedText = formattedText.replace(/\[image:(.*?)(?::(.*?))?\]/g, (match, url, alt) => {
-    return `!image:${url}:${alt || 'Image'}`;
+    debugLog(`🔄 Processing image tag with square brackets: ${url}`);
+    // Convert directly to Slack hyperlink format instead of !image: marker
+    return `<${url}|${alt || 'Image'}>`;
+  });
+  
+  // Process links with format [title](url) to Slack format <url|title>
+  formattedText = formattedText.replace(/\[(.*?)\]\((https?:\/\/[^()]+)\)/g, (match, title, url) => {
+    console.log(`🔄 Converting markdown link to Slack format: "${match}" => "${title}" -> "${url}"`);
+    // Ensure URL is properly formatted for Slack
+    const cleanUrl = url.trim().replace(/[<>]/g, '');
+    const slackFormat = `<${cleanUrl}|${title}>`;
+    console.log(`   Result: "${slackFormat}"`);
+    // Mark processed links to avoid double processing
+    return `__PROCESSED_LINK__${slackFormat}`;
+  });
+  
+  // Process plain URLs that aren't already in <>
+  formattedText = formattedText.replace(/(^|[^<])(https?:\/\/[^\s<>]+)/g, (match, prefix, url) => {
+    // Only process if not already inside < >
+    if (match.indexOf('<') === -1) {
+      console.log(`🔄 Converting plain URL to Slack format: "${url}"`);
+      const slackFormat = `${prefix}<${url}>`;
+      console.log(`   Result: "${slackFormat}"`);
+      return slackFormat;
+    }
+    return match;
   });
   
   // Restore placeholders in code blocks
   formattedText = formattedText.replace(/{{LEFT_PAREN}}/g, '(').replace(/{{RIGHT_PAREN}}/g, ')');
   
   console.log('💬 Text after BBCode parsing:', formattedText.substring(0, 100) + (formattedText.length > 100 ? '...' : ''));
+  
+  // Additional fallback for markdown links that the first regex didn't catch
+  // This is a more relaxed version that captures more complex URLs
+  formattedText = formattedText.replace(/\[(.*?)\]\(([^()]*(?:\/|\.)[^()]*)\)/g, (match, title, url) => {
+    // Skip if it doesn't look like a URL or if it was already processed
+    if (match.includes('__PROCESSED_LINK__') || 
+        (!url.match(/^https?:\/\//) && !url.match(/^www\./))) {
+      return match;
+    }
+    
+    console.log(`🔄 Converting complex markdown link to Slack format: "${match}"`);
+    
+    // Ensure URL has http/https
+    let cleanUrl = url.trim().replace(/[<>]/g, '');
+    if (cleanUrl.startsWith('www.')) {
+      cleanUrl = 'https://' + cleanUrl;
+    }
+    
+    const slackFormat = `<${cleanUrl}|${title}>`;
+    console.log(`   Result: "${slackFormat}"`);
+    return `__PROCESSED_LINK__${slackFormat}`;
+  });
+  
+  // Remove the processing markers
+  formattedText = formattedText.replace(/__PROCESSED_LINK__/g, '');
   
   return formattedText;
 }
@@ -859,511 +1044,919 @@ function safeSlackText(text) {
 }
 
 /**
- * Posts a message to a channel
- * @param {Object} args - The arguments for the message
- * @param {string} args.text - The text content of the message
- * @param {string} [args.color] - An optional color for the message (blue, green, red, orange, purple or hex code)
- * @param {Array} [args.buttons] - Optional array of button definitions
- * @param {Array} [args.fields] - Optional array of field definitions for two-column layout
- * @param {Array} [args.images] - Optional array of image URLs to include
- * @param {Array} [args.blocks] - Optional array of simplified block definitions (for advanced usage)
- * @param {Object} threadState - The current thread state
- * @returns {Promise<Object>} - Result of posting the message
- * 
- * Note: Block Kit blocks are placed inside attachments along with the color property
- * to ensure the vertical colored bar appears with the content in Slack messages.
+ * Direct parser that converts BBCode style tags to appropriate Slack blocks
+ * @param {string} text - Input text with BBCode-style formatting
+ * @returns {Array} - Array of Block Kit blocks
+ */
+function parseTextToBlocks(text) {
+  if (!text) return [];
+
+  console.log('🔍 Parsing text to blocks:', text.substring(0, 100) + (text.length > 100 ? '...' : ''));
+  
+  // Replace literal newline strings with actual newlines
+  text = text.replace(/\\n/g, '\n');
+  
+  // Pre-process for user context blocks anywhere in the text
+  // This helps handle cases where usercontext appears in the middle of paragraphs
+  const userContextRegex = /\(usercontext\)(.*?)(?:\|([^!]*))?(?:\(!usercontext\)|$)/g;
+  let userContextMatches = [];
+  let match;
+  
+  while ((match = userContextRegex.exec(text)) !== null) {
+    userContextMatches.push({
+      fullMatch: match[0],
+      usersText: match[1],
+      description: match[2] || '',  // Capture the description after the pipe if it exists
+      startIndex: match.index,
+      endIndex: match.index + match[0].length
+    });
+    console.log(`🔎 Found user context block: ${match[0]} at position ${match.index}`);
+    if (match[2]) {
+      console.log(`🔎 With description: "${match[2]}"`);
+    }
+  }
+  
+  if (userContextMatches.length > 0) {
+    console.log(`👥 Found ${userContextMatches.length} user context blocks to process`);
+    // Sort by position in reverse order so we can replace without affecting other positions
+    userContextMatches.sort((a, b) => b.startIndex - a.startIndex);
+    
+    // Create a special marker that won't interfere with other processing
+    userContextMatches.forEach(ctx => {
+      // Replace the usercontext tag with a special marker
+      const marker = `__USER_CONTEXT_MARKER_${Date.now()}_${Math.random().toString(36).substring(2, 10)}__`;
+      text = text.substring(0, ctx.startIndex) + marker + text.substring(ctx.endIndex);
+      ctx.marker = marker;
+    });
+  }
+  
+  // Array to hold our blocks
+  const blocks = [];
+  
+  // Split text by double newlines to create sections
+  const paragraphs = text.split(/\n{2,}/);
+  console.log(`🔢 Processing ${paragraphs.length} paragraphs`);
+  
+  // Process each paragraph
+  paragraphs.forEach((paragraph, index) => {
+    const content = paragraph.trim();
+    if (!content) return; // Skip empty paragraphs
+    
+    console.log(`📝 Processing paragraph #${index + 1}:`, content.substring(0, 50) + (content.length > 50 ? '...' : ''));
+    
+    // Check if this paragraph contains a usercontext marker
+    let hasUserContextMarker = false;
+    let userContextData = null;
+    
+    if (userContextMatches.length > 0) {
+      userContextData = userContextMatches.find(ctx => content.includes(ctx.marker));
+      hasUserContextMarker = !!userContextData;
+    }
+    
+    if (hasUserContextMarker) {
+      console.log(`👥 Processing paragraph with user context marker: ${userContextData.marker}`);
+      
+      // Extract user IDs from the raw string
+      const userIds = userContextData.usersText.split(',')
+        .map(id => id.trim())
+        .filter(id => id);
+      
+      console.log(`👥 Creating user context block with ${userIds.length} users:`, userIds);
+      
+      // Create elements for the context block
+      const userElements = [];
+      
+      // Add user elements for each valid user ID
+      for (const userId of userIds) {
+        if (userId && userId.match(/^[UW][A-Z0-9]+$/)) {
+          // Use user mentions directly which will show avatars in Slack
+          userElements.push({
+            type: "mrkdwn",
+            text: `<@${userId}>`
+          });
+          console.log(`  - Added user mention for ID: ${userId}`);
+        } else {
+          console.warn(`⚠️ Invalid user ID format: ${userId}`);
+        }
+      }
+      
+      // If we have description text, add it after the users
+      if (userContextData.description && userContextData.description.trim().length > 0) {
+        const descriptionText = userContextData.description.trim();
+        // Add the description as mrkdwn text element
+        userElements.push({
+          type: "mrkdwn",
+          text: descriptionText
+        });
+        console.log(`📝 Adding description text: "${descriptionText}"`);
+      }
+      
+      // Only add the block if we have elements
+      if (userElements.length > 0) {
+        console.log(`👥 Adding context block with ${userElements.length} user mentions`);
+        
+        // For a user context block, we want to show the mentions AND add a message
+        // First, create the block with user mentions only
+        const contextBlock = {
+          type: 'context',
+          elements: userElements
+        };
+        
+        blocks.push(contextBlock);
+      } else {
+        console.log('⚠️ No valid user IDs found in usercontext block');
+      }
+      
+      // Get the rest of the content
+      const contentBefore = content.substring(0, content.indexOf(userContextData.marker)).trim();
+      const contentAfter = content.substring(content.indexOf(userContextData.marker) + userContextData.marker.length).trim();
+      
+      // Add content before user context if it exists
+      if (contentBefore) {
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: contentBefore
+          }
+        });
+      }
+      
+      // Add content after user context if it exists
+      if (contentAfter) {
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: contentAfter
+          }
+        });
+      }
+      
+      return;
+    }
+    
+    // Check for special block types
+    
+    // 1. Check for divider: (divider)
+    if (content === '(divider)') {
+      console.log('➖ Adding divider block');
+      blocks.push({ type: 'divider' });
+      return;
+    }
+    
+    // 2. Check for user context: (usercontext)USER1,USER2(!usercontext)
+    const userContextMatch = content.match(/^\(usercontext\)(.*?)(?:\|([^!]*))?(?:\(!usercontext\)|$)/);
+    if (userContextMatch) {
+      const userIdsRaw = userContextMatch[1];
+      const description = userContextMatch[2] || '';
+      console.log(`👥 Processing user context block with raw IDs: ${userIdsRaw}`);
+      if (description) {
+        console.log(`👥 With description: "${description}"`);
+      }
+      
+      // Extract user IDs from the raw string
+      const userIds = userIdsRaw.split(',')
+        .map(id => id.trim())
+        .filter(id => id);
+      
+      console.log(`👥 Creating user context block with ${userIds.length} users:`, userIds);
+      
+      // Create elements for the context block
+      const userElements = [];
+      
+      // Get workspace ID for profile images
+      const workspaceId = getWorkspaceId();
+
+      // Add user elements for each valid user ID
+      for (const userId of userIds) {
+        if (userId && userId.match(/^[UW][A-Z0-9]+$/)) {
+          // Use user mentions directly which will show avatars in Slack
+          userElements.push({
+            type: "mrkdwn",
+            text: `<@${userId}>`
+          });
+          console.log(`  - Added user mention for ID: ${userId}`);
+        } else {
+          console.warn(`⚠️ Invalid user ID format: ${userId}`);
+        }
+      }
+      
+      // If we have description text, add it after the users
+      if (description && description.trim().length > 0) {
+        const descriptionText = description.trim();
+        // Add the description as mrkdwn text element
+        userElements.push({
+          type: "mrkdwn",
+          text: descriptionText
+        });
+        console.log(`📝 Adding description text: "${descriptionText}"`);
+      }
+      
+      // Only add the block if we have elements
+      if (userElements.length > 0) {
+        console.log(`👥 Adding context block with ${userElements.length} user mentions`);
+        
+        // For a user context block, we want to show the mentions AND add a message
+        // First, create the block with user mentions only
+        const contextBlock = {
+          type: 'context',
+          elements: userElements
+        };
+        
+        blocks.push(contextBlock);
+      } else {
+        console.log('⚠️ No valid user IDs found in usercontext block');
+      }
+      return;
+    }
+    
+    // 3. Check for context blocks: (context)text(!context)
+    const contextMatch = content.match(/^\(context\)(.*?)(?:\(!context\)|$)/s);
+    if (contextMatch) {
+      console.log('ℹ️ Adding context block');
+      blocks.push({
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: contextMatch[1]
+          }
+        ]
+      });
+      return;
+    }
+    
+    // 4. Check for section with image: (section:URL)Content(!section) or (section:URL:ALT_TEXT)Content(!section)
+    // First, try to detect if there's a section block but handle URLs specially
+    if (content.startsWith('(section:')) {
+      console.log('🖼️ Detected section with potential image');
+      
+      // Extract URL and content more carefully
+      const sectionStartRe = /^\(section:(.*?)\)/;
+      const sectionStart = content.match(sectionStartRe);
+      
+      if (sectionStart) {
+        let urlAndAlt = sectionStart[1];
+        let altText = 'Image';
+        let imageUrl = '';
+        
+        // Check if we have both URL and alt text (separated by : not in URL)
+        // URLs may contain : (e.g., https://) so we need to be careful with the split
+        // First check if there's a protocol with ://
+        if (urlAndAlt.includes('://')) {
+          // If it includes ://, find any colon that appears after that
+          const protocolEndIndex = urlAndAlt.indexOf('://') + 3;
+          const postProtocolString = urlAndAlt.substring(protocolEndIndex);
+          const colonInPostProtocol = postProtocolString.indexOf(':');
+          
+          if (colonInPostProtocol !== -1) {
+            // We found a colon after the protocol, this is likely separating URL and alt text
+            imageUrl = urlAndAlt.substring(0, protocolEndIndex + colonInPostProtocol);
+            altText = urlAndAlt.substring(protocolEndIndex + colonInPostProtocol + 1);
+            console.log(`💬 Parsed URL with protocol "${imageUrl}" and alt text "${altText}"`);
+          } else {
+            // No additional colon found, the entire string is a URL
+            imageUrl = urlAndAlt;
+            console.log(`💬 Parsed URL with protocol "${imageUrl}" without alt text`);
+          }
+        } else {
+          // No protocol found, try simple split by first colon
+          const colonIndex = urlAndAlt.indexOf(':');
+          if (colonIndex !== -1) {
+            // We have both URL and alt text
+            imageUrl = urlAndAlt.substring(0, colonIndex);
+            altText = urlAndAlt.substring(colonIndex + 1);
+            console.log(`💬 Parsed URL without protocol "${imageUrl}" and alt text "${altText}"`);
+          } else {
+            // Just URL, no alt text
+            imageUrl = urlAndAlt;
+            console.log(`💬 Parsed URL without protocol "${imageUrl}" without alt text`);
+          }
+        }
+        
+        // Get the section content (everything after the closing parenthesis until optional (!section))
+        const closingParenPos = content.indexOf(')', '(section:'.length);
+        let sectionText = '';
+        
+        if (closingParenPos !== -1) {
+          // Extract text content after URL/alt text declaration
+          const endMarker = content.indexOf('(!section)');
+          if (endMarker !== -1) {
+            sectionText = content.substring(closingParenPos + 1, endMarker);
+          } else {
+            sectionText = content.substring(closingParenPos + 1);
+          }
+          
+          console.log('🖼️ Adding section with image:', imageUrl);
+          
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: sectionText.trim()
+            },
+            accessory: {
+              type: 'image',
+              image_url: imageUrl,
+              alt_text: altText
+            }
+          });
+          return;
+        }
+      }
+    }
+    
+    // 5. Check for header: (header)text(!header)
+    const headerMatch = content.match(/^\(header\)(.*?)(?:\(!header\)|$)/s);
+    if (headerMatch) {
+      console.log('🔖 Adding header block');
+      blocks.push({
+        type: 'header',
+        text: {
+          type: 'plain_text',
+          text: headerMatch[1],
+          emoji: true
+        }
+      });
+      return;
+    }
+    
+    // Default: Regular section with markdown
+    console.log('📄 Adding regular section');
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: content
+      }
+    });
+  });
+  
+  console.log(`✅ Created ${blocks.length} blocks`);
+  return blocks;
+}
+
+/**
+ * Get the current Slack workspace ID
+ * @returns {string} The workspace ID or a default value
+ */
+function getWorkspaceId() {
+  try {
+    // Default to T02RAEMPK if we can't determine it (updated based on user's workspace)
+    let workspaceId = 'T02RAEMPK';
+    
+    // Try to get the Slack client
+    const { getSlackClient } = require('../slackClient.js');
+    const slack = getSlackClient();
+    
+    // If we have access to team info, use that
+    if (slack && slack.team && slack.team.id) {
+      workspaceId = slack.team.id;
+      console.log(`Using team ID from Slack client: ${workspaceId}`);
+    }
+    
+    return workspaceId;
+  } catch (error) {
+    console.warn('⚠️ Could not determine workspace ID, using default:', error.message);
+    return 'T02RAEMPK';
+  }
+}
+
+/**
+ * Posts a message to Slack with formatting options
+ * @param {Object} args - Message arguments from the LLM
+ * @param {Object} threadState - State of the current thread context
+ * @returns {Object} - Result of the operation
  */
 async function postMessage(args, threadState) {
   try {
-    // Handle potential nested parameters structure (for direct tool invocation)
-    // This allows LLM to pass parameters directly within a parameters object
-    // Instead of following the outer structure precisely
-    if (args.parameters && !args.text) {
-      console.log('⚠️ Detected nested parameters structure, extracting inner parameters');
-      args = args.parameters;
-    }
-
-    // Fix for unescaped parentheses in BBCode - preprocess text parameter
+    const startTime = Date.now();
+    console.log('📣 postMessage tool called with args:', JSON.stringify(args, null, 2));
+    
+    // Additional pre-processing for text that might contain markdown links
     if (args.text && typeof args.text === 'string') {
-      // Replace literal newline strings with actual newlines
-      args.text = args.text.replace(/\\n/g, '\n');
-      console.log('🔄 Replaced literal newline strings with actual newlines');
+      // Pre-process any markdown links before JSON parsing
+      // This helps prevent issues with JSON parsing of markdown links
+      console.log('💬 Preprocessing text for markdown links:', args.text.substring(0, 100) + (args.text.length > 100 ? '...' : ''));
       
-      // Check for BBCode-style parentheses that might cause issues
-      const hasBBCodeParentheses = /\([a-z]+\).*?\(![a-z]+\)/i.test(args.text);
+      // Handle markdown image syntax ![alt](url) before any other processing
+      args.text = args.text.replace(/!\[(.*?)\]\((https?:\/\/[^)]+)\)/g, 
+        (match, alt, url) => {
+          console.log(`🖼️ Pre-processing Markdown image format: "${match}" => "${alt}" -> "${url}"`);
+          return `(image:${url}:${alt || 'Image'})`;
+        }
+      );
       
-      if (hasBBCodeParentheses) {
-        console.log('⚠️ Detected potential BBCode parentheses in text, ensuring proper escaping');
-        console.log('BBCode parentheses format will be correctly parsed by parseBBCode');
-      }
-      
-      // Check for user context formatting
-      if (args.text.includes('(usercontext)') || args.text.includes('[usercontext]')) {
-        console.log('👤 Detected user context formatting in message, will preserve exact formatting');
-      }
-      
-      // Check for divider
-      if (args.text.includes('(divider)') || args.text.includes('[divider]') || args.text.includes('---')) {
-        console.log('📏 Detected divider in message, will ensure proper splitting');
-      }
-    }
-
-    // Extract the top-level reasoning (no need to filter it out)
-    const reasoning = args.reasoning;
-
-    // Filter out non-standard fields that shouldn't be sent to Slack
-    // Note: reasoning is now expected at the top level, not in parameters
-    const validFields = [
-      'text', 'color', 'buttons', 'fields', 
-      'images', 'blocks', 'attachments', 'channel', 'threadTs'
-    ];
-    
-    const filteredArgs = {};
-    for (const key of validFields) {
-      if (args[key] !== undefined) {
-        filteredArgs[key] = args[key];
+      // Handle markdown links specifically for avatar links
+      if (args.text.includes('[Click here to view your avatar]')) {
+        console.log('🔗 Found avatar link in markdown format, pre-processing...');
+        
+        // Use a targeted replacement for this specific pattern
+        args.text = args.text.replace(/\[Click here to view your avatar\]\((https?:\/\/[^)]+)\)/g, 
+          (match, url) => {
+            console.log(`🔗 Converting avatar link: "${url}"`);
+            return `<${url}|Click here to view your avatar>`;
+          }
+        );
       }
     }
     
-    // Log any filtered fields for debugging (excluding reasoning which we expect at top level)
-    const filteredKeys = Object.keys(args)
-      .filter(key => !validFields.includes(key) && key !== 'reasoning');
-    if (filteredKeys.length > 0) {
-      console.log(`⚠️ Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
-    }
-    
-    // Use filtered args from now on
-    args = filteredArgs;
-
-    // Get context from metadata
-    const context = threadState.getMetadata('context');
-    
-    // Extract parameters
-    const {
-      text,
-      color = 'good',
-      buttons,
-      fields,
-      images,
-      blocks: simpleBlocks
-    } = args;
-    
-    // Process BBCode formatting in text if present
-    const processedText = text ? parseBBCode(text) : text;
-    
-    // Process user mentions to ensure proper formatting
-    const textWithMentions = processedText ? processUserMentions(processedText) : processedText;
-    
-    // Prevent duplication - if blocks are provided, they take precedence over text
-    // This helps avoid the issue where similar content appears twice
-    let effectiveText = textWithMentions;
-    if (simpleBlocks && Array.isArray(simpleBlocks) && simpleBlocks.length > 0) {
-      console.log('⚠️ Both text and blocks are provided. Using blocks and ignoring text to prevent duplication.');
-      effectiveText = null;
-    }
-    
-    // CRITICAL FIX: Ignore any hardcoded channel that doesn't match current context
-    // (This happens when the LLM hallucinates channel IDs)
-    let channelId;
-    if (args.channel && context?.channelId && args.channel !== context.channelId) {
-      // Channel mismatch - log warning and use context channel instead
-      console.log(`⚠️ WARNING: Ignoring mismatched channel ID "${args.channel}" - using context channel "${context.channelId}" instead`);
-      channelId = context.channelId;
+    // Disable detailed threadState logging to keep console cleaner
+    if (process.env.DEBUG_THREAD_STATE !== 'true') {
+      // Skip detailed thread state logging unless explicitly enabled
     } else {
-      // Use channel from args, or fall back to context
-      channelId = args.channel || context?.channelId;
+      // Add even more detailed debugging logs to inspect threadState
+      console.log("postMessage called with threadState:", {
+        threadStateType: typeof threadState,
+        threadStateKeys: threadState ? Object.keys(threadState) : 'null',
+        channelProperty: threadState ? threadState.channel : 'null',
+        channelIdProperty: threadState ? threadState.channelId : 'null',
+        hasGetChannelMethod: threadState ? typeof threadState.getChannel === 'function' : 'null',
+        // Log more potential places where channel info might be stored
+        threadId: threadState?.threadId,
+        metadataKeys: threadState?.metadata ? Object.keys(threadState.metadata) : 'no metadata',
+        metadata: threadState?.metadata ? JSON.stringify(threadState.metadata) : 'no metadata',
+        messagesCount: threadState?.messages ? threadState.messages.length : 0,
+        firstMessageSample: threadState?.messages && threadState.messages.length > 0 ? 
+          JSON.stringify(threadState.messages[0], null, 2) : 'no messages'
+      });
     }
-    
-    // CRITICAL FIX: Ignore any hardcoded threadTs that doesn't match current context
-    // (This happens when the LLM hallucinates thread timestamps)
-    let threadTs;
-    if (args.threadTs && context?.threadTs && args.threadTs !== context.threadTs) {
-      // Thread timestamp mismatch - log warning and use context threadTs instead
-      console.log(`⚠️ WARNING: Ignoring mismatched thread timestamp "${args.threadTs}" - using context timestamp "${context.threadTs}" instead`);
-      threadTs = context.threadTs;
-    } else {
-      // Use threadTs from args, or fall back to context
-      threadTs = args.threadTs || context?.threadTs;
+
+    // Extract channel directly from the console output if needed
+    const consoleData = threadState ? JSON.stringify(threadState) : '';
+    const channelMatch = consoleData.match(/Channel:([CD][0-9A-Z]+)/);
+    let extractedChannel = channelMatch ? channelMatch[1] : null;
+    if (extractedChannel && process.env.DEBUG_THREAD_STATE === 'true') {
+      console.log("Extracted channel from thread state console representation:", extractedChannel);
     }
+
+    const { text, blocks = null, color = "#0000FF", ephemeral = false, attachments = null, threadTs, reasoning } = args;
     
-    // Validate channel
-    if (!channelId) {
-      throw new Error('Channel ID not available in thread context or args');
+    // If no blocks or text provided, return error
+    if (!text && !blocks && !attachments) {
+      return { error: "No message content (text or blocks) provided" };
     }
-    
-    // Debug the message about to be sent
-    console.log(`Sending message to channel: ${channelId}`);
-    console.log(`Message content: ${effectiveText ? (effectiveText.length > 100 ? effectiveText.substring(0, 100) + '...' : effectiveText) : 'No text'}`);
-    console.log(`Color: ${color || 'default'}`);
-    console.log(`Using text for fallback only, content will be displayed in blocks inside attachment`);
-    if (threadTs) {
-      console.log(`Replying in thread: ${threadTs}`);
-    }
-    
-    // Get Slack client
-    const slackClient = getSlackClient();
-    
-    // Normalize the color value
-    const formattedColor = normalizeColor(color);
-    console.log(`Using color: ${formattedColor}`);
-    
-    // Message structure for Slack API:
-    // 1. MANDATORY: empty text field to prevent duplication
-    // 2. MANDATORY: blocks go inside the colored attachment
-    // 3. MANDATORY: color goes on the attachment
-    // This structure ensures we get the colored vertical bar appears with the content
-    
-    // Prepare message options using attachments for color bar
-    let messageOptions = {
-      channel: channelId,
-      text: "", // MANDATORY: Empty string to prevent duplication in the UI
-      attachments: [{
-        color: formattedColor,
-        blocks: simpleBlocks,
-        fallback: effectiveText || "Message from bot"
-      }]
-    };
-    
-    // Check which approach to use
-    if (args.blockKit) {
-      console.log('⚠️ DEPRECATED: Direct Block Kit JSON provided, this approach is discouraged.');
-      // Still handle it for backward compatibility
-      messageOptions = handleDirectBlocks(args, channelId);
+
+    try {
+      // Get channel from threadState
+      let channel = extractedChannel; // Use our extracted channel as default
       
-      // CRITICAL FIX: Ensure the text field is empty even with direct Block Kit
-      messageOptions.text = "";
-    } else if (simpleBlocks && Array.isArray(simpleBlocks) && simpleBlocks.length > 0) {
-      // Use our simplified blocks approach
-      console.log('Using simplified blocks approach');
-      
-      // Note: We're not using convertSimpleBlocks here anymore because
-      // Slack's API has different requirements for blocks in attachments vs. top-level blocks
-      // We need to ensure all blocks in attachments have simple text structures
-      
-      // Handle Slack's limitation - blocks in attachments have different requirements
-      // Cannot use certain block types directly in attachments
-      // Convert complex block structures to simpler text-based blocks
-      const simplifiedBlocks = [];
-      
-      // Process each block to ensure compatibility with attachments
-      for (const block of simpleBlocks) {
-        if (block.type === 'header') {
-          // Convert header blocks to section blocks with bold text
-          simplifiedBlocks.push({
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `*${block.text?.text || 'Header'}*`
+      try {
+        // Try other methods if we don't have the channel yet
+        if (!channel) {
+          // Check if we can find the channel in conversation context - this is most reliable for DMs
+          if (threadState && typeof threadState._conversationContext === 'string') {
+            // Extract channel from context like "User:UF8TSTK9A, Channel:D01D28456M9, Thread:1743090429.012529"
+            const contextMatch = threadState._conversationContext.match(/Channel:([CD][0-9A-Z]+)/);
+            if (contextMatch && contextMatch[1]) {
+              channel = contextMatch[1];
+              debugLog("Extracted channel from conversation context:", channel);
             }
-          });
-        } else if (block.type === 'divider') {
-          // Special handling for divider blocks - keep them as is
-          simplifiedBlocks.push({
-            type: 'divider'
-          });
-        } else if (block.type === 'context' && block.elements) {
-          // Handle context blocks directly
-          const contextElements = [];
-          
-          // Process each element in the context block
-          for (const element of block.elements) {
-            if (typeof element === 'string') {
-              contextElements.push({
-                type: 'mrkdwn',
-                text: element
-              });
-            } else if (element.type === 'mrkdwn' || element.type === 'plain_text') {
-              contextElements.push(element);
-            } else {
-              // For other block types, convert to a simple section if needed
-              if (typeof element === 'object' && element !== null) {
-                let text = '';
-                if (typeof element.text === 'string') {
-                  text = processUserMentions(element.text);
-                } else if (element.text && typeof element.text.text === 'string') {
-                  text = processUserMentions(element.text.text);
-                } else if (element.text && typeof element.text.mrkdwn === 'string') {
-                  text = processUserMentions(element.text.mrkdwn);
-                } else {
-                  // This is where objects were being stringified incorrectly
-                  // Instead, handle unknown block types more gracefully
-                  if (element.type) {
-                    console.log(`⚠️ Unsupported block type '${element.type}' in attachment. Converting to text.`);
-                  }
-                  text = JSON.stringify(element);
-                }
-                
-                contextElements.push({
-                  type: 'mrkdwn',
-                  text: text
-                });
-              } else {
-                // Handle primitive values
-                contextElements.push({
-                  type: 'mrkdwn',
-                  text: processUserMentions(String(element))
-                });
-              }
+          }
+        }
+        
+        // Extract from thread messages if we have them
+        if (!channel && threadState?.messages && threadState.messages.length > 0) {
+          // Check the first message - might have user information
+          const firstMsg = threadState.messages[0];
+          if (firstMsg.text && typeof firstMsg.text === 'string') {
+            // Try to extract from any text that might have channel info
+            const channelInTextMatch = firstMsg.text.match(/([CD][0-9A-Z]+)/);
+            if (channelInTextMatch) {
+              channel = channelInTextMatch[1];
+              debugLog("Found potential channel ID in message text:", channel);
+            }
+          }
+        }
+        
+        // If still don't have a channel, try to extract from context metadata
+        if (!channel && threadState?.metadata) {
+          const contextMetadata = threadState.getMetadata ? threadState.getMetadata('context') : null;
+          if (contextMetadata && contextMetadata.channelId) {
+            channel = contextMetadata.channelId;
+            debugLog("Found channel in context metadata:", channel);
+          }
+        }
+        
+        // If we couldn't get it from context, try other methods
+        if (!channel) {
+          // Try multiple methods to get the channel in order of preference
+          if (typeof threadState.getChannel === 'function') {
+            channel = threadState.getChannel();
+            debugLog("Retrieved channel via getChannel() method:", channel);
+          } else if (threadState.channel) {
+            channel = threadState.channel;
+            debugLog("Using threadState.channel property:", channel);
+          } else if (threadState.channelId) {
+            channel = threadState.channelId;
+            debugLog("Using threadState.channelId property:", channel);
+          } else if (threadState.event && threadState.event.channel) {
+            channel = threadState.event.channel;
+            debugLog("Using threadState.event.channel property:", channel);
+          } 
+          // Check in threadId which might be in format channel:timestamp
+          else if (threadState.threadId && threadState.threadId.includes(':')) {
+            channel = threadState.threadId.split(':')[0];
+            debugLog("Extracted channel from threadId:", channel);
+          } 
+          // Non-colon threadId might already be a channel ID
+          else if (threadState.threadId && (threadState.threadId.startsWith('C') || threadState.threadId.startsWith('D'))) {
+            channel = threadState.threadId;
+            debugLog("Using threadId as channel directly:", channel);
+          }
+          // Check in metadata
+          else if (threadState.metadata && threadState.metadata.channel) {
+            channel = threadState.metadata.channel;
+            debugLog("Using threadState.metadata.channel:", channel);
+          } 
+          // Check in metadata channelId
+          else if (threadState.metadata && threadState.metadata.channelId) {
+            channel = threadState.metadata.channelId;
+            debugLog("Using threadState.metadata.channelId:", channel);
+          }
+          // Check if direct message property contains channel
+          else if (threadState.message && threadState.message.channel) {
+            channel = threadState.message.channel;
+            debugLog("Using threadState.message.channel:", channel);
+          }
+          // Try to extract from first message if available
+          else if (threadState.messages && threadState.messages.length > 0) {
+            const firstMessage = threadState.messages[0];
+            if (firstMessage.channel) {
+              channel = firstMessage.channel;
+              debugLog("Extracted channel from first message.channel:", channel);
+            } 
+          }
+        }
+        
+        // If still no channel, see if there's any D01D28456M9 pattern in the thread ID
+        if (!channel && threadState && threadState.threadId) {
+          const directChannelMatch = threadState.threadId.match(/([CD][0-9A-Z]+)/);
+          if (directChannelMatch) {
+            channel = directChannelMatch[1];
+            console.log("Extracted possible channel directly from threadId text:", channel);
+          }
+        }
+        
+        // Final fallback - try to extract from the conversation details
+        if (!channel && threadState && threadState.messages && threadState.messages.length > 0) {
+          // This is our last resort - check for conversation context in other properties
+          const message = threadState.messages[0];
+          if (message.conversationContext && typeof message.conversationContext === 'string') {
+            const contextMatch = message.conversationContext.match(/Channel:([CD][0-9A-Z]+)/);
+            if (contextMatch && contextMatch[1]) {
+              channel = contextMatch[1];
+              console.log("Extracted channel from message conversation context:", channel);
             }
           }
           
-          // Push the context block with processed elements
-          simplifiedBlocks.push({
-            type: 'context',
-            elements: contextElements
-          });
-        } else if (block.type === 'image' && block.image_url) {
-          // Handle image blocks by converting to a section with a markdown image link
-          // (Since images in attachments can be problematic in Slack)
-          simplifiedBlocks.push({
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `<${block.image_url}|${block.alt_text || 'Image'}>`
+          // Check if any log lines include the channel information
+          if (!channel && message.text) {
+            // Sometimes the channel is logged in the text as "Channel: D01D28456M9"
+            const channelMatch = message.text.match(/Channel:\s*([CD][0-9A-Z]+)/);
+            if (channelMatch && channelMatch[1]) {
+              channel = channelMatch[1];
+              console.log("Extracted channel from message text:", channel);
             }
-          });
-        } else if (block.type === 'section' && block.text) {
-          // Ensure section blocks have the right structure
-          simplifiedBlocks.push({
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: typeof block.text === 'string' ? block.text : 
-                    (block.text.text || block.text.mrkdwn || 'Text content')
+          }
+        }
+
+        // Final fallback - if we have the userId in context, and this is a DM, we could use the openConversation API
+        if (!channel && threadState?.getMetadata) {
+          const context = threadState.getMetadata('context');
+          if (context && context.userId && !context.threadTs) {
+            // This looks like a direct message without a thread - we can try to open a conversation
+            try {
+              console.log("Attempting to open conversation with user:", context.userId);
+              const slack = getSlackClient();
+              const convo = await slack.conversations.open({ users: context.userId });
+              if (convo.ok && convo.channel && convo.channel.id) {
+                channel = convo.channel.id;
+                console.log("Successfully opened conversation with channel:", channel);
+              }
+            } catch (err) {
+              console.log("Failed to open conversation:", err.message);
             }
-          });
+          }
+        }
+        
+        if (!channel) {
+          console.error("Unable to determine channel from threadState");
+          return { error: "Could not determine channel to post message to" };
+        }
+      } catch (channelError) {
+        console.error("Error trying to get channel:", channelError);
+        return { error: `Error getting channel: ${channelError.message}` };
+      }
+
+      // Check if we have text to post
+      if (!text) {
+        return { 
+          ok: false, 
+          error: 'No text provided for message',
+          reasoning
+        };
+      }
+      
+      // Format the color using the normalizeColor function
+      const processedColor = normalizeColor(color);
+      debugLog(`🎨 Using color: ${processedColor}`);
+      
+      // Replace literal newline strings with actual newlines
+      const processedText = typeof text === 'string' ? text.replace(/\\n/g, '\n') : text;
+      
+      // Parse the text to blocks
+      const parsedBlocks = parseTextToBlocks(processedText);
+      
+      // Set up the message options
+      const messageOptions = {
+        text: '', // Empty string for the main text field (all content goes in attachments)
+        channel: channel,
+      };
+      
+      // Check if there are any image blocks that need special handling
+      const imageBlocks = parsedBlocks.filter(block => block.type === 'image');
+      const nonImageBlocks = parsedBlocks.filter(block => block.type !== 'image');
+      
+      // If there are image blocks, we need to keep them in the main blocks array
+      if (imageBlocks.length > 0) {
+        console.log(`📸 Found ${imageBlocks.length} image blocks that need special handling`);
+        messageOptions.blocks = parsedBlocks;
+        
+        // For styling, we'll add a color attachment, but without the blocks
+        messageOptions.attachments = [{
+          color: processedColor,
+          fallback: processedText || "Message from bot"
+        }];
+      } 
+      // If there are no user context blocks and no image blocks, use attachments for color
+      else if (!parsedBlocks.some(block => 
+          block.type === 'context' && 
+          block.elements?.some(el => 
+            // Check if this is one of our user context elements (user mention)
+            el.type === 'mrkdwn' && el.text?.includes('<@') && el.text?.includes('>')
+          )
+      )) {
+        messageOptions.attachments = [{
+          color: processedColor,
+          blocks: parsedBlocks,
+          fallback: processedText || "Message from bot"
+        }];
+      } else {
+        console.log('⚠️ Message contains user context blocks, using direct blocks');
+        messageOptions.blocks = parsedBlocks;
+        
+        // Add a colorful attachment without blocks for styling
+        messageOptions.attachments = [{
+          color: processedColor,
+          fallback: processedText || "Message from bot"
+        }];
+      }
+      
+      // If blocks were provided directly in the args, use those instead
+      if (blocks && Array.isArray(blocks)) {
+        console.log('Using provided blocks array instead of parsed text');
+        
+        // Check if any of the provided blocks contain user context elements
+        const hasUserContexts = blocks.some(block => 
+          block.type === 'context' && 
+          block.elements?.some(el => 
+            // Check if this is one of our user context elements (either mention or profile image)
+            (el.type === 'mrkdwn' && el.text?.includes('<@') && el.text?.includes('>')) ||
+            (el.type === 'image' && el.image_url?.includes('slack-edge.com'))
+          )
+        );
+        
+        if (hasUserContexts) {
+          // If we have user contexts, use blocks directly
+          messageOptions.blocks = blocks;
+          delete messageOptions.attachments;
+          console.log('⚠️ Provided blocks contain user context elements, sending as direct blocks');
         } else {
-          // For other block types, convert to a simple section if needed
-          if (typeof block === 'object' && block !== null) {
-            let text = '';
-            if (typeof block.text === 'string') {
-              text = processUserMentions(block.text);
-            } else if (block.text && typeof block.text.text === 'string') {
-              text = processUserMentions(block.text.text);
-            } else if (block.text && typeof block.text.mrkdwn === 'string') {
-              text = processUserMentions(block.text.mrkdwn);
-            } else {
-              // This is where objects were being stringified incorrectly
-              // Instead, handle unknown block types more gracefully
-              if (block.type) {
-                console.log(`⚠️ Unsupported block type '${block.type}' in attachment. Converting to text.`);
-              }
-              text = JSON.stringify(block);
-            }
+          // Otherwise use attachments for the color
+          if (messageOptions.attachments) {
+            messageOptions.attachments[0].blocks = blocks;
+          } else {
+            messageOptions.attachments = [{
+              color: processedColor,
+              blocks: blocks,
+              fallback: processedText || "Message from bot"
+            }];
+          }
+          delete messageOptions.blocks;
+        }
+      }
+      
+      // If attachments were provided directly in the args, ensure proper structure
+      if (attachments) {
+        // First check if we have any user context blocks in the parsed blocks
+        const hasUserContexts = parsedBlocks.some(block => 
+          block.type === 'context' && 
+          block.elements?.some(el => el.type === 'user')
+        );
+        
+        if (hasUserContexts) {
+          // If we have user contexts, keep using direct blocks instead of attachments
+          console.log('⚠️ Message contains user context blocks, preserving direct blocks');
+          // We still want to use the color from attachments if possible
+          if (Array.isArray(attachments) && attachments.length > 0 && attachments[0].color) {
+            console.log(`Using color ${attachments[0].color} from provided attachments`);
+            // Add a divider block before any additional content from attachments
+            messageOptions.blocks.push({ type: 'divider' });
             
-            simplifiedBlocks.push({
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: text
+            // Add any non-user blocks from attachments
+            if (attachments[0].blocks) {
+              const nonUserBlocks = attachments[0].blocks.filter(block => 
+                !(block.type === 'context' && block.elements?.some(el => el.type === 'user'))
+              );
+              if (nonUserBlocks.length > 0) {
+                messageOptions.blocks.push(...nonUserBlocks);
               }
+            }
+          }
+        } else {
+          // No user contexts, process attachments normally
+          if (Array.isArray(attachments)) {
+            // If attachments is an array, process each attachment
+            messageOptions.attachments = attachments.map(attachment => {
+              // Ensure each attachment has a color
+              if (!attachment.color) {
+                attachment.color = processedColor;
+              }
+              return attachment;
             });
           } else {
-            // Handle primitive values
-            simplifiedBlocks.push({
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: processUserMentions(String(block))
-              }
-            });
+            // If attachments is a single object, wrap it in an array
+            messageOptions.attachments = [{
+              ...attachments,
+              color: attachments.color || processedColor
+            }];
           }
+          // When using attachments, we don't need direct blocks
+          delete messageOptions.blocks;
         }
       }
       
-      // CRITICAL: Ensure blocks are inside the attachment with color
-      messageOptions.attachments = [{
-        color: formattedColor,
-        blocks: simplifiedBlocks, 
-        fallback: effectiveText || "Message from bot"
-      }];
-      messageOptions.text = ""; // MANDATORY: Empty string
-    } else {
-      // Use our new rich text approach
-      console.log('Using rich text approach');
-      
-      // Start with blocks from our new BBCode parser
-      const textBlocks = parseBBCodeToBlocks(effectiveText);
-      
-      // Add fields block if fields are provided
-      const fieldsBlock = createFieldsBlock(fields);
-      if (fieldsBlock) {
-        textBlocks.push(fieldsBlock);
-      }
-      
-      // Add image blocks if images are provided
-      if (images && Array.isArray(images)) {
-        images.forEach(image => {
-          if (typeof image === 'string') {
-            textBlocks.push({
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `<${image}|Image>` // Convert to a link instead of image block
-              }
-            });
-          } else if (image && typeof image === 'object') {
-            textBlocks.push({
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `<${image.url || image.image_url}|${image.alt_text || 'Image'}>`
-              }
-            });
-          }
-        });
-      }
-      
-      // Add buttons block if buttons are provided
-      const buttonsBlock = createButtonsBlock(buttons);
-      if (buttonsBlock) {
-        // Convert button actions to text links for compatibility
-        const buttonLinks = buttonsBlock.elements.map(btn => {
-          const btnText = btn.text.text;
-          return btn.url ? 
-            `<${btn.url}|${btnText}>` : 
-            `[${btnText}]`;
-        }).join(' | ');
-        
-        textBlocks.push({
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: buttonLinks
-          }
-        });
-      }
-      
-      // CRITICAL: Ensure blocks are inside the attachment with color
-      messageOptions.attachments = [{
-        color: formattedColor,
-        blocks: textBlocks,
-        fallback: effectiveText || "Message from bot"
-      }];
-      messageOptions.text = ""; // MANDATORY: Empty string
-    }
-    
-    // Add thread_ts if we have a valid thread timestamp
-    if (threadTs) {
-      messageOptions.thread_ts = threadTs;
-    }
-    
-    // Debug logging
-    console.log('MESSAGE - Message structure:');
-    console.log(JSON.stringify({
-      hasText: !!messageOptions.text,
-      textLength: messageOptions.text?.length || 0,
-      hasBlocks: !!messageOptions.blocks && messageOptions.blocks.length > 0,
-      blockCount: messageOptions.blocks?.length || 0,
-      hasAttachments: !!messageOptions.attachments && messageOptions.attachments.length > 0,
-      attachmentCount: messageOptions.attachments?.length || 0,
-      threadTs: messageOptions.thread_ts || null
-    }, null, 2));
-    
-    // Try sending the message, with detailed error logging
-    let response;
-    try {
-      console.log('Attempting to post message to Slack...');
-      response = await slackClient.chat.postMessage(messageOptions);
-      console.log('✅ Message sent successfully with main format!');
-      console.log(`Response timestamp: ${response.ts}`);
-    } catch (postError) {
-      console.log(`❌ Error posting message: ${postError.message}`);
-      console.log('Error details:', postError);
-      
-      // Try simplified format if the first attempt fails
-      try {
-        // Create a simplified message with just the text and blocks, no attachments
-        // Get blocks from the first attempt or generate simple ones
-        const fallbackBlocks = messageOptions.attachments?.[0]?.blocks || [{
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: effectiveText || 'Message content'
-          }
-        }];
-        
-        const simpleOptions = {
-          channel: channelId,
-          text: "", // MANDATORY: Keep empty to prevent duplication
-          attachments: [{
-            color: formattedColor,
-            blocks: fallbackBlocks,
-            fallback: "Message from bot"
-          }]
-        };
-        
-        if (threadTs) {
-          simpleOptions.thread_ts = threadTs;
-        }
-        
-        console.log('Trying simplified message format...');
-        response = await slackClient.chat.postMessage(simpleOptions);
-        console.log('✅ Message sent successfully with simplified format!');
-      } catch (simpleError) {
-        console.log(`❌ Simplified format also failed: ${simpleError.message}`);
-        
-        // Last resort - try text-only message
+      // Add thread_ts if available
+      if (threadTs) {
+        messageOptions.thread_ts = threadTs;
+      } else if (threadState && typeof threadState.getThreadTs === 'function') {
         try {
-          console.log('Trying text-only message as last resort...');
-          const textOnlyOptions = {
-            channel: channelId,
-            text: effectiveText || "Message from bot" // Only use text here as absolute last resort
-          };
-          
-          if (threadTs) {
-            textOnlyOptions.thread_ts = threadTs;
+          const stateThreadTs = threadState.getThreadTs();
+          if (stateThreadTs) {
+            messageOptions.thread_ts = stateThreadTs;
           }
-          
-          const simpleResponse = await slackClient.chat.postMessage(textOnlyOptions);
-          console.log('✅ Text-only message sent successfully!');
-          response = simpleResponse;
-        } catch (textOnlyError) {
-          console.log(`❌ Even text-only message failed: ${textOnlyError.message}`);
-          throw new Error(`Failed to post any message to Slack: ${textOnlyError.message}`);
+        } catch (threadTsError) {
+          console.log("Error getting thread_ts, continuing without it:", threadTsError.message);
         }
       }
-    }
-    
-    if (!response) {
-      throw new Error('No response received from Slack API');
-    }
-
-    // Debug the response
-    console.log('Message posted successfully:', response.ok === true);
-    console.log('Message timestamp:', response.ts);
-    
-    // Format the final message to include in the thread state
-    if (threadState && typeof threadState.addMessage === 'function') {
-      try {
-        // Add a record of this message to our thread state
-        threadState.addMessage({
-          text: effectiveText,
-          isUser: false,
-          timestamp: response.ts,
-          threadTs: threadTs || response.ts
-        });
-      } catch (error) {
-        console.log('Error adding message to thread state:', error.message);
+      // Direct threadTs property
+      else if (threadState.threadTs) {
+        messageOptions.thread_ts = threadState.threadTs;
+        console.log("Using threadState.threadTs property:", messageOptions.thread_ts);
       }
+      // Check for thread ID in threadState
+      else if (threadState.threadId && threadState.threadId.includes(':')) {
+        const parts = threadState.threadId.split(':');
+        if (parts.length > 1) {
+          messageOptions.thread_ts = parts[1];
+          console.log("Extracted thread_ts from threadId:", messageOptions.thread_ts);
+        }
+      }
+      // Check in metadata
+      else if (threadState.metadata && threadState.metadata.threadTs) {
+        messageOptions.thread_ts = threadState.metadata.threadTs;
+        console.log("Using threadState.metadata.threadTs:", messageOptions.thread_ts);
+      }
+      // Check direct message property
+      else if (threadState.message && threadState.message.ts) {
+        messageOptions.thread_ts = threadState.message.ts;
+        console.log("Using threadState.message.ts:", messageOptions.thread_ts);
+      }
+      // Try to extract from messages if available
+      else if (threadState.messages && threadState.messages.length > 0) {
+        const firstMessage = threadState.messages[0];
+        // If first message has threadTs
+        if (firstMessage.threadTs) {
+          messageOptions.thread_ts = firstMessage.threadTs;
+          console.log("Extracted thread_ts from first message threadTs:", messageOptions.thread_ts);
+        }
+        // Or if it has ts
+        else if (firstMessage.ts) {
+          messageOptions.thread_ts = firstMessage.ts;
+          console.log("Extracted thread_ts from first message ts:", messageOptions.thread_ts);
+        }
+      }
+      
+      debugLog('📨 Sending message to Slack');
+      debugLog('Channel:', messageOptions.channel);
+      debugLog('Thread:', messageOptions.thread_ts || 'N/A');
+      debugLog('Attachment color:', processedColor);
+      debugLog('Block count:', parsedBlocks.length);
+      
+      // Now send the message to Slack
+      let slack;
+      try {
+        // Try to get the Slack client from threadState
+        if (typeof threadState.getSlack === 'function') {
+          slack = threadState.getSlack();
+        } else {
+          // Fallback to importing directly
+          const { getSlackClient } = require('../slackClient.js');
+          slack = getSlackClient();
+        }
+      } catch (slackError) {
+        console.error("Error getting Slack client:", slackError);
+        return { error: `Error getting Slack client: ${slackError.message}` };
+      }
+      
+      const result = await slack.chat.postMessage(messageOptions);
+      
+      // Log the success
+      console.log(`✅ Message posted successfully (ts: ${result.ts})`);
+      
+      // Update the thread state with the new message if applicable
+      if (threadState.isThreadUpdate && typeof threadState.addMessage === 'function') {
+        console.log('📝 Updating thread state with the new message');
+        
+        try {
+          threadState.addMessage({
+            text: processedText,
+            isUser: false,
+            ts: result.ts,
+            blocks: parsedBlocks
+          });
+        } catch (addMessageError) {
+          console.log("Error adding message to thread state:", addMessageError.message);
+        }
+      }
+      
+      return {
+        ok: true,
+        ts: result.ts,
+        channel: result.channel,
+        message: result.message,
+        reasoning
+      };
+      
+    } catch (error) {
+      console.error('❌ Error in postMessage:', error.message);
+      console.error(error.stack);
+      
+      return {
+        ok: false,
+        error: error.message,
+        reasoning: reasoning
+      };
     }
-    
-    // Return relevant information about the message
-    return {
-      ts: response.ts,
-      channel: response.channel,
-      text: effectiveText,
-      blocks: messageOptions.attachments?.[0]?.blocks?.length || 0,
-      threadTs: threadTs || response.ts,
-      messageUrl: `https://slack.com/archives/${response.channel}/p${response.ts.replace('.', '')}`
-    };
   } catch (error) {
-    logError('Error posting message to Slack', error, { args });
-    throw error;
+    console.error('❌ Error in postMessage:', error.message);
+    console.error(error.stack);
+    
+    return {
+      ok: false,
+      error: error.message,
+      reasoning: reasoning
+    };
+  }
+}
+
+/**
+ * Get a user's profile picture URL from Slack API
+ * @param {string} userId - The Slack user ID 
+ * @returns {Promise<string>} - The profile picture URL
+ */
+async function getUserProfilePicture(userId) {
+  try {
+    // Get Slack client
+    const { getSlackClient } = require('../slackClient.js');
+    const slack = getSlackClient();
+    
+    // Call users.info API to get user profile
+    const result = await slack.users.info({ user: userId });
+    
+    if (result.ok && result.user && result.user.profile) {
+      // Get the image_48 field from profile or fall back to image_24
+      const imageUrl = result.user.profile.image_48 || result.user.profile.image_24;
+      console.log(`✅ Retrieved profile picture for ${userId}: ${imageUrl}`);
+      return imageUrl;
+    } else {
+      console.warn(`⚠️ Failed to get profile picture for ${userId}`);
+      // Return default URL format 
+      const workspaceId = getWorkspaceId();
+      return `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-48`;
+    }
+  } catch (error) {
+    console.warn(`⚠️ Error getting profile picture for ${userId}:`, error.message);
+    // Return default URL format
+    const workspaceId = getWorkspaceId();
+    return `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-48`;
   }
 }
 
 // Export the postMessage function
 module.exports = {
-  postMessage
+  postMessage,
+  parseTextToBlocks  // Export the parsing function
 };

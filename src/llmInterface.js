@@ -41,19 +41,34 @@ const BBCODE_FORMATTING = `### Markdown (for basic formatting):
 - * or - for bullet lists
 - 1. 2. 3. for numbered lists
 
-### BBCode (for specialized formatting):
-- (header)Header text(!header) for section headers
-- (context)Context information(!context) for smaller helper text
-- (list)
-* Bullet point 1
-* Bullet point 2
-(!list) for custom lists
+### Special Formatting Tags (with parentheses):
+- (header)Title(!header) for section headers
+- (context)Small helper text(!context) for smaller helper text
 - (divider) for horizontal dividers
-- (usercontext)USER1ID,USER2ID,USER3ID(!usercontext) for displaying users in a special context block
-  * IMPORTANT: When asked to use "user context" format, THIS is what you should use
+- (usercontext)USER1,USER2,USER3(!usercontext) for displaying users in a special context block
+  * Properly formats user IDs as mentions with profile pictures
   * Example: (usercontext)U123456(!usercontext) creates a dedicated user mention block
   * Do NOT confuse with regular user mentions (<@USER_ID>) used inline in text
-- (section:image_url:alt_text)Content with an image accessory(!section) for sections with images`;
+- (section:image_url:alt_text)Content with an image accessory(!section) for sections with images
+
+### Hyperlinks and URLs:
+- For hyperlinks, use Slack's format: <URL|text label> 
+  * Example: <https://slack.com|Visit Slack>
+  * IMPORTANT: Do NOT use Markdown format [text](URL) for links or images
+
+### Image Display Options (THREE METHODS):
+1. **Standalone Image Block** - Use either:
+   * Markdown image syntax: ![Alt text](https://example.com/image.jpg)
+   * BBCode format: (image:https://example.com/image.jpg:Alt text)
+   This displays a full-width image in Slack.
+
+2. **Section with Image** - Use:
+   * (section:https://example.com/image.jpg:Alt text)Content with image on the right(!section)
+   This shows text content with a small image thumbnail on the right.
+
+3. **Image Hyperlink** - Use:
+   * <https://example.com/image.jpg|View image>
+   This shows a clickable link but doesn't embed the image.`;
 
 const TOOL_CALL_FORMAT = `\`\`\`json
 {
@@ -62,6 +77,34 @@ const TOOL_CALL_FORMAT = `\`\`\`json
   "parameters": {
     "param1": "value1",
     "param2": "value2"
+  }
+}
+\`\`\``;
+
+// Adding a new constant with explicit examples of correct and incorrect formats
+const PARAMETER_STRUCTURE_EXAMPLES = `CORRECT ✅ (reasoning at top level, parameters separate):
+\`\`\`json
+{
+  "tool": "postMessage",
+  "reasoning": "Responding to user's question",
+  "parameters": {
+    "text": "Your message here",
+    "color": "blue"
+  }
+}
+\`\`\`
+
+INCORRECT ❌ (duplicated reasoning or nested parameters):
+\`\`\`json
+{
+  "tool": "postMessage",
+  "reasoning": "Responding to user's question",
+  "parameters": {
+    "reasoning": "DUPLICATE - NEVER PUT REASONING HERE",
+    "parameters": {
+      "text": "NEVER NEST PARAMETERS LIKE THIS"
+    },
+    "text": "Your message here"
   }
 }
 \`\`\``;
@@ -75,12 +118,16 @@ const FORMAT_REQUIREMENTS = `1. ALL tool calls must be in \`\`\`json code blocks
 2. ALWAYS wrap tool calls in \`\`\`json code blocks
 3. NEVER mix formats - use ONLY this format for ALL tool calls
 4. NEVER prefix tool names with "functions." or any other namespace
-5. EVERY tool call MUST include a reasoning parameter
-6. Text outside tool calls is NOT sent to users
-7. Send only ONE tool call per response - DO NOT include multiple tool calls
-8. For a normal user interaction: first send postMessage, then after receiving a response, send finishRequest`;
+5. EVERY tool call MUST include a reasoning parameter AT THE TOP LEVEL ONLY
+6. NEVER duplicate the reasoning field inside parameters
+7. NEVER nest a parameters object inside parameters - avoid duplicate keys
+8. Text outside tool calls is NOT sent to users
+9. Send only ONE tool call per response - DO NOT include multiple tool calls
+10. For a normal user interaction: first send postMessage, then after receiving a response, send finishRequest`;
 
 const REMEMBER_CRITICAL = `- YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
+- The reasoning field MUST ALWAYS be at the top level, NEVER inside parameters
+- NEVER duplicate fields like reasoning or parameters in nested objects
 - All your responses to users MUST go through the postMessage tool 
 - Send only ONE tool call at a time - DO NOT send multiple tool calls in the same response
 - Wait for each tool call to complete before sending another one
@@ -114,7 +161,7 @@ const MESSAGE_FORMATTING_EXAMPLE = `{
   "tool": "postMessage",
   "reasoning": "Responding with formatted information",
   "parameters": {
-    "text": "(header)Your Header(!header)\\n\\nHere's some *bold text* and _italic text_ and \`inline code\`.\\n\\n(list)\\n* Item 1\\n* Item 2\\n* Item 3\\n(!list)\\n\\n> This is an important quote\\n\\n\\\`\\\`\\\`javascript\\nconst x = 1;\\nconsole.log(x);\\n\\\`\\\`\\\`\\n\\n(context)This additional information appears in smaller text(!context)\\n\\n(header)Section Title(!header)",
+    "text": "(header)Your Header(!header)\\n\\nHere's some *bold text* and _italic text_ and \`inline code\`.\\n\\n> This is an important quote\\n\\n\\\`\\\`\\\`javascript\\nconst x = 1;\\nconsole.log(x);\\n\\\`\\\`\\\`\\n\\n(context)This additional information appears in smaller text(!context)\\n\\n(divider)\\n\\n(usercontext)U123456(!usercontext)",
     "color": "blue"
   }
 }`;
@@ -129,7 +176,7 @@ const TOOL_USAGE_EXAMPLES = `Example 1: First send a message to the user:
   "tool": "postMessage",
   "reasoning": "Responding to the user's greeting",
   "parameters": {
-    "text": "(header)Hello there!(!header)\\n\\nI'm *happy* to help you today. What can I do for you? \\n\\n(header)Available Options(!header)\\n\\n* Ask a question\\n* Get information\\n* Request assistance\\n\\n⚡ I can help with a variety of topics and questions.",
+    "text": "(header)Hello there!(!header)\\n\\nI'm *happy* to help you today. What can I do for you? \\n\\n(header)Available Options(!header)\\n\\n* Ask a question\\n* Get information\\n* Request assistance\\n\\n(context)I can help with a variety of topics and questions(!context)",
     "color": "blue"
   }
 }
@@ -167,6 +214,26 @@ USER MENTIONS FORMATTING:
 - For direct user mentions in text: <@USERID> (e.g., "Hello <@U123456>")
 - For user context blocks: (usercontext)U123456(!usercontext) (no @ symbol)
 - NEVER use plain @UserID format as it won't be properly formatted in Slack
+
+HYPERLINK FORMATTING:
+- Always use Slack format for links: <URL|text label>
+- Example: <https://slack.com|Click here>
+- NEVER use Markdown format [text](URL) for regular links
+- For images, see IMAGE DISPLAY OPTIONS below
+
+IMAGE DISPLAY OPTIONS (THREE METHODS):
+1. Standalone Image Block - Choose ONE of these methods:
+   * Markdown image syntax: ![Alt text](https://example.com/image.jpg)
+   * BBCode format: (image:https://example.com/image.jpg:Alt text)
+   This displays a full-width image in the message.
+
+2. Section with Image Accessory:
+   * (section:https://example.com/image.jpg:Alt text)Content with image accessory(!section)
+   This shows text content with a smaller image thumbnail on the right side.
+
+3. Image Hyperlink:
+   * <https://example.com/image.jpg|View image>
+   This shows just a clickable link but doesn't embed the image.
 
 USER CONTEXT BLOCK EXAMPLES:
 - When asked to use "user context formatting", use this format:
@@ -414,7 +481,13 @@ You're in a ${ctx.isDirectMessage ? 'direct message' : 'thread'} in Slack.
    When asked to use "user context formatting" or "user context blocks", use this special format:
    (usercontext)${ctx.userId || 'USER_ID'}(!usercontext)
    Example: (usercontext)${ctx.userId || 'U123456'}(!usercontext)
-   This is DIFFERENT from a normal user mention (<@USER_ID>) within text.
+   
+   You can also add descriptive text by using a pipe character:
+   (usercontext)${ctx.userId || 'USER_ID'}|did something cool(!usercontext)
+   For multiple users: (usercontext)U123456,U234567|collaborated on a task(!usercontext)
+   
+   This format will display user profile pictures and optional descriptive text in a special context block.
+   It is DIFFERENT from a normal user mention (<@USER_ID>) within text.
 
 Company Information:
 ${COMPANY_INFO}
@@ -458,6 +531,9 @@ Use this exact JSON format for EACH tool call (send only one at a time):
 ${TOOL_CALL_FORMAT}
 
 IMPORTANT: ALWAYS include a "tool" field, a "reasoning" field, and a "parameters" object. The reasoning field should ALWAYS be at the top level, not inside parameters.
+
+PARAMETER STRUCTURE REQUIREMENTS:
+${PARAMETER_STRUCTURE_EXAMPLES}
 
 DO NOT use any other format for tool calls. ONLY use the format shown above.
 
@@ -628,14 +704,10 @@ function formatMessagesForLLM(threadState) {
     if (toolExecutionHistory.length > 0) {
       console.log(`Adding ${toolExecutionHistory.length} recent tool executions to context`);
       
-      // Add only the most important tool calls
+      // Add all tool call results to the context
       for (const execution of toolExecutionHistory) {
-        // Skip non-message tools
-        if (execution.toolName !== 'postMessage' && 
-            execution.toolName !== 'createButtonMessage' &&
-            execution.toolName !== 'finishRequest') {
-          continue;
-        }
+        // Include all tool results, especially getUserAvatar
+        // Don't skip any tools like we used to, because the LLM needs to see all results
         
         // Add error information if present
         let functionContent = '';
@@ -653,6 +725,8 @@ function formatMessagesForLLM(threadState) {
           name: execution.toolName,
           content: functionContent
         });
+        
+        console.log(`Added ${execution.toolName} result to LLM context`);
       }
     }
   }
@@ -778,6 +852,65 @@ async function parseToolCallFromResponse(llmResponse) {
             .replace(/\\\\/g, '\\')                // Fix double backslashes
             .replace(/([^\\])\\n/g, '$1\\\\n');    // Fix incorrectly escaped newlines
           
+          // Check for duplicate parameters sections which cause parsing errors
+          if (cleanedArgs.match(/"parameters"\s*:\s*{[^{}]*"parameters"\s*:/)) {
+            console.log("Detected duplicate nested parameters structure - attempting to fix");
+            
+            try {
+              // More robust approach - try to extract the inner parameters object completely
+              const outerMatch = cleanedArgs.match(/"parameters"\s*:\s*({[^]*})\s*(?:,|\})/);
+              if (outerMatch) {
+                const parametersContent = outerMatch[1];
+                // Now find the inner parameters object
+                const innerMatch = parametersContent.match(/"parameters"\s*:\s*({[^]*?})\s*(?:,|$)/);
+                
+                if (innerMatch) {
+                  // Replace the original structure with flattened parameters
+                  const flattenedContent = parametersContent.replace(/"parameters"\s*:\s*{[^]*?}\s*(?:,|$)/, '');
+                  
+                  // Now merge the inner parameters content
+                  const innerContent = innerMatch[1];
+                  
+                  // Create a merged parameters object that combines both levels
+                  const mergedParameters = `"parameters": ${flattenedContent.replace(/}$/, `, ${innerContent.replace(/^{/, '').replace(/,$/, '')}`)}`;
+                  
+                  // Replace the original parameters with our merged version
+                  cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{[^]*?}\s*(?:,|\})/, mergedParameters);
+                  
+                  console.log("Successfully flattened nested parameters structure");
+                } else {
+                  // Fallback to simpler approach
+                  cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{([^{]*)"parameters"\s*:/, (match, prefix) => {
+                    return `"parameters": {${prefix}"innerParams":`;
+                  });
+                }
+              } else {
+                // Fallback to simpler approach
+                cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{([^{]*)"parameters"\s*:/, (match, prefix) => {
+                  return `"parameters": {${prefix}"innerParams":`;
+                });
+              }
+            } catch (structureError) {
+              console.log(`Error during structure fix: ${structureError.message}`);
+              // Fallback to simpler approach
+              cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{([^{]*)"parameters"\s*:/, (match, prefix) => {
+                return `"parameters": {${prefix}"innerParams":`;
+              });
+            }
+          }
+          
+          // Similar fix for duplicate reasoning fields
+          if (cleanedArgs.match(/"parameters"\s*:\s*{[^{}]*"reasoning"\s*:/)) {
+            console.log("Detected duplicate reasoning fields - removing from nested parameters");
+            
+            // This approach preserves only the top-level reasoning if it exists
+            cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{([^{]*)"reasoning"\s*:\s*"([^"]+)"/, (match, prefix, reasoningValue) => {
+              return `"parameters": {${prefix}`;
+            });
+            
+            console.log("Removed duplicate reasoning from parameters object");
+          }
+          
           // Special handling for parentheses format in text strings
           // This regex looks for patterns like (header)text(!header) within JSON string values
           // and ensures the parentheses are properly escaped
@@ -799,12 +932,37 @@ async function parseToolCallFromResponse(llmResponse) {
           
           console.log("Sanitized JSON arguments, attempting to parse...");
           
+          // Log the sanitized JSON for debugging
+          if (process.env.DEBUG_JSON === 'true') {
+            console.log("Sanitized JSON:", cleanedArgs);
+          }
+          
           // Parse the cleaned JSON
           parameters = JSON.parse(cleanedArgs);
           console.log("Successfully parsed tool parameters");
         } catch (error) {
           console.log(`Error parsing tool parameters: ${error.message}`);
           console.log("Failed JSON:", toolCall.function.arguments.substring(0, 200) + "...");
+          
+          // Log more details about the error position
+          if (error instanceof SyntaxError && error.message.includes('position')) {
+            try {
+              // Extract position from error message
+              const posMatch = error.message.match(/position (\d+)/);
+              if (posMatch && posMatch[1]) {
+                const errorPos = parseInt(posMatch[1]);
+                const startPos = Math.max(0, errorPos - 50);
+                const endPos = Math.min(toolCall.function.arguments.length, errorPos + 50);
+                const errorContext = toolCall.function.arguments.substring(startPos, endPos);
+                
+                console.log(`JSON error near position ${errorPos}:`);
+                console.log("Error context:", errorContext);
+                console.log("Error location:", "^".padStart(Math.min(50, errorPos - startPos) + 1));
+              }
+            } catch (contextError) {
+              console.log("Could not extract error context:", contextError.message);
+            }
+          }
           
           // Try again with a more aggressive approach for serious JSON errors
           try {
@@ -1103,6 +1261,7 @@ module.exports = {
     MESSAGE_FORMATTING_EXAMPLE,
     ESCAPED_MESSAGE_EXAMPLE,
     TOOL_USAGE_EXAMPLES,
-    ESCAPED_TOOL_USAGE_EXAMPLES
+    ESCAPED_TOOL_USAGE_EXAMPLES,
+    PARAMETER_STRUCTURE_EXAMPLES
   }
 };
