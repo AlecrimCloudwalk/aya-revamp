@@ -24,6 +24,12 @@ async function handleIncomingSlackMessage(context) {
         // Add context to thread state
         threadState.setMetadata('context', context);
         
+        // Store the conversation context string directly in threadState for easy access
+        // This makes sure channel ID is readily available in a consistent format
+        const conversationContext = `User:${context.userId}, Channel:${context.channelId}, Thread:${context.threadTs || 'N/A'}`;
+        threadState._conversationContext = conversationContext;
+        console.log(`--- Conversation Context ---\n${conversationContext}\n---------------------`);
+        
         // Add thinking reaction
         try {
             const slackClient = getSlackClient();

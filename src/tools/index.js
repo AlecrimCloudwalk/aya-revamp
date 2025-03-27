@@ -9,6 +9,7 @@ const { createButtonMessage } = require('./createButtonMessage.js');
 const { updateMessage } = require('./updateMessage.js');
 const { updateButtonMessage } = require('./updateButtonMessage.js');
 const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
+const getUserAvatar = require('./getUserAvatar.js');
 
 // Tool registry with metadata
 const toolRegistry = {
@@ -31,16 +32,16 @@ const toolRegistry = {
         code: '{ text: "Meeting scheduled for tomorrow at 2pm.", color: "#3AA3E3" }'
       },
       {
-        description: 'Message with structured data in a table',
-        code: '{ text: "[header]Team Roster[!header]", table: { headers: ["Name", "Role"], rows: [["John", "Developer"], ["Sarah", "Designer"]] }, color: "good" }'
+        description: 'Message with structured information',
+        code: '{ text: "[header]Team Roster[!header]\\n\\n*John* - Developer\\n*Sarah* - Designer\\n*Miguel* - Project Manager", color: "good" }'
       },
       {
         description: 'Interactive message with buttons',
         code: '{ text: "[header]Action Required[!header]\\n\\nPlease select an option:", actions: [{ text: "Approve", value: "approve", style: "primary" }, { text: "Reject", value: "reject", style: "danger" }], color: "#E01E5A" }'
       },
       {
-        description: 'Status message with timeline',
-        code: '{ text: "[header]Project Status[!header]", timeline: [{ title: "Planning", status: "completed" }, { title: "Development", status: "current" }, { title: "Testing", status: "pending" }], color: "#2EB67D" }'
+        description: 'Status message with emphasis',
+        code: '{ text: "[header]Project Status[!header]\\n\\n*Current Status*\\nDevelopment is in progress\\n\\n*Planning Phase*\\nCompleted successfully", color: "#2EB67D" }'
       }
     ]
   },
@@ -124,6 +125,30 @@ const toolRegistry = {
       messageTs: 'Timestamp of the vote message (optional if voteId provided)'
     },
     isAsync: false
+  },
+  getUserAvatar: {
+    name: 'getUserAvatar',
+    description: 'Gets a user\'s avatar URL from their Slack user ID',
+    function: getUserAvatar,
+    parameters: {
+      userId: 'The Slack user ID to get avatar for (required)',
+      size: 'Size of the avatar to return (24, 32, 48, 72, 192, 512, 1024, or "original", default: 192)'
+    },
+    isAsync: true,
+    examples: [
+      {
+        description: 'Get user avatar with default size',
+        code: '{ userId: "U12345678" }'
+      },
+      {
+        description: 'Get user avatar with specific size',
+        code: '{ userId: "U12345678", size: "512" }'
+      },
+      {
+        description: 'Get user avatar and display it in a message (chain with postMessage)',
+        code: '// First call:\n{ userId: "U12345678", size: "original" }\n\n// Then use the returned avatar_url in postMessage:\n// postMessage({ text: "[header]Your Avatar[!header]\\n\\nHere\'s your avatar URL: <" + avatar_url + ">\\n\\n[header]Your Profile Image[!header]\\n\\n!image:" + avatar_url + ":Your profile picture", color: "good" })'
+      }
+    ]
   },
   exampleTool: {
     name: 'exampleTool',
@@ -210,6 +235,7 @@ module.exports = {
   updateButtonMessage,
   createEmojiVote,
   getVoteResults,
+  getUserAvatar,
   // Add the full registry for direct inspection
   toolRegistry
 }; 

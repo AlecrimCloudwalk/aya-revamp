@@ -4,9 +4,8 @@
  * Formats a message for Slack with consistent styling
  * 
  * @param {Object} options - Formatting options
- * @param {string} options.title - Message title (optional)
  * @param {string} options.text - Message text content (optional)
- * @param {string} options.color - Message color (optional)
+ * @param {string} options.color - Message color
  * @param {Array} options.fields - Message fields (optional)
  * @param {Array} options.actions - Message action buttons (optional)
  * @param {Array} options.elements - Rich message elements (optional)
@@ -19,10 +18,9 @@ function formatSlackMessage(options = {}) {
   
   // Extract options with defaults
   const {
-    title,
     text,
     subtitle,
-    color = '#0078D7',
+    color = '#7413cf', // Default to purple, allow override if provided
     fields = [],
     actions = [],
     elements = [],
@@ -31,34 +29,9 @@ function formatSlackMessage(options = {}) {
     richHeader = null
   } = options;
   
-  console.log('SLACK FORMAT - Received options:');
-  console.log(JSON.stringify({
-    hasTitle: !!title,
-    titleLength: title?.length,
-    hasText: !!text,
-    textLength: text?.length,
-    hasColor: !!color,
-    fieldsCount: fields.length,
-    actionsCount: actions.length,
-    elementsCount: elements.length,
-    attachmentsCount: attachments.length,
-    hasRichHeader: !!richHeader
-  }, null, 2));
-  
   // If we have a richHeader, add it with icon/emoji
   if (richHeader) {
     blocks.push(createRichHeader(richHeader));
-  }
-  // If we have a regular title, add it as a header block
-  else if (title) {
-    blocks.push({
-      type: 'header',
-      text: {
-        type: 'plain_text',
-        text: title,
-        emoji: true
-      }
-    });
   }
   
   // If we have a subtitle, add it as context
@@ -230,39 +203,6 @@ function formatSlackMessage(options = {}) {
               }
             });
             break;
-            
-          // New element types
-          case 'table':
-            blocks.push(...createTableBlocks(element));
-            break;
-            
-          case 'column':
-            blocks.push(...createColumnBlocks(element));
-            break;
-            
-          case 'accordion':
-            blocks.push(...createAccordionBlocks(element));
-            break;
-            
-          case 'timeline':
-            blocks.push(...createTimelineBlocks(element));
-            break;
-            
-          case 'info':
-            blocks.push(createInfoBlock(element));
-            break;
-            
-          case 'warning':
-            blocks.push(createAlertBlock(element, 'warning'));
-            break;
-            
-          case 'error':
-            blocks.push(createAlertBlock(element, 'error'));
-            break;
-            
-          case 'success':
-            blocks.push(createAlertBlock(element, 'success'));
-            break;
         }
       }
     }
@@ -285,10 +225,10 @@ function formatSlackMessage(options = {}) {
   let formattedAttachments = [...attachments];
   
   // Create a primary attachment with color if we have any content above
-  if (color && (title || text || fields.length > 0)) {
+  if (color && (text || fields.length > 0)) {
     const primaryAttachment = {
       color,
-      fallback: title || text || 'Message from bot',
+      fallback: text || 'Message from bot',
     };
     
     // If we have blocks, attach them to this attachment
@@ -302,14 +242,14 @@ function formatSlackMessage(options = {}) {
     // If no color but we have blocks, create an attachment without color
     formattedAttachments.push({
       blocks: blocks,
-      fallback: title || text || 'Message from bot'
+      fallback: text || 'Message from bot'
     });
   }
   
   // Ensure all attachments have color if not specified
   formattedAttachments.forEach(attachment => {
-    if (!attachment.color) {
-      attachment.color = color || '#0078D7';
+    if (!attachment.color && color) {
+      attachment.color = color;
     }
   });
   
@@ -317,7 +257,7 @@ function formatSlackMessage(options = {}) {
   const response = {
     blocks: [], // Usually empty, blocks go into attachments
     attachments: formattedAttachments,
-    text: title || text || '' // Fallback for notifications/previews
+    text: text || '' // Fallback for notifications/previews
   };
   
   console.log('SLACK FORMAT - Final message structure:');
@@ -492,195 +432,6 @@ function createRichHeader(options) {
   }
   
   return headerBlock;
-}
-
-/**
- * Creates a table from data
- * @param {Object} tableData - Table configuration
- * @param {Array} tableData.headers - Table header row
- * @param {Array} tableData.rows - Table data rows
- * @returns {Array} - Array of blocks representing a table
- */
-function createTableBlocks(tableData) {
-  const blocks = [];
-  
-  // Handle both formats (direct table object or element with table data)
-  const headers = tableData.headers || (tableData.table ? tableData.table.headers : []);
-  const rows = tableData.rows || (tableData.table ? tableData.table.rows : []);
-  
-  if (!headers || !rows || !Array.isArray(headers) || !Array.isArray(rows)) {
-    return [createSection('Invalid table data')];
-  }
-  
-  // Add table header
-  const headerRow = headers.map(header => `*${header}*`).join(' | ');
-  blocks.push(createSection(headerRow));
-  
-  // Add divider
-  blocks.push(createDivider());
-  
-  // Add data rows
-  rows.forEach(row => {
-    if (Array.isArray(row)) {
-      const rowText = row.join(' | ');
-      blocks.push(createSection(rowText));
-    }
-  });
-  
-  return blocks;
-}
-
-/**
- * Creates a multi-column layout
- * @param {Object} columnData - Column configuration
- * @param {Array} columnData.columns - Column contents
- * @returns {Array} - Array of blocks representing columns
- */
-function createColumnBlocks(columnData) {
-  const blocks = [];
-  
-  // Handle both formats
-  const columns = columnData.columns || [];
-  
-  if (!columns || !Array.isArray(columns) || columns.length === 0) {
-    return [createSection('Invalid column data')];
-  }
-  
-  // Create a section with fields for the columns
-  const sectionBlock = {
-    type: 'section',
-    fields: []
-  };
-  
-  // Add each column as a field
-  columns.forEach(column => {
-    sectionBlock.fields.push({
-      type: 'mrkdwn',
-      text: typeof column === 'string' ? column : column.text || ''
-    });
-  });
-  
-  blocks.push(sectionBlock);
-  return blocks;
-}
-
-/**
- * Creates an accordion-like expandable section
- * @param {Object} accordionData - Accordion configuration
- * @param {Array} accordionData.sections - Accordion sections
- * @returns {Array} - Array of blocks representing an accordion
- */
-function createAccordionBlocks(accordionData) {
-  const blocks = [];
-  
-  // Handle both formats
-  const sections = accordionData.sections || [];
-  
-  if (!sections || !Array.isArray(sections) || sections.length === 0) {
-    return [createSection('Invalid accordion data')];
-  }
-  
-  // Add each accordion section
-  sections.forEach((section, index) => {
-    // Add section title
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*▼ ${section.title || `Section ${index + 1}`}*`
-      }
-    });
-    
-    // Add section content
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: section.content || ''
-      }
-    });
-    
-    // Add divider except for last section
-    if (index < sections.length - 1) {
-      blocks.push(createDivider());
-    }
-  });
-  
-  return blocks;
-}
-
-/**
- * Creates a timeline or step indicator
- * @param {Object} timelineData - Timeline configuration
- * @param {Array} timelineData.steps - Timeline steps
- * @returns {Array} - Array of blocks representing a timeline
- */
-function createTimelineBlocks(timelineData) {
-  const blocks = [];
-  
-  // Handle both formats
-  const steps = timelineData.steps || [];
-  
-  if (!steps || !Array.isArray(steps) || steps.length === 0) {
-    return [createSection('Invalid timeline data')];
-  }
-  
-  // Create timeline visualization
-  const timelineText = steps.map((step, index) => {
-    const stepNumber = index + 1;
-    const status = step.status || 'pending';
-    
-    let indicator;
-    if (status === 'completed') {
-      indicator = '✅';
-    } else if (status === 'current') {
-      indicator = '🔷';
-    } else if (status === 'error') {
-      indicator = '❌';
-    } else {
-      indicator = '⚪';
-    }
-    
-    return `${indicator} *Step ${stepNumber}:* ${step.title || `Step ${stepNumber}`}\n${step.description || ''}`;
-  }).join('\n\n');
-  
-  blocks.push(createSection(timelineText));
-  return blocks;
-}
-
-/**
- * Creates an info block with special formatting
- * @param {Object} infoData - Info block data
- * @returns {Object} - Formatted info block
- */
-function createInfoBlock(infoData) {
-  return {
-    type: 'section',
-    text: {
-      type: 'mrkdwn',
-      text: `ℹ️ *${infoData.title || 'Information'}*\n${infoData.text || ''}`
-    }
-  };
-}
-
-/**
- * Creates an alert block (warning, error, success)
- * @param {Object} alertData - Alert data
- * @param {string} alertType - Type of alert (warning, error, success)
- * @returns {Object} - Formatted alert block
- */
-function createAlertBlock(alertData, alertType = 'warning') {
-  let icon = '⚠️';
-  if (alertType === 'error') icon = '🚫';
-  if (alertType === 'success') icon = '✅';
-  
-  return {
-    type: 'section',
-    text: {
-      type: 'mrkdwn',
-      text: `${icon} *${alertData.title || alertType.toUpperCase()}*\n${alertData.text || ''}`
-    }
-  };
 }
 
 /**
@@ -1146,12 +897,6 @@ module.exports = {
   createDivider,
   createContext,
   createRichHeader,
-  createTableBlocks,
-  createColumnBlocks,
-  createAccordionBlocks,
-  createTimelineBlocks,
-  createInfoBlock,
-  createAlertBlock,
   convertSimpleBlocks,
   createSectionBlock,
   createContextBlock,

@@ -65,11 +65,7 @@ This document maintains a comprehensive index of all functions and tools in the 
       - `subtitle` - Smaller text below title
       - `fields` - Two-column layout items
       - `actions` - Interactive buttons
-      - `elements` - Rich content elements
-      - `table` - Tabular data display
-      - `columns` - Multi-column layout
-      - `accordion` - Collapsible sections
-      - `timeline` - Progress/status indicators
+      - `elements` - Array of rich content elements (headers, dividers, bullet lists, etc.)
       - `richHeader` - Enhanced header with emoji/icon
   - `buildButtons(options)` - Builds formatted button elements
   - `createSection(text)` - Creates a section block with text
@@ -80,20 +76,8 @@ This document maintains a comprehensive index of all functions and tools in the 
       - `text` - The header text content
       - `emoji` - An emoji to display (e.g., "tada", "rocket")
       - `icon` - URL to an image icon
-  - `createTableBlocks(tableData)` - Creates blocks for tabular data with options:
-      - `headers` - Array of column header names
-      - `rows` - Array of arrays for row data
-  - `createColumnBlocks(columnData)` - Creates multi-column layout blocks with options:
-      - `columns` - Array of markdown-formatted column content
-  - `createAccordionBlocks(accordionData)` - Creates collapsible section blocks with options:
-      - `sections` - Array of objects with `title` and `content` properties
-  - `createTimelineBlocks(timelineData)` - Creates timeline/progress blocks with options:
-      - `steps` - Array of objects with `title`, `description`, and `status` properties
-  - `createInfoBlock(infoData)` - Creates an info notice block with title and text
-  - `createAlertBlock(alertData, alertType)` - Creates alert blocks (warning/error/success) with title and text
   - `normalizeColor(color)` - Converts named colors to proper hex values
   - `processUserMentions(text)` - Processes user mentions in message text
-  - `parseRichText(text)` - Parses text with formatting markers into Block Kit blocks
   - `createButtonsBlock(buttons)` - Creates an actions block with interactive buttons
   - `createFieldsBlock(fields)` - Creates section blocks for field display
 
@@ -108,6 +92,7 @@ This document maintains a comprehensive index of all functions and tools in the 
 - **Functions**:
   - `logError(message, error, context)` - Logs an error with context
   - `formatErrorForLLM(error, context)` - Formats an error for the LLM
+  - `createToolError(message, code)` - Creates standardized tool errors
 
 ## Tools
 
@@ -123,30 +108,22 @@ This document maintains a comprehensive index of all functions and tools in the 
 - **Purpose**: Posts messages to Slack with rich formatting
 - **Functions**:
   - `postMessage(args, threadState)` - Posts a message to Slack with advanced formatting capabilities
+    - **Key Parameters**:
+      - `text` - Main message content with Slack markdown support
+      - `color` - Message color (hex code or named colors like 'good', 'warning', 'danger')
+      - `buttons` - Array of button definitions with text, value, and style
+      - `fields` - Array of field objects for two-column layouts
+      - `images` - Array of image URLs or objects with url and alt_text
+      - `blocks` - Direct Block Kit blocks for advanced layouts
+      - `elements` - Array of rich content elements such as dividers, headers, bullet lists, etc.
+      - `title` - Message title (alternative to header in text)
+      - `richHeader` - Enhanced header with emoji/icon support
     - **Advanced Formatting Support**:
       - Rich headers with emoji/icons
-      - Tabular data display
-      - Multi-column layouts
-      - Collapsible sections (accordion)
-      - Timeline/progress indicators
-      - Alert blocks (info, warning, error, success)
       - Interactive buttons with confirmations
       - Structured lists (bullet, numbered)
       - Code blocks with language highlighting
       - Quote blocks and context sections
-    - **Key Parameters**:
-      - `title` - Message title displayed as header
-      - `text` - Main message content with Slack markdown support
-      - `subtitle` - Secondary text below the title
-      - `color` - Message color (hex code or named colors like 'good', 'warning', 'danger')
-      - `richHeader` - Enhanced header with emoji/icon support
-      - `fields` - Two-column data display with title/value pairs
-      - `actions` - Interactive buttons with style and confirmation options
-      - `table` - Tabular data with headers and rows
-      - `columns` - Multi-column layout for side-by-side content
-      - `accordion` - Collapsible sections with title and content
-      - `timeline` - Progress/status visualization with completed/current/pending states
-      - `elements` - Array of rich content blocks including alerts, lists, quotes, and more
   - `formatMessageWithAbstraction(args, channel)` - Formats messages using high-level abstractions
     - Converts simplified formatting options to Slack Block Kit format
     - Handles rich content layout construction for all advanced components
@@ -154,7 +131,14 @@ This document maintains a comprehensive index of all functions and tools in the 
     - Manages text content parsing for markers and special formatting
   - `normalizeColor(color)` - Converts named colors to proper hex values
   - `processUserMentions(text)` - Processes user mentions in message text
-  - `parseRichText(text)` - Parses text with formatting markers into Block Kit blocks
+  - `parseBBCode(text)` - Processes BBCode-style formatting tags into Slack markdown format
+    - Handles headers, context blocks, user context, sections with images
+    - Processes lists, dividers, image references 
+    - Converts markdown links `[title](url)` to Slack format `<url|title>`
+    - Advanced handling for hyperlinks with complex URLs and query parameters
+    - Preprocessing for avatar links to prevent formatting issues
+  - `parseBBCodeToBlocks(text)` - Parses BBCode-formatted text into Slack Block Kit blocks
+  - `parseTextToBlocks(text)` - Direct parser for BBCode style tags to Slack blocks
   - `createButtonsBlock(buttons)` - Creates an actions block with interactive buttons
   - `createFieldsBlock(fields)` - Creates section blocks for field display
 
@@ -167,6 +151,21 @@ This document maintains a comprehensive index of all functions and tools in the 
 - **Purpose**: Retrieves thread history from Slack
 - **Functions**:
   - `getThreadHistory(args, threadState)` - Gets message history from a thread
+    - Formats messages, including attachments and image previews
+    - Provides thread statistics and parent message context
+    - Handles message formatting for optimal LLM understanding
+
+### `src/tools/getUserAvatar.js`
+- **Purpose**: Retrieves a user's profile avatar URLs
+- **Functions**:
+  - `getUserAvatar(args, threadState)` - Gets a user's avatar URLs in various sizes
+    - **Key Parameters**:
+      - `userId` - Slack user ID to get avatar for
+      - `size` - Size of avatar to return (24, 32, 48, 72, 192, 512, 1024, or 'original')
+    - **Returns**:
+      - User profile information (name, display name)
+      - URLs for all available avatar sizes
+      - Specifically requested avatar URL
 
 ### `src/tools/createButtonMessage.js`
 - **Purpose**: Creates interactive messages with buttons
@@ -217,10 +216,6 @@ This document maintains a comprehensive index of all functions and tools in the 
       - `actions` - Updated message buttons (optional)
       - `elements` - Updated rich elements (optional)
       - `richHeader` - Updated enhanced header (optional)
-    - **Supports All Formatting Options**:
-      - Same advanced formatting capabilities as postMessage
-      - Ability to completely transform message appearance
-      - Full support for tables, columns, timeline, and accordion layouts
     - **Returns**:
       - Updated message information and timestamp
 

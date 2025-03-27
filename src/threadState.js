@@ -5,6 +5,32 @@ class ThreadState {
         this.buttonStates = new Map();
         this.toolResults = new Map();
         this.metadata = new Map();
+        this.messages = [];
+        
+        // Extract channel ID from threadId if possible
+        // The threadId might be in format channelId:timestamp or just a channelId
+        if (threadId && (threadId.startsWith('C') || threadId.startsWith('D'))) {
+            if (threadId.includes(':')) {
+                this.channelId = threadId.split(':')[0];
+            } else {
+                this.channelId = threadId;
+            }
+        }
+    }
+
+    /**
+     * Get the channel ID for this thread
+     * @returns {string|null} - The channel ID or null if not available
+     */
+    getChannel() {
+        // Try to get from metadata.context first (most reliable)
+        const context = this.getMetadata('context');
+        if (context && context.channelId) {
+            return context.channelId;
+        }
+        
+        // Fall back to the property
+        return this.channelId || null;
     }
 
     recordToolExecution(toolName, args, result, error = null) {
@@ -79,16 +105,40 @@ class ThreadState {
     // General metadata methods
     setMetadata(key, value) {
         this.metadata.set(key, value);
+        
+        // If this is context metadata, also set channel property for easy access
+        if (key === 'context' && value && value.channelId) {
+            this.channelId = value.channelId;
+        }
     }
 
     getMetadata(key) {
         return this.metadata.get(key);
     }
 
+    // Get thread timestamp for replies
+    getThreadTs() {
+        // Check if we have context with threadTs
+        const context = this.getMetadata('context');
+        if (context && context.threadTs) {
+            return context.threadTs;
+        }
+        
+        // If threadId contains a timestamp part, use that
+        if (this.threadId && this.threadId.includes(':')) {
+            return this.threadId.split(':')[1];
+        }
+        
+        // Otherwise return threadId directly (might be a message ts)
+        return this.threadId;
+    }
+
     // Get state for LLM context
     getStateForLLM() {
         return {
             threadId: this.threadId,
+            channelId: this.getChannel(),
+            threadTs: this.getThreadTs(),
             sentMessagesCount: this.sentMessages.size,
             activeButtons: Array.from(this.buttonStates.entries())
                 .filter(([_, data]) => data.state === 'active')
