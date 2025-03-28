@@ -737,6 +737,34 @@ function parseBBCodeToBlocks(text) {
             text: trimmedParagraph // Use directly without processing mentions
           }
         });
+      } else if (trimmedParagraph.startsWith('(image:')) {
+        // Handle image syntax: (image:URL:alt_text)
+        console.log('🖼️ Processing image tag in paragraph');
+        const imagePattern = /^\(image:(.*?)(?::(.*?))?\)$/;
+        const imageMatch = trimmedParagraph.match(imagePattern);
+        
+        if (imageMatch) {
+          const imageUrl = imageMatch[1];
+          const altText = imageMatch[2] || 'Image';
+          
+          // Create an actual image block
+          blocks.push({
+            type: 'image',
+            image_url: imageUrl,
+            alt_text: altText
+          });
+          
+          console.log(`🖼️ Added image block with URL: ${imageUrl} and alt text: ${altText}`);
+        } else {
+          // If it doesn't match the exact pattern, treat as regular text
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: processUserMentions(trimmedParagraph)
+            }
+          });
+        }
       } else {
         // Regular section with normal user mention processing
         blocks.push({
@@ -1394,6 +1422,18 @@ function parseTextToBlocks(text) {
   });
   
   console.log(`✅ Created ${blocks.length} blocks`);
+  
+  // Debug logs to show image blocks
+  const imageBlocks = blocks.filter(block => block.type === 'image');
+  if (imageBlocks.length > 0) {
+    console.log(`🖼️ Found ${imageBlocks.length} image blocks:`);
+    imageBlocks.forEach((block, index) => {
+      console.log(`  Image block #${index + 1}: ${block.image_url.substring(0, 50)}... (alt: ${block.alt_text})`);
+    });
+  } else {
+    console.log('⚠️ No image blocks were created');
+  }
+  
   return blocks;
 }
 
