@@ -159,7 +159,7 @@ async function updateMessage(args, threadState) {
       await slackClient.reactions.add({
         channel: channelId,
         timestamp: messageTs,
-        name: 'hourglass_flowing_sand' // Loading indicator emoji
+        name: 'loading' // Loading indicator emoji
       });
     } catch (reactionError) {
       // Non-critical error, just log it
@@ -197,7 +197,7 @@ async function updateMessage(args, threadState) {
         await slackClient.reactions.remove({
           channel: channelId,
           timestamp: messageTs,
-          name: 'hourglass_flowing_sand'
+          name: 'loading'
         });
       } catch (reactionError) {
         // Non-critical error, just log it
@@ -332,7 +332,7 @@ async function updateMessage(args, threadState) {
       await slackClient.reactions.remove({
         channel: channelId,
         timestamp: messageTs,
-        name: 'hourglass_flowing_sand'
+        name: 'loading'
       });
       
       // Add a checkmark reaction to indicate completion

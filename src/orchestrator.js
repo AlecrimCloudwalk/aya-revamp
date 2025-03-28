@@ -36,7 +36,7 @@ async function handleIncomingSlackMessage(context) {
             await slackClient.reactions.add({
                 channel: context.channelId,
                 timestamp: context.timestamp || context.threadTs,
-                name: 'hourglass_flowing_sand'
+                name: 'loading'
             });
         } catch (reactionError) {
             console.log(`Failed to add reaction: ${reactionError.message}`);
@@ -51,7 +51,7 @@ async function handleIncomingSlackMessage(context) {
             await slackClient.reactions.remove({
                 channel: context.channelId,
                 timestamp: context.timestamp || context.threadTs,
-                name: 'hourglass_flowing_sand'
+                name: 'loading'
             });
             await slackClient.reactions.add({
                 channel: context.channelId,
@@ -72,7 +72,7 @@ async function handleIncomingSlackMessage(context) {
             await slackClient.reactions.remove({
                 channel: context.channelId,
                 timestamp: context.timestamp || context.threadTs,
-                name: 'hourglass_flowing_sand'
+                name: 'loading'
             });
             await slackClient.reactions.add({
                 channel: context.channelId,
@@ -620,7 +620,7 @@ async function processButtonInteraction(payload) {
       await slackClient.reactions.add({
         channel: channelId,
         timestamp: messageTs,
-        name: 'hourglass_flowing_sand' // Loading indicator emoji
+        name: 'loading' // Loading indicator emoji
       });
     } catch (reactionError) {
       // Non-critical error, just log it

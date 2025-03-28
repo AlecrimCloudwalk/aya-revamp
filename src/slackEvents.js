@@ -188,7 +188,7 @@ function setupSlackEvents(app) {
         await slackClient.reactions.add({
           channel: body.channel.id,
           timestamp: body.message.ts,
-          name: 'hourglass_flowing_sand'
+          name: 'loading'
         });
       } catch (reactionError) {
         console.log(`Could not add loading reaction in event handler: ${reactionError.message}`);

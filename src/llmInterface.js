@@ -134,6 +134,48 @@ const REMEMBER_CRITICAL = `- YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH
 - After sending a postMessage, always send a finishRequest to complete the interaction`;
 
 /**
+ * Block Builder syntax for modern Slack formatting
+ */
+const BLOCK_BUILDER_SYNTAX = `NEW BLOCK BUILDER SYNTAX (Preferred):
+You can now use the Block Builder syntax for creating rich Slack messages.
+This is the preferred way to format messages:
+
+#blockType: content | param1:value1 | param2:value2
+
+SUPPORTED BLOCK TYPES:
+- #header: Title text
+- #section: Standard text content
+- #context: Small helper text
+- #divider: (no parameters needed)
+- #image: https://example.com/image.jpg | altText:Image description
+- #contextWithImages: Text content | images:[https://example.com/image1.jpg|Alt text 1, https://example.com/image2.jpg|Alt text 2]
+- #buttons: [Button 1|value1|primary, Button 2|value2|danger, Button 3|value3]
+- #fields: [*Field 1 Title*|Field 1 Value, *Field 2 Title*|Field 2 Value]
+
+EXAMPLES:
+1. Header with section:
+#header: Welcome to our Service!
+#section: Here's some important information about your account.
+
+2. Context with images:
+#contextWithImages: Here are some example images | images:[https://example.com/image1.jpg|First Image, https://example.com/image2.jpg|Second Image]
+
+3. Buttons:
+#buttons: [Approve|approve_action|primary, Reject|reject_action|danger, More Info|info_action]
+
+4. Fields:
+#fields: [*Status*|Active, *Priority*|High, *Due Date*|Tomorrow]
+
+COMPLEX EXAMPLE:
+#header: Monthly Report
+#section: Here's your account summary for this month.
+#contextWithImages: Account Activity | images:[https://example.com/chart.jpg|Activity Chart]
+#divider:
+#fields: [*Balance*|$1,250, *Transactions*|43, *Status*|Good Standing]
+#section: Would you like to take any actions?
+#buttons: [View Details|view_details|primary, Download PDF|download_pdf, Contact Support|contact_support]`;
+
+/**
  * Ensures that BBCode-style parentheses in examples are properly escaped for JSON
  * @param {string} text - Text containing parentheses BBCode
  * @returns {string} - Text with properly escaped parentheses for JSON contexts
@@ -502,9 +544,21 @@ YOUR TOOLS:
 ${toolsList}
 
 RICH FORMATTING CAPABILITIES:
-You have two formatting approaches for rich text:
+${BLOCK_BUILDER_SYNTAX}
 
-1. MARKDOWN FOR COMMON FORMATTING:
+EXAMPLE OF MESSAGE WITH BLOCK BUILDER:
+\`\`\`json
+{
+  "tool": "postMessage",
+  "reasoning": "Responding to user's question about their account",
+  "parameters": {
+    "text": "#header: Your Account Information\\n\\n#section: Here's the information you requested about your account.\\n\\n#contextWithImages: Recent Activities | images:[https://example.com/chart.jpg|Activity Chart]\\n\\n#divider:\\n\\n#fields: [*Balance*|$1,250, *Transactions*|43, *Status*|Good Standing]\\n\\n#buttons: [View Details|view_details|primary, Download Report|download_report]",
+    "color": "blue"
+  }
+}
+\`\`\`
+
+You can still use basic Markdown for simple formatting:
 - *bold* for bold text
 - _italic_ for italic text
 - \`code\` for inline code
@@ -512,19 +566,6 @@ You have two formatting approaches for rich text:
 - > text for blockquotes
 - * or - for bullet lists
 - 1. 2. 3. for numbered lists
-
-${BBCODE_FORMATTING}
-
-EXAMPLE OF USER CONTEXT BLOCK:
-(header)Example User Context Block(!header)
-Here's a message specifically for you: (usercontext)${ctx.userId || 'U123456'}(!usercontext)
-This will display your user profile picture and mention in a special context block!
-
-Additional formatting options:
-- Text color: Set the "color" parameter to blue, green, red, etc. for message accent color
-- Text: Use header tags (header)Title(!header) within your text content for headings
-- Fields: Use "fields" parameter for structured data as [{ title: 'Field name', value: 'Field value' }]
-- Buttons: Use "buttons" parameter with standard button definitions
 
 TOOL CALL FORMAT:
 Use this exact JSON format for EACH tool call (send only one at a time):
