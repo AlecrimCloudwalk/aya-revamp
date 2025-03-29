@@ -5,6 +5,8 @@
  * using a consistent syntax designed for easier LLM integration.
  */
 
+const { getSlackClient } = require('../slackClient.js');
+
 // Debug logging function
 function debugLog(message, data) {
   if (process.env.DEBUG === 'true' || process.env.DEBUG_SLACK === 'true') {
@@ -18,6 +20,57 @@ function debugLog(message, data) {
 
 // Default color for attachments
 const defaultAttachmentColor = '#36C5F0'; // Slack blue
+
+/**
+ * Get a user's display name or real name from their Slack ID
+ * @param {string} userId - The Slack user ID
+ * @returns {Promise<string>} - The user's display name or real name
+ */
+async function getUserName(userId) {
+  try {
+    // Get Slack client
+    let slack = null;
+    try {
+      slack = getSlackClient();
+    } catch (error) {
+      console.error(`Error getting Slack client: ${error.message}`);
+      return `@User`;
+    }
+    
+    if (!slack) {
+      return `@User`;
+    }
+    
+    // Call users.info API to get user info
+    try {
+      const result = await slack.users.info({ user: userId });
+      
+      if (result.ok && result.user) {
+        // First try to get display name
+        if (result.user.profile.display_name) {
+          return `@${result.user.profile.display_name}`;
+        }
+        // Fall back to real name
+        else if (result.user.profile.real_name) {
+          return `@${result.user.profile.real_name}`;
+        }
+        // Last resort, use the user ID
+        else {
+          return `@User`;
+        }
+      } else {
+        console.warn(`No user data returned for ${userId}`);
+        return `@User`;
+      }
+    } catch (apiError) {
+      console.error(`API error fetching user info for ${userId}: ${apiError.message}`);
+      return `@User`;
+    }
+  } catch (error) {
+    console.error(`Error in getUserName for ${userId}: ${error.message}`);
+    return `@User`;
+  }
+}
 
 /**
  * Block definitions with their parameters and configurations
@@ -65,6 +118,11 @@ const blockDefinitions = {
     params: ['text', 'users'],
     attachmentWrapped: true,
     description: 'Section with user mentions'
+  },
+  userContext: {
+    params: ['text', 'users'],
+    attachmentWrapped: true,
+    description: 'Context block with user profiles'
   },
   buttons: {
     params: ['buttons'],
@@ -134,14 +192,73 @@ const blockGenerators = {
     type: 'divider'
   }),
   
-  header: (params) => ({
-    type: 'header',
-    text: {
-      type: 'plain_text',
-      text: params.text,
-      emoji: true
+  header: (params) => {
+    // Headers only support plain_text, so we need to convert any user mentions
+    // to a plain text format since Slack will reject mentions in header blocks
+    let headerText = params.text;
+    
+    // Check if there are user mentions that need to be processed
+    if (headerText && headerText.includes('<@')) {
+      // Extract all user IDs from mentions
+      const userIds = [];
+      const mentionRegex = /<@([A-Z0-9]+)>/g;
+      let match;
+      
+      while ((match = mentionRegex.exec(headerText)) !== null) {
+        userIds.push(match[1]);
+      }
+      
+      // For synchronous processing, we'll replace with placeholder text first
+      headerText = headerText.replace(/<@([A-Z0-9]+)>/g, '@UserName');
+      console.log(`⚠️ Converting ${userIds.length} user mentions in header to plain text usernames`);
+      
+      // Since we can't use async/await directly in this synchronous function,
+      // we'll return the basic block now, but queue up the user name lookups
+      
+      // Create the basic header block
+      const headerBlock = {
+        type: 'header',
+        text: {
+          type: 'plain_text',
+          text: headerText,
+          emoji: true
+        }
+      };
+      
+      // If there are user IDs to process, start the async lookups
+      // This is a best-effort approach that will update usernames if they can be fetched quickly
+      if (userIds.length > 0) {
+        // For each user ID, fetch the username and update the header text
+        Promise.all(userIds.map(userId => getUserName(userId)))
+          .then(userNames => {
+            // Replace each placeholder with the actual username
+            let updatedText = headerText;
+            userNames.forEach((userName, index) => {
+              updatedText = updatedText.replace('@UserName', userName);
+            });
+            
+            // Update the block with the new text
+            headerBlock.text.text = updatedText;
+            console.log('✅ Updated header with actual usernames');
+          })
+          .catch(error => {
+            console.error('Error updating usernames in header:', error);
+          });
+      }
+      
+      return headerBlock;
+    } else {
+      // No user mentions, return the header as is
+      return {
+        type: 'header',
+        text: {
+          type: 'plain_text',
+          text: headerText,
+          emoji: true
+        }
+      };
     }
-  }),
+  },
   
   sectionWithImage: (params) => {
     if (params.imagePosition === 'right' || !params.imagePosition) {
@@ -234,16 +351,300 @@ const blockGenerators = {
     }
   },
   
-  // Implement remaining generators...
   sectionWithUsers: (params) => {
-    // Implementation here
-    return {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: params.text
+    try {
+      // Create the basic section with text
+      const section = {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: params.text || ''
+        }
+      };
+      
+      // If we have users, add them to the section
+      if (params.users && Array.isArray(params.users) && params.users.length > 0) {
+        // For section with users, we just add user mentions directly in the text
+        // Users should already be formatted as <@USER_ID> by the LLM
+        // This function doesn't actually need special handling since the LLM formats the mentions
+        debugLog(`👥 Section with users: ${params.users.length} users`);
       }
-    };
+      
+      return section;
+    } catch (error) {
+      console.error('Error in sectionWithUsers generator:', error);
+      // Fallback to simple section
+      return {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: params.text || 'User Section (Error)'
+        }
+      };
+    }
+  },
+  
+  userContext: async (params) => {
+    try {
+      debugLog('👥 Generating userContext block with params:', JSON.stringify(params, null, 2));
+      
+      // Extract user IDs from text if they're not provided directly
+      let userIds = params.users || [];
+      
+      // Convert string user input to array if needed
+      if (typeof userIds === 'string') {
+        debugLog('Converting string user input to array');
+        userIds = userIds.split(',').map(id => id.trim());
+      }
+      
+      if (!userIds.length && params.text) {
+        // Extract user IDs from text format like <@U123456>
+        const mentionRegex = /<@([A-Z0-9]+)>/g;
+        let match;
+        while ((match = mentionRegex.exec(params.text)) !== null) {
+          userIds.push(match[1]);
+        }
+      }
+      
+      // If no user IDs found, return a simple text context
+      if (!userIds.length) {
+        return {
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: params.text || 'No users specified'
+          }]
+        };
+      }
+      
+      // NOTE: We're NOT deduplicating here anymore, to allow multiple mentions of the same user
+      
+      // Log found userIds for debugging
+      debugLog(`👥 Processing ${userIds.length} user IDs: ${userIds.join(', ')}`);
+      console.log(`👥 User IDs to process: ${userIds.join(', ')}`);
+      
+      // Extract description text (content after the pipe character)
+      let descriptionText = '';
+      if (params.text && params.text.includes('|')) {
+        const parts = params.text.split('|', 2);
+        descriptionText = parts[1] ? parts[1].trim() : '';
+      } else {
+        descriptionText = params.text || '';
+      }
+      
+      // Determine if we need mrkdwn or plain_text based on content
+      // Use mrkdwn if the text contains markdown formatting or emoji codes
+      const needsMrkdwn = descriptionText.match(/[*_~`>]|\:[a-z0-9_\-\+]+\:|<@|<#|<http/);
+      const textType = needsMrkdwn ? 'mrkdwn' : 'plain_text';
+      
+      // Set workspace ID for fallback URL construction
+      const workspaceId = process.env.SLACK_WORKSPACE_ID || 'T02RAEMPK';
+      
+      // Create the context block structure
+      const contextBlock = {
+        type: 'context',
+        block_id: `uc_${Date.now().toString().slice(-6)}_${userIds.length}`,
+        elements: []
+      };
+      
+      // Set maximum number of avatars to show
+      const MAX_AVATARS = 3;
+      const totalUsers = userIds.length;
+      const hasMoreUsers = totalUsers > MAX_AVATARS;
+      const avatarsToShow = hasMoreUsers ? MAX_AVATARS : totalUsers;
+      
+      // Get Slack client for fetching user info
+      try {
+        const slack = getSlackClient();
+        console.log('✅ Successfully got Slack client');
+        
+        // Use Promise.all to fetch all user info in parallel with a timeout
+        const userInfoPromises = userIds.map(userId => {
+          // Create a promise that resolves after 3 seconds with a fallback
+          const timeoutPromise = new Promise(resolve => {
+            setTimeout(() => {
+              console.log(`⏱️ Timeout for user ${userId}, using fallback avatar`);
+              resolve({
+                userId,
+                name: userId,
+                imageUrl: `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`
+              });
+            }, 3000); // 3 second timeout
+          });
+          
+          // Create the fetch promise
+          console.log(`⏳ Starting API call for user ${userId} at ${new Date().toISOString()}`);
+          const startTime = Date.now();
+          
+          const fetchPromise = slack.users.info({ user: userId })
+            .then(result => {
+              const elapsed = Date.now() - startTime;
+              console.log(`⌛ API call for user ${userId} took ${elapsed}ms`);
+              
+              if (result && result.ok && result.user && result.user.profile) {
+                const imageUrl = result.user.profile.image_72 || 
+                                result.user.profile.image_48 || 
+                                `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`;
+                const name = result.user.profile.display_name || result.user.real_name || userId;
+                
+                console.log(`✅ Successfully fetched avatar for ${name} (${userId}): ${imageUrl}`);
+                
+                return {
+                  userId,
+                  name,
+                  imageUrl
+                };
+              } else {
+                console.log(`⚠️ Slack API returned ok but no user data for ${userId}`);
+                return {
+                  userId,
+                  name: userId,
+                  imageUrl: `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`
+                };
+              }
+            })
+            .catch(error => {
+              const elapsed = Date.now() - startTime;
+              console.error(`❌ Error fetching user info for ${userId} after ${elapsed}ms:`, error);
+              console.error(`Error details: ${error.message}`);
+              
+              if (error.data) {
+                console.error(`API error data:`, JSON.stringify(error.data));
+              }
+              
+              return {
+                userId,
+                name: userId,
+                imageUrl: `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`
+              };
+            });
+          
+          // Return whichever resolves first
+          return Promise.race([fetchPromise, timeoutPromise]);
+        });
+        
+        // Wait for all user info to be fetched (with timeout protection)
+        const userInfos = await Promise.all(userInfoPromises);
+        
+        // Add image elements with real user avatars
+        for (let i = 0; i < avatarsToShow; i++) {
+          contextBlock.elements.push({
+            type: 'image',
+            image_url: userInfos[i].imageUrl,
+            alt_text: userInfos[i].name
+          });
+        }
+        
+        // Add the text element with dot character at the beginning
+        // Context blocks don't support rich text formatting in plain_text mode
+        // So we'll use mrkdwn format and include the dot as part of the text
+        const firstName = userInfos[0].name;
+        let finalText = '';
+        
+        // Create different messages based on user count
+        if (totalUsers === 1) {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstName}* ${descriptionText || 'is part of this conversation'}`;
+        } else if (totalUsers === 2) {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstName} and 1 other* ${descriptionText || 'are part of this conversation'}`;
+        } else if (hasMoreUsers) {
+          const othersCount = totalUsers - 1;
+          finalText = `\u2003\u2003·\u2003\u2003*${firstName} and ${othersCount} others* ${descriptionText || 'are part of this conversation'}`;
+        } else {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstName} and ${totalUsers - 1} others* ${descriptionText || 'are part of this conversation'}`;
+        }
+        
+        // Add as mrkdwn to support formatting
+        contextBlock.elements.push({
+          type: 'mrkdwn',
+          text: finalText
+        });
+        
+        // Log the final block for debugging
+        console.log('📋 Final userContext block structure:');
+        console.log(JSON.stringify(contextBlock, null, 2));
+        
+        // Ensure the block has a type field
+        if (!contextBlock.type) {
+          console.error('⚠️ userContext block missing type field, adding it');
+          contextBlock.type = 'context';
+        }
+        
+        // Check that elements are added
+        if (!contextBlock.elements || contextBlock.elements.length === 0) {
+          console.error('⚠️ userContext block has no elements, adding fallback text');
+          contextBlock.elements = [{
+            type: 'mrkdwn',
+            text: 'User context (Error: No elements found)'
+          }];
+        }
+        
+        return contextBlock;
+      } catch (error) {
+        console.error('Error fetching user info:', error);
+        
+        // Fallback to placeholder avatars if we couldn't get the Slack client
+        for (let i = 0; i < avatarsToShow; i++) {
+          contextBlock.elements.push({
+            type: 'image',
+            image_url: `https://ca.slack-edge.com/${workspaceId}-${userIds[i]}-4c812ee43716-72`,
+            alt_text: `User ${userIds[i]}`
+          });
+        }
+        
+        // Add the text element with dot character at the beginning
+        const firstUserId = userIds[0];
+        let finalText = '';
+        
+        // Create different messages based on user count
+        if (totalUsers === 1) {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstUserId}* ${descriptionText || 'is part of this conversation'}`;
+        } else if (totalUsers === 2) {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and 1 other* ${descriptionText || 'are part of this conversation'}`;
+        } else if (hasMoreUsers) {
+          const othersCount = totalUsers - 1;
+          finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and ${othersCount} others* ${descriptionText || 'are part of this conversation'}`;
+        } else {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and ${totalUsers - 1} others* ${descriptionText || 'are part of this conversation'}`;
+        }
+        
+        // Add as mrkdwn to support formatting
+        contextBlock.elements.push({
+          type: 'mrkdwn',
+          text: finalText
+        });
+        
+        // Log the final block for debugging
+        console.log('📋 Final userContext block structure (fallback):');
+        console.log(JSON.stringify(contextBlock, null, 2));
+        
+        // Ensure the block has a type field
+        if (!contextBlock.type) {
+          console.error('⚠️ userContext block missing type field, adding it');
+          contextBlock.type = 'context';
+        }
+        
+        // Check that elements are added
+        if (!contextBlock.elements || contextBlock.elements.length === 0) {
+          console.error('⚠️ userContext block has no elements, adding fallback text');
+          contextBlock.elements = [{
+            type: 'mrkdwn',
+            text: 'User context (Error: No elements found)'
+          }];
+        }
+        
+        return contextBlock;
+      }
+    } catch (error) {
+      console.error('Error in userContext generator:', error);
+      // Fallback to simple context
+      return {
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: params.text || 'User Context (Error)'
+        }]
+      };
+    }
   },
   
   buttons: (params) => {
@@ -489,18 +890,385 @@ function parseParams(blockType, content) {
     // Return standard section params
     return { text };
   }
+  // Check for usercontext format which should be converted to proper blocks
+  else if (blockType === 'context' && content.match(/\(usercontext\)(.*?)(?:\|.*?)?(?:\(!usercontext\))/)) {
+    debugLog(`👥 Detected usercontext format in context block`);
+    // Extract user IDs and optional description
+    const match = content.match(/\(usercontext\)(.*?)(?:\|(.*?))?(?:\(!usercontext\))/);
+    if (match) {
+      let userIds = match[1].trim().split(',').map(id => id.trim());
+      const description = match[2] ? match[2].trim() : '';
+      
+      // Check for <@ID> format in comma-separated list and extract IDs
+      const extractedIds = [];
+      for (const item of userIds) {
+        if (item.match(/<@([A-Z0-9]+)>/)) {
+          const idMatch = item.match(/<@([A-Z0-9]+)>/);
+          extractedIds.push(idMatch[1]);
+        } else if (item.match(/^[A-Z0-9]+$/)) {
+          extractedIds.push(item);
+        }
+      }
+      
+      // If we found any IDs in <@ID> format, use those instead
+      if (extractedIds.length > 0) {
+        userIds = extractedIds;
+      }
+      
+      // Note: No longer deduplicating user IDs
+      
+      debugLog(`👥 Extracted user IDs: ${userIds.join(', ')}`);
+      debugLog(`📄 Description: "${description}"`);
+      
+      // Convert to userContext params
+      return { 
+        blockTypeOverride: 'userContext',
+        text: description,
+        users: userIds
+      };
+    }
+  }
+  // Handle userContext blocks directly
+  else if (blockType === 'userContext') {
+    debugLog(`👥 Parsing userContext block parameters`);
+    
+    // Extract text (content before the pipe, if any)
+    let text = content;
+    let description = '';
+    
+    if (content.includes('|')) {
+      const parts = content.split('|', 2);
+      text = parts[0].trim();
+      description = parts[1] ? parts[1].trim() : '';
+      debugLog(`📄 Extracted userContext base text: "${text}"`);
+      debugLog(`📄 Description: "${description}"`);
+    }
+    
+    // Extract user IDs from text
+    const userIds = [];
+    const mentionRegex = /<@([A-Z0-9]+)>/g;
+    let match;
+    
+    while ((match = mentionRegex.exec(text)) !== null) {
+      userIds.push(match[1]);
+    }
+    
+    // If no user IDs found in text, check if there are comma-separated IDs
+    if (userIds.length === 0 && text) {
+      const possibleIds = text.split(',').map(id => id.trim());
+      
+      // Process IDs that are either plain or in <@ID> format
+      for (const possibleId of possibleIds) {
+        // If it's already in <@ID> format, extract the ID
+        if (possibleId.match(/<@([A-Z0-9]+)>/)) {
+          const idMatch = possibleId.match(/<@([A-Z0-9]+)>/);
+          userIds.push(idMatch[1]);
+        } 
+        // If it's a plain ID (just alphanumeric), use it directly
+        else if (possibleId.match(/^[A-Z0-9]+$/)) {
+          userIds.push(possibleId);
+        }
+      }
+    }
+    
+    // Note: No longer deduplicating user IDs
+    
+    debugLog(`👥 Extracted ${userIds.length} user IDs from mentions`);
+    
+    // Return formatted params
+    return {
+      text: description,
+      users: userIds
+    };
+  }
   
   // Default case, just return the content as text parameter
   return { text: content };
 }
 
 /**
+ * Clean blocks of any private metadata before sending to Slack API
+ * Removes properties that Slack API rejects (like _metadata)
+ * @param {Object} obj - The block object to clean
+ * @returns {Object} - A clean copy without private properties
+ */
+function cleanForSlackApi(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  
+  // If it's an array, clean each item
+  if (Array.isArray(obj)) {
+    return obj.map(item => cleanForSlackApi(item));
+  }
+  
+  // Create a new object without the _metadata property
+  const cleaned = {};
+  
+  // Copy all properties except _metadata
+  for (const key in obj) {
+    if (key !== '_metadata') {
+      // Recursively clean nested objects
+      cleaned[key] = typeof obj[key] === 'object' ? 
+        cleanForSlackApi(obj[key]) : obj[key];
+    }
+  }
+  
+  return cleaned;
+}
+
+/**
  * Parses a message with block syntax into a Slack message structure
  * @param {string} message - The message with block syntax
- * @returns {Object} - The parsed message structure with blocks and attachments
+ * @returns {Object|Promise<Object>} - The parsed message structure with blocks and attachments
  */
-function parseMessage(message) {
+async function parseMessage(message) {
   console.log(`🔄 Parsing message with block syntax`);
+  
+  // Check for standalone usercontext syntax (not inside a block)
+  const userContextRegex = /\(usercontext\)(.*?)(?:\|(.*?))?(?:\(!usercontext\))/g;
+  const userContextMatches = Array.from(message.matchAll(userContextRegex));
+  
+  if (userContextMatches.length > 0 && !message.includes('#')) {
+    console.log(`👥 Found ${userContextMatches.length} standalone usercontext tags in message`);
+    
+    // We'll create one or more context blocks with user avatars
+    const contextBlocks = [];
+    const workspaceId = process.env.SLACK_WORKSPACE_ID || 'T02RAEMPK';
+    
+    // Try to get the Slack client
+    let slack = null;
+    try {
+      slack = getSlackClient();
+      console.log('✅ Successfully got Slack client for userContext processing');
+    } catch (slackError) {
+      console.error('Error getting Slack client:', slackError);
+    }
+    
+    // Process each usercontext match
+    for (const match of userContextMatches) {
+      console.log('🔎 Processing usercontext match:', match[0]);
+      
+      // Extract and process user IDs
+      let userIdsRaw = match[1].trim();
+      
+      // Handle both comma-separated IDs and <@ID> format
+      let userIds = [];
+      
+      // Check if we have <@ID> format mentions
+      if (userIdsRaw.includes('<@')) {
+        const mentionRegex = /<@([A-Z0-9]+)>/g;
+        let idMatch;
+        while ((idMatch = mentionRegex.exec(userIdsRaw)) !== null) {
+          userIds.push(idMatch[1]);
+        }
+      } else {
+        // Process as comma-separated list
+        userIds = userIdsRaw.split(',').map(id => id.trim());
+      }
+      
+      // Note: We no longer deduplicate user IDs to allow multiple mentions of the same user
+      
+      // Extract description
+      const description = match[2] ? match[2].trim() : '';
+      
+      console.log(`👥 Processing ${userIds.length} user IDs with description: "${description}"`);
+      
+      // Determine if we need mrkdwn or plain_text based on content
+      const needsMrkdwn = description.match(/[*_~`>]|\:[a-z0-9_\-\+]+\:|<@|<#|<http/);
+      const textType = needsMrkdwn ? 'mrkdwn' : 'plain_text';
+      
+      // Set maximum number of avatars to show
+      const MAX_AVATARS = 3;
+      const totalUsers = userIds.length;
+      const hasMoreUsers = totalUsers > MAX_AVATARS;
+      const avatarsToShow = hasMoreUsers ? MAX_AVATARS : totalUsers;
+      
+      // Create a context block
+      const contextBlock = {
+        type: 'context',
+        block_id: `uc_${Date.now().toString().slice(-6)}_${userIds.length}`,
+        elements: []
+      };
+      
+      // If we have a Slack client, try to fetch real avatars
+      if (slack) {
+        try {
+          // Use Promise.all with a timeout to fetch all user info in parallel
+          const userInfoPromises = userIds.map(userId => {
+            // Create a promise that resolves after 3 seconds with a fallback
+            const timeoutPromise = new Promise(resolve => {
+              setTimeout(() => {
+                console.log(`⏱️ Timeout for user ${userId}, using fallback avatar`);
+                resolve({
+                  userId,
+                  name: userId,
+                  imageUrl: `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`
+                });
+              }, 3000); // 3 second timeout
+            });
+            
+            // Create the fetch promise
+            console.log(`⏳ Starting API call for user ${userId} at ${new Date().toISOString()}`);
+            const startTime = Date.now();
+            
+            const fetchPromise = slack.users.info({ user: userId })
+              .then(result => {
+                const elapsed = Date.now() - startTime;
+                console.log(`⌛ API call for user ${userId} took ${elapsed}ms`);
+                
+                if (result && result.ok && result.user && result.user.profile) {
+                  const imageUrl = result.user.profile.image_72 || 
+                                  result.user.profile.image_48 || 
+                                  `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`;
+                  const name = result.user.profile.display_name || result.user.real_name || userId;
+                  
+                  console.log(`✅ Successfully fetched avatar for ${name} (${userId}): ${imageUrl}`);
+                  
+                  return {
+                    userId,
+                    name,
+                    imageUrl
+                  };
+                } else {
+                  console.log(`⚠️ Slack API returned ok but no user data for ${userId}`);
+                  return {
+                    userId,
+                    name: userId,
+                    imageUrl: `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`
+                  };
+                }
+              })
+              .catch(error => {
+                const elapsed = Date.now() - startTime;
+                console.error(`❌ Error fetching user info for ${userId} after ${elapsed}ms:`, error);
+                console.error(`Error details: ${error.message}`);
+                
+                if (error.data) {
+                  console.error(`API error data:`, JSON.stringify(error.data));
+                }
+                
+                return {
+                  userId,
+                  name: userId,
+                  imageUrl: `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`
+                };
+              });
+            
+            // Return whichever resolves first
+            return Promise.race([fetchPromise, timeoutPromise]);
+          });
+          
+          // Wait for all user info to be fetched (with timeout protection)
+          const userInfos = await Promise.all(userInfoPromises);
+          
+          // Add image elements with real user avatars
+          for (let i = 0; i < avatarsToShow; i++) {
+            contextBlock.elements.push({
+              type: 'image',
+              image_url: userInfos[i].imageUrl,
+              alt_text: userInfos[i].name
+            });
+          }
+          
+          // Add the text element with dot character at the beginning
+          // Context blocks don't support rich text formatting in plain_text mode
+          // So we'll use mrkdwn format and include the dot as part of the text
+          const firstName = userInfos[0].name;
+          let finalText = '';
+          
+          // Create different messages based on user count
+          if (totalUsers === 1) {
+            finalText = `\u2003\u2003·\u2003\u2003*${firstName}* ${description || 'is part of this conversation'}`;
+          } else if (totalUsers === 2) {
+            finalText = `\u2003\u2003·\u2003\u2003*${firstName}* _and 1 other_ ${description || 'are part of this conversation'}`;
+          } else if (hasMoreUsers) {
+            const othersCount = totalUsers - 1;
+            finalText = `\u2003\u2003·\u2003\u2003*${firstName}* _and ${othersCount} others_ ${description || 'are part of this conversation'}`;
+          } else {
+            finalText = `\u2003\u2003·\u2003\u2003*${firstName}* _and ${totalUsers - 1} others_ ${description || 'are part of this conversation'}`;
+          }
+          
+          // Add as mrkdwn to support formatting
+          contextBlock.elements.push({
+            type: 'mrkdwn',
+            text: finalText
+          });
+          
+        } catch (error) {
+          console.error('Error fetching user avatars:', error);
+          
+          // Fallback to placeholder avatars
+          for (let i = 0; i < avatarsToShow; i++) {
+            contextBlock.elements.push({
+              type: 'image',
+              image_url: `https://ca.slack-edge.com/${workspaceId}-${userIds[i]}-4c812ee43716-72`,
+              alt_text: `User ${userIds[i]}`
+            });
+          }
+          
+          // Add the text element with dot character at the beginning
+          const firstUserId = userIds[0];
+          let finalText = '';
+          
+          // Create different messages based on user count
+          if (totalUsers === 1) {
+            finalText = `\u2003\u2003·\u2003\u2003*${firstUserId}* ${description || 'is part of this conversation'}`;
+          } else if (totalUsers === 2) {
+            finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and 1 other* ${description || 'are part of this conversation'}`;
+          } else if (hasMoreUsers) {
+            const othersCount = totalUsers - 1;
+            finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and ${othersCount} others* ${description || 'are part of this conversation'}`;
+          } else {
+            finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and ${totalUsers - 1} others* ${description || 'are part of this conversation'}`;
+          }
+          
+          // Add as mrkdwn to support formatting
+          contextBlock.elements.push({
+            type: 'mrkdwn',
+            text: finalText
+          });
+        }
+      } else {
+        // No Slack client, use placeholder avatars
+        for (let i = 0; i < avatarsToShow; i++) {
+          contextBlock.elements.push({
+            type: 'image',
+            image_url: `https://ca.slack-edge.com/${workspaceId}-${userIds[i]}-4c812ee43716-72`,
+            alt_text: `User ${userIds[i]}`
+          });
+        }
+        
+        // Add the text element with dot character at the beginning
+        const firstUserId = userIds[0];
+        let finalText = '';
+        
+        // Create different messages based on user count
+        if (totalUsers === 1) {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstUserId}* ${description || 'is part of this conversation'}`;
+        } else if (totalUsers === 2) {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and 1 other* ${description || 'are part of this conversation'}`;
+        } else if (hasMoreUsers) {
+          const othersCount = totalUsers - 1;
+          finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and ${othersCount} others* ${description || 'are part of this conversation'}`;
+        } else {
+          finalText = `\u2003\u2003·\u2003\u2003*${firstUserId} and ${totalUsers - 1} others* ${description || 'are part of this conversation'}`;
+        }
+        
+        // Add as mrkdwn to support formatting
+        contextBlock.elements.push({
+          type: 'mrkdwn',
+          text: finalText
+        });
+      }
+      
+      // Add to our list of blocks
+      contextBlocks.push(contextBlock);
+    }
+    
+    // Return all the context blocks
+    return {
+      blocks: cleanForSlackApi(contextBlocks)
+    };
+  }
   
   // Extract block declarations using regex
   const blockRegex = /#([a-zA-Z]+):\s*([^#]+?)(?=#[a-zA-Z]+:|$)/g;
@@ -539,7 +1307,7 @@ function parseMessage(message) {
     const params = parseParams(actualBlockType, content);
     
     // Use a variable to track the block type we'll actually use
-    let blockTypeToUse = actualBlockType;
+    let blockTypeToUse = params.blockTypeOverride || actualBlockType;
     
     // Determine if we need to convert section to sectionWithImage
     if (blockTypeToUse.toLowerCase() === 'section' && params.imageUrl) {
@@ -569,18 +1337,44 @@ function parseMessage(message) {
         continue;
       }
       
-      const generated = generator(params);
+      const generated = await Promise.resolve(generator(params));
       debugLog(`✅ Generated ${blockTypeToUse} block`);
       
-      if (isAttachment) {
-        debugLog(`📎 Adding as attachment: ${blockTypeToUse}`);
-        attachments.push({
-          color: params.color || defaultAttachmentColor,
-          blocks: [generated]
-        });
+      // Ensure the generated block has a type field
+      if (!generated) {
+        console.error(`❌ Block generator for ${blockTypeToUse} returned empty result`);
+        continue;
+      }
+      
+      // Handle array result (some generators return multiple blocks)
+      if (Array.isArray(generated)) {
+        if (isAttachment) {
+          debugLog(`📎 Adding array as attachment: ${blockTypeToUse}`);
+          attachments.push({
+            color: params.color || defaultAttachmentColor,
+            blocks: generated
+          });
+        } else {
+          debugLog(`📦 Adding array as blocks: ${blockTypeToUse}`);
+          blocks.push(...generated);
+        }
       } else {
-        debugLog(`📦 Adding as block: ${blockTypeToUse}`);
-        blocks.push(generated);
+        // Ensure the block has a type field
+        if (!generated.type) {
+          console.error(`❌ Block generator for ${blockTypeToUse} returned block without type field:`, JSON.stringify(generated));
+          continue;
+        }
+        
+        if (isAttachment) {
+          debugLog(`📎 Adding as attachment: ${blockTypeToUse}`);
+          attachments.push({
+            color: params.color || defaultAttachmentColor,
+            blocks: [generated]
+          });
+        } else {
+          debugLog(`📦 Adding as block: ${blockTypeToUse}`);
+          blocks.push(generated);
+        }
       }
       
       debugLog(`✅ Processed ${blockTypeToUse} block`);
@@ -599,11 +1393,15 @@ function parseMessage(message) {
   // Assemble the final message
   const result = {};
   if (blocks.length > 0) {
-    result.blocks = blocks;
+    result.blocks = cleanForSlackApi(blocks);
   }
   if (attachments.length > 0) {
-    result.attachments = attachments;
+    result.attachments = cleanForSlackApi(attachments);
   }
+  
+  // Add debug logging of the final message structure
+  console.log('🏁 Final message structure from parseMessage:');
+  console.log(JSON.stringify(result, null, 2));
   
   return result;
 }
@@ -628,5 +1426,7 @@ module.exports = {
   parseParams,
   blockRegistry,
   blockDefinitions,
-  processUserMentions
-}; 
+  processUserMentions,
+  getUserName,
+  cleanForSlackApi
+};

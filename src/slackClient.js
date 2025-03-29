@@ -19,7 +19,8 @@ function setSlackClient(client) {
  */
 function getSlackClient() {
   if (!slackClient) {
-    throw new Error('Slack client has not been initialized');
+    console.warn('Slack client has not been initialized yet. This may happen during early startup or testing.');
+    return null;
   }
   return slackClient;
 }

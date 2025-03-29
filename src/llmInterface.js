@@ -10,6 +10,12 @@ const COMMUNICATION_STYLE = `- Be enthusiastic, cheerful, and energetic in your 
 - Be conversational and friendly, showing excitement when helping users
 - Use exclamation points to convey enthusiasm where appropriate!
 - Express positivity with phrases like "Great question!" or "I'd love to help with that!"
+- *Always react to user messages with appropriate emojis using the addReaction tool*
+- Use multiple emoji reactions if appropriate - don't limit yourself to just one!
+- For positive messages, react with 👍 ❤️ ✨ etc.
+- For questions, you can react with 🤔 or 💡
+- For fun messages, use 😂 or the custom "kek-doge" emoji
+- For processing requests, you can use the custom "loading" emoji
 - Include emoji reactions to emphasize important points or show excitement
 - Use markdown formatting for readability and to make messages visually appealing
 - Format code with \`\`\`language\\n code \`\`\` blocks
@@ -45,10 +51,10 @@ const BBCODE_FORMATTING = `### Markdown (for basic formatting):
 - (header)Title(!header) for section headers
 - (context)Small helper text(!context) for smaller helper text
 - (divider) for horizontal dividers
-- (usercontext)USER1,USER2,USER3(!usercontext) for displaying users in a special context block
-  * Properly formats user IDs as mentions with profile pictures
-  * Example: (usercontext)U123456(!usercontext) creates a dedicated user mention block
-  * Do NOT confuse with regular user mentions (<@USER_ID>) used inline in text
+- #userContext: <@USER1> <@USER2> <@USER3> | optional description text
+  * Create user profile mentions in a special context block
+  * Always format user IDs with <@USER_ID> syntax
+  * Example: #userContext: <@U123456> | is helping with this task
 - (section:image_url:alt_text)Content with an image accessory(!section) for sections with images
 
 ### Hyperlinks and URLs:
@@ -69,6 +75,34 @@ const BBCODE_FORMATTING = `### Markdown (for basic formatting):
 3. **Image Hyperlink** - Use:
    * <https://example.com/image.jpg|View image>
    This shows a clickable link but doesn't embed the image.`;
+
+const BLOCK_BUILDER_GUIDE = `### Markdown (for basic formatting):
+- *bold* for bold text
+- _italic_ for italic text
+- \`code\` for inline code
+- \`\`\`language
+  code block
+  \`\`\` for code blocks
+- > text for blockquotes
+- * or - for bullet lists
+- 1. 2. 3. for numbered lists
+
+### Block Builder Syntax (Modern Method):
+Use the block builder syntax for all formatting:
+#header: Title text
+#section: Standard content
+#context: Helper text
+#divider:
+#userContext: <@USER1> <@USER2> | description text
+#image: https://example.com/image.jpg | altText:Image description
+#contextWithImages: Text | images:[https://example.com/image1.jpg|Alt text 1, https://example.com/image2.jpg|Alt text 2]
+#buttons: [Button 1|value1|primary, Button 2|value2|danger, Button 3|value3]
+#fields: [*Title*|Value]
+
+### Hyperlinks:
+- For hyperlinks, use Slack's format: <URL|text label> 
+  * Example: <https://slack.com|Visit Slack>
+  * IMPORTANT: Do NOT use Markdown format [text](URL) for links`;
 
 const TOOL_CALL_FORMAT = `\`\`\`json
 {
@@ -143,12 +177,13 @@ This is the preferred way to format messages:
 #blockType: content | param1:value1 | param2:value2
 
 SUPPORTED BLOCK TYPES:
-- #header: Title text
+- #header: Title text (⚠️ NOTE: Slack headers don't support rich text. Any <@USER_ID> will be converted to '@Username')
 - #section: Standard text content
 - #context: Small helper text
 - #divider: (no parameters needed)
 - #image: https://example.com/image.jpg | altText:Image description
 - #contextWithImages: Text content | images:[https://example.com/image1.jpg|Alt text 1, https://example.com/image2.jpg|Alt text 2]
+- #userContext: <@U123456> <@U789012> | Optional description text
 - #buttons: [Button 1|value1|primary, Button 2|value2|danger, Button 3|value3]
 - #fields: [*Field 1 Title*|Field 1 Value, *Field 2 Title*|Field 2 Value]
 
@@ -160,10 +195,14 @@ EXAMPLES:
 2. Context with images:
 #contextWithImages: Here are some example images | images:[https://example.com/image1.jpg|First Image, https://example.com/image2.jpg|Second Image]
 
-3. Buttons:
+3. User context (profiles):
+#userContext: <@U123456> <@U789012> | Collaborated on this project
+// This shows user profile pictures with names and the description
+
+4. Buttons:
 #buttons: [Approve|approve_action|primary, Reject|reject_action|danger, More Info|info_action]
 
-4. Fields:
+5. Fields:
 #fields: [*Status*|Active, *Priority*|High, *Due Date*|Tomorrow]
 
 COMPLEX EXAMPLE:
@@ -175,41 +214,16 @@ COMPLEX EXAMPLE:
 #section: Would you like to take any actions?
 #buttons: [View Details|view_details|primary, Download PDF|download_pdf, Contact Support|contact_support]`;
 
-/**
- * Ensures that BBCode-style parentheses in examples are properly escaped for JSON
- * @param {string} text - Text containing parentheses BBCode
- * @returns {string} - Text with properly escaped parentheses for JSON contexts
- */
-function escapeParenthesesForJson(text) {
-  if (!text) return text;
-  
-  // Replace unescaped parentheses in BBCode patterns with escaped ones
-  return text
-    .replace(/\(header\)/g, '\\(header\\)')
-    .replace(/\(!header\)/g, '\\(!header\\)')
-    .replace(/\(context\)/g, '\\(context\\)')
-    .replace(/\(!context\)/g, '\\(!context\\)')
-    .replace(/\(list\)/g, '\\(list\\)')
-    .replace(/\(!list\)/g, '\\(!list\\)')
-    .replace(/\(divider\)/g, '\\(divider\\)')
-    .replace(/\(usercontext\)/g, '\\(usercontext\\)')
-    .replace(/\(!usercontext\)/g, '\\(!usercontext\\)')
-    .replace(/\(section:/g, '\\(section:')
-    .replace(/\(!section\)/g, '\\(!section\\)');
-}
 
 // Original MESSAGE_FORMATTING_EXAMPLE
 const MESSAGE_FORMATTING_EXAMPLE = `{
   "tool": "postMessage",
   "reasoning": "Responding with formatted information",
   "parameters": {
-    "text": "(header)Your Header(!header)\\n\\nHere's some *bold text* and _italic text_ and \`inline code\`.\\n\\n> This is an important quote\\n\\n\\\`\\\`\\\`javascript\\nconst x = 1;\\nconsole.log(x);\\n\\\`\\\`\\\`\\n\\n(context)This additional information appears in smaller text(!context)\\n\\n(divider)\\n\\n(usercontext)U123456(!usercontext)",
+    "text": "#header: Welcome to Your Dashboard\\n\\n#section: Hello <@U123456>, here's some *bold text* and _italic text_ and \`inline code\`.\\n\\n> This is an important quote\\n\\n\\\`\\\`\\\`javascript\\nconst x = 1;\\nconsole.log(x);\\n\\\`\\\`\\\`\\n\\n#context: This additional information appears in smaller text\\n\\n#divider:\\n\\n#userContext: <@U123456> | Your profile information",
     "color": "blue"
   }
 }`;
-
-// Update the MESSAGE_FORMATTING_EXAMPLE to use escaped parentheses
-const ESCAPED_MESSAGE_EXAMPLE = escapeParenthesesForJson(MESSAGE_FORMATTING_EXAMPLE);
 
 // Create the original TOOL_USAGE_EXAMPLES constant
 const TOOL_USAGE_EXAMPLES = `Example 1: First send a message to the user:
@@ -218,7 +232,7 @@ const TOOL_USAGE_EXAMPLES = `Example 1: First send a message to the user:
   "tool": "postMessage",
   "reasoning": "Responding to the user's greeting",
   "parameters": {
-    "text": "(header)Hello there!(!header)\\n\\nI'm *happy* to help you today. What can I do for you? \\n\\n(header)Available Options(!header)\\n\\n* Ask a question\\n* Get information\\n* Request assistance\\n\\n(context)I can help with a variety of topics and questions(!context)",
+    "text": "#header: Hello there!\\n\\n#section: Hi <@U123456>, I'm *happy* to help you today. What can I do for you? \\n\\n#header: Available Options\\n\\n* Ask a question\\n* Get information\\n* Request assistance\\n\\n#context: I can help with a variety of topics and questions",
     "color": "blue"
   }
 }
@@ -237,9 +251,6 @@ Example 2: After the postMessage completes, send a finishRequest:
 }
 \`\`\``;
 
-// Create the escaped version for use in system message JSON
-const ESCAPED_TOOL_USAGE_EXAMPLES = escapeParenthesesForJson(TOOL_USAGE_EXAMPLES);
-
 const MESSAGE_FORMATTING_GUIDELINES = `You have two ways to format messages:
 
 1. BASIC FORMATTING:
@@ -247,14 +258,16 @@ Create simple messages using these parameters:
 - text: Your main message content with formatting options
 - color: Message accent color (blue, green, red, orange, purple or hex code)
 
-2. USING HYBRID FORMATTING:
-We use a hybrid approach combining standard Markdown and specialized BBCode-style tags:
+2. USING BLOCK BUILDER FORMATTING:
+We use a modern block builder approach combined with standard Markdown:
 
-${BBCODE_FORMATTING}
+${BLOCK_BUILDER_GUIDE}
 
 USER MENTIONS FORMATTING:
 - For direct user mentions in text: <@USERID> (e.g., "Hello <@U123456>")
-- For user context blocks: (usercontext)U123456(!usercontext) (no @ symbol)
+- For user context blocks: #userContext: <@U123456> | optional description
+- ⚠️ NOTE: In #header blocks, user mentions like <@USER_ID> will be automatically converted to plain text "@Username" format
+- For clickable user mentions, use #section, #context, and #userContext blocks where mrkdwn formatting is supported
 - NEVER use plain @UserID format as it won't be properly formatted in Slack
 
 HYPERLINK FORMATTING:
@@ -278,10 +291,12 @@ IMAGE DISPLAY OPTIONS (THREE METHODS):
    This shows just a clickable link but doesn't embed the image.
 
 USER CONTEXT BLOCK EXAMPLES:
-- When asked to use "user context formatting", use this format:
-  (usercontext)U123456(!usercontext)
+- When asked to use "user context formatting", use this block builder syntax:
+  #userContext: <@U123456>
 - For multiple users:
-  (usercontext)U123456,U789012(!usercontext)
+  #userContext: <@U123456> <@U789012>
+- With descriptive text:
+  #userContext: <@U123456> | completed the task
 - This creates a special block that highlights the user, different from a simple mention.
 
 EXAMPLE:
@@ -290,6 +305,26 @@ ${ESCAPED_MESSAGE_EXAMPLE}
 \`\`\`
 
 IMPORTANT: Do NOT attempt to specify Slack blocks directly. Use only the formatting methods above.`;
+
+/**
+ * User Context Block Format guidelines
+ */
+const USER_CONTEXT_BLOCK_FORMAT = `USER CONTEXT BLOCK FORMAT:
+When asked to use "user context formatting" or "user context blocks", use this block builder syntax:
+#userContext: <@USER_ID>
+
+You can also add descriptive text by using a pipe character:
+#userContext: <@USER_ID> | did something cool
+
+For multiple users: 
+#userContext: <@U123456> <@U234567> | collaborated on a task
+
+This format will display user profile pictures with names and optional descriptive text:
+- For single users: Shows user avatar with their name and description
+- For 2-3 users: Shows all avatars with their names and description 
+- For 4+ users: Shows first two avatars with "and X others" text
+
+Always format user IDs with <@USER_ID> syntax - this is the LLM's responsibility.`;
 
 /**
  * Sends the thread state to the LLM and gets the next action to take
@@ -517,19 +552,32 @@ You're in a ${ctx.isDirectMessage ? 'direct message' : 'thread'} in Slack.
 - Current Date/Time in Brazil: ${brazilTime}
 
 ⚠️ USER MENTION FORMAT: Always use <@USER_ID> format for user mentions (e.g., <@U123456>)
+   The LLM is fully responsible for proper user mention formatting.
    NEVER use @USER_ID or plain USER_ID or <@|USER_ID> formats, as they WON'T work in Slack.
+   Do not rely on backend formatting - YOU must format all user mentions correctly.
 
 ⚠️ USER CONTEXT BLOCK FORMAT:
-   When asked to use "user context formatting" or "user context blocks", use this special format:
-   (usercontext)${ctx.userId || 'USER_ID'}(!usercontext)
-   Example: (usercontext)${ctx.userId || 'U123456'}(!usercontext)
+   When asked to use "user context formatting" or "user context blocks", use this block builder syntax:
+   #userContext: <@${ctx.userId || 'USER_ID'}>
+   Example: #userContext: <@${ctx.userId || 'U123456'}>
    
    You can also add descriptive text by using a pipe character:
-   (usercontext)${ctx.userId || 'USER_ID'}|did something cool(!usercontext)
-   For multiple users: (usercontext)U123456,U234567|collaborated on a task(!usercontext)
+   #userContext: <@${ctx.userId || 'USER_ID'}> | did something cool
+   For multiple users: #userContext: <@U123456> <@U234567> | collaborated on a task
    
-   This format will display user profile pictures and optional descriptive text in a special context block.
-   It is DIFFERENT from a normal user mention (<@USER_ID>) within text.
+   This format will display user profile pictures with names and optional descriptive text:
+   - For single users: Shows user avatar with their name and description
+   - For 2-3 users: Shows all avatars with their names and description 
+   - For 4+ users: Shows first two avatars with "and X others" text
+   
+   Always format user IDs with <@USER_ID> syntax - this is the LLM's responsibility.
+
+   ⚠️ IMPORTANT LIMITATION: Never use user mentions in #header blocks as they are not supported by Slack.
+   Only use mentions in #section, #context, and #userContext blocks.
+
+   ⚠️ NOTE ABOUT HEADERS: User mentions in #header blocks will be displayed as plain text "@Username" 
+   (the actual user mention feature won't work). For clickable user mentions, 
+   use #section, #context, and #userContext blocks.
 
 Company Information:
 ${COMPANY_INFO}
@@ -968,6 +1016,26 @@ async function parseToolCallFromResponse(llmResponse) {
             return `"${propName}":"${escapedText}"`;
           });
           
+          // Leave text and content properties unchanged - no parentheses escaping needed
+          // with block builder syntax
+          
+          /* REMOVED PARENTHESES ESCAPING:
+          cleanedArgs = cleanedArgs.replace(/"(text|content)"\s*:\s*"(.*?)"/g, (match, propName, textValue) => {
+            // Replace unescaped parentheses in the text value with escaped ones
+            let escapedText = textValue
+              .replace(/\\\(/g, '{{ESCAPED_LEFT_PAREN}}') // Save already escaped parentheses
+              .replace(/\\\)/g, '{{ESCAPED_RIGHT_PAREN}}')
+              .replace(/\(/g, '\\(')  // Escape unescaped left parentheses
+              .replace(/\)/g, '\\)')  // Escape unescaped right parentheses
+              .replace(/{{ESCAPED_LEFT_PAREN}}/g, '\\(')  // Restore with proper escaping
+              .replace(/{{ESCAPED_RIGHT_PAREN}}/g, '\\)');
+            
+            return `"${propName}":"${escapedText}"`;
+          });
+          */
+          
+          // No special parentheses handling needed - block builder syntax doesn't use parentheses
+          
           // Add quotes to unquoted property names as the final step
           cleanedArgs = cleanedArgs.replace(/([a-zA-Z0-9_$]+):/g, '"$1":');
           
@@ -1214,8 +1282,11 @@ function getAvailableTools() {
       // Skip the reasoning parameter as it's now at the top level
       if (paramName === 'reasoning') return;
       
+      // Convert description to string and check if optional
+      const descStr = typeof description === 'string' ? description : String(description);
+      
       // If description doesn't contain "optional", add to required
-      if (!description.toLowerCase().includes('optional')) {
+      if (!descStr.toLowerCase().includes('optional')) {
         required.push(paramName);
       }
       
@@ -1232,7 +1303,7 @@ function getAvailableTools() {
           paramName === 'columns' ||
           paramName === 'timeline' ||
           paramName === 'accordion' ||
-          (description && description.toLowerCase().includes('array'))) {
+          (descStr.toLowerCase().includes('array'))) {
         paramType = 'array';
       }
       // Check if parameter is likely an object based on name or description
@@ -1241,7 +1312,7 @@ function getAvailableTools() {
                paramName === 'config' ||
                paramName === 'table' ||
                paramName === 'richHeader' ||
-               (description && description.toLowerCase().includes('object'))) {
+               (descStr.toLowerCase().includes('object'))) {
         paramType = 'object';
       }
       
@@ -1249,7 +1320,7 @@ function getAvailableTools() {
       if (paramType === 'array') {
         properties[paramName] = {
           type: 'array',
-          description: description,
+          description: descStr,
           items: {
             type: 'object'
           }
@@ -1257,12 +1328,12 @@ function getAvailableTools() {
       } else if (paramType === 'object') {
         properties[paramName] = {
           type: 'object',
-          description: description
+          description: descStr
         };
       } else {
         properties[paramName] = {
           type: 'string',
-          description: description
+          description: descStr
         };
       }
     });
@@ -1288,13 +1359,11 @@ module.exports = {
   processJsonStringParameters,
   formatToolResponse,
   getBrazilDateTime,
-  escapeParenthesesForJson,
   
   // Export constants for potential reuse in other modules
   constants: {
     COMMUNICATION_STYLE,
     CRITICAL_BEHAVIOR,
-    BBCODE_FORMATTING,
     TOOL_CALL_FORMAT,
     COMPANY_INFO,
     FORMAT_REQUIREMENTS,
@@ -1303,6 +1372,10 @@ module.exports = {
     ESCAPED_MESSAGE_EXAMPLE,
     TOOL_USAGE_EXAMPLES,
     ESCAPED_TOOL_USAGE_EXAMPLES,
-    PARAMETER_STRUCTURE_EXAMPLES
+    PARAMETER_STRUCTURE_EXAMPLES,
+    BLOCK_BUILDER_GUIDE,
+    BLOCK_BUILDER_SYNTAX,
+    MESSAGE_FORMATTING_GUIDELINES,
+    USER_CONTEXT_BLOCK_FORMAT
   }
 };

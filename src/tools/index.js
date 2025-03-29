@@ -10,20 +10,28 @@ const { updateMessage } = require('./updateMessage.js');
 const { updateButtonMessage } = require('./updateButtonMessage.js');
 const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
 const getUserAvatar = require('./getUserAvatar.js');
+const { addReaction, CUSTOM_EMOJIS } = require('./addReaction.js');
 
 // Tool registry with metadata
 const toolRegistry = {
   postMessage: {
     name: 'postMessage',
-    description: 'Posts a message to Slack with rich formatting options. Always use this tool for all user responses. Supports BBCode-style formatting tags and easy-to-use interactive elements.',
+    description: 'Posts a message to Slack with rich formatting options. Always use this tool for all user responses. Supports block builder syntax and easy-to-use interactive elements.',
     function: postMessage,
     parameters: {
-      text: 'Main message content with hybrid formatting. Use Markdown for basic formatting (*bold*, _italic_, `code`) and BBCode-style tags for specialized elements ([header]...[!header], [context]...[!context], etc.). See formatting.md for details.',
-      color: 'Color for the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
-      buttons: 'Array of button definitions - can be simple strings or objects with text, style ("primary"/"danger"), url, or value properties',
-      fields: 'Two-column layout items as array of {title, value} objects or simple strings',
-      images: 'Array of image URLs as strings or {url, alt_text} objects to include in the message',
-      blocks: 'For advanced usage: array of simplified block definitions for complex layouts'
+      type: 'object',
+      properties: {
+        text: {
+          type: 'string',
+          description: 'Main message content with block builder formatting. Use Markdown for basic formatting (*bold*, _italic_, `code`) and block builder syntax for specialized elements (#header: text, #section: text, #userContext: <@USER_ID>, etc.).',
+        },
+        color: 'Color for the message sidebar (required, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)',
+        buttons: 'Array of button definitions - can be simple strings or objects with text, style ("primary"/"danger"), url, or value properties',
+        fields: 'Two-column layout items as array of {title, value} objects or simple strings',
+        images: 'Array of image URLs as strings or {url, alt_text} objects to include in the message',
+        blocks: 'For advanced usage: array of simplified block definitions for complex layouts'
+      },
+      required: ['text']
     },
     isAsync: false,
     examples: [
@@ -33,15 +41,15 @@ const toolRegistry = {
       },
       {
         description: 'Message with structured information',
-        code: '{ text: "[header]Team Roster[!header]\\n\\n*John* - Developer\\n*Sarah* - Designer\\n*Miguel* - Project Manager", color: "good" }'
+        code: '{ text: "#header: Team Roster\\n\\n*John* - Developer\\n*Sarah* - Designer\\n*Miguel* - Project Manager", color: "good" }'
       },
       {
         description: 'Interactive message with buttons',
-        code: '{ text: "[header]Action Required[!header]\\n\\nPlease select an option:", actions: [{ text: "Approve", value: "approve", style: "primary" }, { text: "Reject", value: "reject", style: "danger" }], color: "#E01E5A" }'
+        code: '{ text: "#header: Action Required\\n\\nPlease select an option:", buttons: [{ text: "Approve", value: "approve", style: "primary" }, { text: "Reject", value: "reject", style: "danger" }], color: "#E01E5A" }'
       },
       {
         description: 'Status message with emphasis',
-        code: '{ text: "[header]Project Status[!header]\\n\\n*Current Status*\\nDevelopment is in progress\\n\\n*Planning Phase*\\nCompleted successfully", color: "#2EB67D" }'
+        code: '{ text: "#header: Project Status\\n\\n*Current Status*\\nDevelopment is in progress\\n\\n*Planning Phase*\\nCompleted successfully", color: "#2EB67D" }'
       }
     ]
   },
@@ -146,7 +154,7 @@ const toolRegistry = {
       },
       {
         description: 'Get user avatar and display it in a message (chain with postMessage)',
-        code: '// First call:\n{ userId: "U12345678", size: "original" }\n\n// Then use the returned avatar_url in postMessage:\n// postMessage({ text: "[header]Your Avatar[!header]\\n\\nHere\'s your avatar URL: <" + avatar_url + ">\\n\\n[header]Your Profile Image[!header]\\n\\n!image:" + avatar_url + ":Your profile picture", color: "good" })'
+        code: '// First call:\n{ userId: "U12345678", size: "original" }\n\n// Then use the returned avatar_url in postMessage:\n// postMessage({ text: "#header: Your Avatar\\n\\nHere\'s your avatar URL: <" + avatar_url + ">\\n\\n#header: Your Profile Image\\n\\n#image: " + avatar_url + " | altText:Your profile picture", color: "good" })'
       }
     ]
   },
@@ -159,6 +167,31 @@ const toolRegistry = {
       param2: 'Example parameter 2 (optional)'
     },
     isAsync: true // Mark as async example
+  },
+  addReaction: {
+    name: 'addReaction',
+    description: 'Adds an emoji reaction to a message. Use this to react to user messages with emojis including custom workspace emojis like "loading" and "kek-doge".',
+    function: addReaction,
+    parameters: {
+      emoji: 'Emoji name to react with (without colons). Can use standard emojis or custom workspace emojis like "kek-doge" or "loading".',
+      messageTs: 'Timestamp of the message to react to (optional, defaults to the latest user message)',
+      reasoning: 'Reason for adding this reaction'
+    },
+    isAsync: true,
+    examples: [
+      {
+        description: 'React to the current message with a thumbs up',
+        code: '{ emoji: "thumbsup", reasoning: "Acknowledging user\'s positive feedback" }'
+      },
+      {
+        description: 'React with a custom emoji',
+        code: '{ emoji: "kek-doge", reasoning: "Adding a fun reaction to user\'s joke" }'
+      },
+      {
+        description: 'React to a specific message',
+        code: '{ emoji: "heart", messageTs: "1234567890.123456", reasoning: "Showing appreciation for user\'s message" }'
+      }
+    ]
   }
 };
 
@@ -236,6 +269,8 @@ module.exports = {
   createEmojiVote,
   getVoteResults,
   getUserAvatar,
+  addReaction,
+  CUSTOM_EMOJIS,
   // Add the full registry for direct inspection
   toolRegistry
 }; 
