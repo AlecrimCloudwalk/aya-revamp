@@ -225,6 +225,9 @@ const MESSAGE_FORMATTING_EXAMPLE = `{
   }
 }`;
 
+// Create an escaped version of the message formatting example
+const ESCAPED_MESSAGE_EXAMPLE = MESSAGE_FORMATTING_EXAMPLE.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+
 // Create the original TOOL_USAGE_EXAMPLES constant
 const TOOL_USAGE_EXAMPLES = `Example 1: First send a message to the user:
 \`\`\`json
@@ -250,6 +253,9 @@ Example 2: After the postMessage completes, send a finishRequest:
   }
 }
 \`\`\``;
+
+// Create an escaped version of TOOL_USAGE_EXAMPLES
+const ESCAPED_TOOL_USAGE_EXAMPLES = TOOL_USAGE_EXAMPLES.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
 
 const MESSAGE_FORMATTING_GUIDELINES = `You have two ways to format messages:
 
@@ -550,6 +556,25 @@ You're in a ${ctx.isDirectMessage ? 'direct message' : 'thread'} in Slack.
 - Channel: ${ctx.channelId || 'unknown'}
 - ${ctx.threadTs ? `Thread: ${ctx.threadTs}` : ''}
 - Current Date/Time in Brazil: ${brazilTime}
+
+⚠️ CUSTOM EMOJI REACTIONS AVAILABLE:
+You can react to messages with emojis using the addReaction tool!
+- Standard emojis: 👍 ❤️ 😂 🎉 🤔 👀 etc.
+- Custom workspace emojis: 
+  - "loading" - Use while processing long requests
+  - "kek-doge" - Use for funny/humorous messages
+- Always react to user messages with at least one appropriate emoji
+- You can add multiple emoji reactions to show different sentiments
+- Example usage: 
+  \`\`\`json
+  {
+    "tool": "addReaction",
+    "reasoning": "Adding a thumbs up reaction to show agreement",
+    "parameters": {
+      "emoji": "thumbsup"
+    }
+  }
+  \`\`\`
 
 ⚠️ USER MENTION FORMAT: Always use <@USER_ID> format for user mentions (e.g., <@U123456>)
    The LLM is fully responsible for proper user mention formatting.
