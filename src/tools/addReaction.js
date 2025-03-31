@@ -2,34 +2,31 @@
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
 
-// Custom emoji constants with workspace emojis
-const CUSTOM_EMOJIS = {
-  // Basic emoji mapping for easy reference
-  thumbsup: 'thumbsup',
-  thumbsdown: 'thumbsdown',
-  heart: 'heart',
-  smile: 'smile',
-  thinking: 'thinking_face',
-  check: 'white_check_mark',
-  x: 'x',
+// All available emoji names
+const AVAILABLE_EMOJIS = [
+  // Standard emojis
+  'thumbsup', 'thumbsdown', 'heart', 'smile', 'x',
+  'thinking_face', 'white_check_mark',
   
-  // Custom workspace emojis
-  loading: 'loading', // Custom loading emoji
-  kekdoge: 'kek-doge', // Custom kek-doge emoji
-  
-  // Additional custom emojis can be added here
-  // Format: emojiAlias: 'emoji-name-in-slack'
-};
+  // Workspace custom emojis
+  'ae', 'alert', 'blob-wave', 'blender', 'brlc', 'cw-dark',
+  'catno', 'catyes', 'chefskiss', 'ddrup', 'eyesshaking', 
+  'kekw', 'kek-doge', 'loading',
+  'pepebigbrain', 'pepechrist', 'pepeglass', 'pepelaugh',
+  'pepelove', 'peperofl', 'pepe-sad-emo',
+  'peepocheer', 'peepoclap', 'peepohey', 'peeporun', 'peeposhy',
+  'prayge', 'thonking', 'this-is-fine-fire', 'wicked-thumbs-up'
+];
 
 /**
- * Adds an emoji reaction to a message
+ * Adds emoji reaction(s) to a message
  * 
  * @param {Object} args - Arguments for the reaction
- * @param {string} args.emoji - Emoji name to react with (without colons)
+ * @param {string|string[]} args.emoji - Emoji name(s) to react with (without colons). Can be a single string or an array of strings.
  * @param {string} args.messageTs - Timestamp of the message to react to (optional, defaults to the latest user message)
  * @param {string} args.reasoning - Reason for adding this reaction
  * @param {Object} threadState - Current thread state
- * @returns {Promise<Object>} - Result of adding the reaction
+ * @returns {Promise<Object>} - Result of adding the reaction(s)
  */
 async function addReaction(args, threadState) {
   try {
@@ -45,8 +42,17 @@ async function addReaction(args, threadState) {
       throw new Error('Channel ID not available in thread context');
     }
     
-    if (!emoji) {
-      throw new Error('Emoji name is required');
+    // Determine which emojis to use based on the type of emoji parameter
+    let emojiList = [];
+    
+    if (Array.isArray(emoji)) {
+      // If emoji is already an array, use it directly
+      emojiList = emoji;
+    } else if (emoji) {
+      // If emoji is a string, convert to single-item array
+      emojiList = [emoji];
+    } else {
+      throw new Error('Emoji parameter is required');
     }
     
     // Determine the message timestamp to react to
@@ -62,60 +68,83 @@ async function addReaction(args, threadState) {
       }
     }
     
-    // Clean the emoji name (remove colons if present)
-    let cleanEmojiName = emoji.replace(/:/g, '');
-    
-    // Check if this is a reference to a custom emoji
-    if (CUSTOM_EMOJIS[cleanEmojiName]) {
-      cleanEmojiName = CUSTOM_EMOJIS[cleanEmojiName];
-    }
-    
     // Get Slack client
     const slackClient = getSlackClient();
-    
-    // Add the reaction
-    const response = await slackClient.reactions.add({
-      channel: channelId,
-      timestamp: targetMessageTs,
-      name: cleanEmojiName
-    });
     
     // Track reactions added in thread state
     if (!threadState.reactions) {
       threadState.reactions = [];
     }
     
-    // Add this reaction to the tracking list
-    threadState.reactions.push({
-      emoji: cleanEmojiName,
-      messageTs: targetMessageTs,
-      timestamp: new Date().toISOString(),
-      reasoning
-    });
+    // Add each emoji as a reaction
+    const results = [];
+    
+    for (const emojiName of emojiList) {
+      try {
+        // Clean the emoji name (remove colons if present)
+        let cleanEmojiName = emojiName.replace(/:/g, '');
+        
+        // Handle a few common aliases
+        if (cleanEmojiName === 'thinking') cleanEmojiName = 'thinking_face';
+        if (cleanEmojiName === 'check') cleanEmojiName = 'white_check_mark';
+        if (cleanEmojiName === 'kekdoge') cleanEmojiName = 'kek-doge';
+        
+        // Add the reaction
+        const response = await slackClient.reactions.add({
+          channel: channelId,
+          timestamp: targetMessageTs,
+          name: cleanEmojiName
+        });
+        
+        // Add this reaction to the tracking list
+        threadState.reactions.push({
+          emoji: cleanEmojiName,
+          messageTs: targetMessageTs,
+          timestamp: new Date().toISOString(),
+          reasoning
+        });
+        
+        results.push({
+          emoji: cleanEmojiName,
+          ok: response.ok
+        });
+        
+        // Add a small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+      } catch (emojiError) {
+        // Handle the "already reacted" error gracefully
+        if (emojiError.message && emojiError.message.includes('already reacted')) {
+          results.push({
+            emoji: emojiName,
+            ok: false,
+            error: 'Already reacted with this emoji'
+          });
+        } else {
+          // For other errors, log but continue with other emojis
+          console.log(`Error adding reaction ${emojiName}: ${emojiError.message}`);
+          results.push({
+            emoji: emojiName,
+            ok: false,
+            error: emojiError.message
+          });
+        }
+      }
+    }
     
     return {
-      ok: response.ok,
-      emoji: cleanEmojiName,
+      ok: results.some(r => r.ok), // At least one reaction succeeded
+      results,
       messageTs: targetMessageTs,
       reasoning
     };
   } catch (error) {
-    // If the error is because the reaction already exists, return a friendly message
-    if (error.message && error.message.includes('already reacted')) {
-      return {
-        ok: false,
-        error: 'Already reacted with this emoji',
-        emoji: args.emoji,
-        messageTs: args.messageTs || threadState.getMetadata('context')?.timestamp || threadState.getMetadata('context')?.threadTs
-      };
-    }
-    
-    logError('Error adding reaction', error, { args });
+    logError('Error adding reactions', error, { args });
     throw error;
   }
 }
 
 module.exports = {
   addReaction,
-  CUSTOM_EMOJIS
+  availableEmojis: AVAILABLE_EMOJIS
 }; 

@@ -197,6 +197,9 @@ const blockGenerators = {
     // to a plain text format since Slack will reject mentions in header blocks
     let headerText = params.text;
     
+    // Remove or replace newlines since headers don't support them
+    headerText = headerText.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
+    
     // Check if there are user mentions that need to be processed
     if (headerText && headerText.includes('<@')) {
       // Extract all user IDs from mentions
@@ -1274,9 +1277,21 @@ async function parseMessage(message) {
   const blockRegex = /#([a-zA-Z]+):\s*([^#]+?)(?=#[a-zA-Z]+:|$)/g;
   const matches = Array.from(message.matchAll(blockRegex));
   
-  // If no blocks found, treat as plain text
+  // If no blocks found, treat as plain text but put in an attachment with colored bar
   if (matches.length === 0) {
-    return { blocks: [{ type: 'section', text: { type: 'mrkdwn', text: message } }] };
+    console.log('📦 No block syntax found, creating attachment with section for plain text');
+    return { 
+      attachments: [{
+        color: defaultAttachmentColor, // Use default color for consistent experience
+        blocks: [{ 
+          type: 'section', 
+          text: { 
+            type: 'mrkdwn', 
+            text: message 
+          } 
+        }]
+      }]
+    };
   }
   
   console.log(`🔢 Found ${matches.length} blocks to process`);
@@ -1344,6 +1359,19 @@ async function parseMessage(message) {
       if (!generated) {
         console.error(`❌ Block generator for ${blockTypeToUse} returned empty result`);
         continue;
+      }
+      
+      // Additional debugging for header blocks to check for newline issues
+      if (generated.type === 'header') {
+        console.log(`🔍 Header block text before sending: "${generated.text.text}"`);
+        // Ensure we don't have any literal \n characters in header text
+        if (generated.text && typeof generated.text.text === 'string') {
+          if (generated.text.text.includes('\\n') || generated.text.text.includes('\n')) {
+            console.log(`⚠️ Found newlines in header text, removing...`);
+            generated.text.text = generated.text.text.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
+            console.log(`✅ Cleaned header text: "${generated.text.text}"`);
+          }
+        }
       }
       
       // Handle array result (some generators return multiple blocks)

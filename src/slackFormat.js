@@ -14,6 +14,12 @@
  * @returns {Object} - Formatted message with blocks
  */
 function formatSlackMessage(options = {}) {
+  // Handle when passed a simple string instead of options object
+  if (typeof options === 'string') {
+    // Convert string to proper options object with text property
+    options = { text: options };
+  }
+  
   const blocks = [];
   
   // Extract options with defaults
@@ -225,24 +231,27 @@ function formatSlackMessage(options = {}) {
   let formattedAttachments = [...attachments];
   
   // Create a primary attachment with color if we have any content above
-  if (color && (text || fields.length > 0)) {
+  if (blocks.length > 0) {
     const primaryAttachment = {
       color,
-      fallback: text || 'Message from bot',
+      fallback: 'Message from bot',
+      blocks: blocks
     };
-    
-    // If we have blocks, attach them to this attachment
-    if (blocks.length > 0) {
-      primaryAttachment.blocks = blocks;
-    }
     
     // Add to beginning of attachments
     formattedAttachments.unshift(primaryAttachment);
-  } else if (formattedAttachments.length === 0) {
-    // If no color but we have blocks, create an attachment without color
+  } else if (formattedAttachments.length === 0 && text) {
+    // If no blocks but we have text, create an attachment with section
     formattedAttachments.push({
-      blocks: blocks,
-      fallback: text || 'Message from bot'
+      color,
+      fallback: 'Message from bot',
+      blocks: [{
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: text
+        }
+      }]
     });
   }
   
@@ -255,9 +264,9 @@ function formatSlackMessage(options = {}) {
   
   // Prepare response message structure
   const response = {
-    blocks: [], // Usually empty, blocks go into attachments
+    blocks: [], // Always empty, all blocks go into attachments
     attachments: formattedAttachments,
-    text: text || '' // Fallback for notifications/previews
+    text: " " // Always a single space to prevent duplicating content in notifications
   };
   
   console.log('SLACK FORMAT - Final message structure:');

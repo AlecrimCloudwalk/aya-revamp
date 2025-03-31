@@ -8,6 +8,7 @@
 const { formatSlackMessage } = require('../slackFormat.js');
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
+const { parseMessage, cleanForSlackApi, processUserMentions } = require('./blockBuilder');
 
 /**
  * Convert named colors to proper hex values
@@ -59,7 +60,7 @@ function normalizeColor(color) {
  * Creates a message with interactive buttons
  * 
  * @param {Object} args - Arguments for the button message
- * @param {string} args.text - Message content with [header] for title
+ * @param {string} args.text - Message content with optional block syntax
  * @param {string} args.color - Color of the message (optional)
  * @param {Array|string} args.buttons - Array of button objects or JSON string representing buttons
  * @param {string} args.callbackId - Unique identifier for this set of buttons
@@ -81,7 +82,6 @@ async function createButtonMessage(args, threadState) {
     const reasoning = args.reasoning;
     
     // Filter out non-standard fields that shouldn't be sent to Slack
-    // Note: reasoning is now expected at the top level, not in parameters
     const validFields = [
       'text', 'color', 'buttons', 'callbackId', 
       'actionPrefix', 'threadTs', 'channel'
@@ -250,22 +250,23 @@ async function createButtonMessage(args, threadState) {
     // Generate a unique prefix for action IDs if needed
     const actionPrefix = args.actionPrefix || callbackId;
     
-    // Create the message blocks
-    const blocks = [];
+    // Format the message using the BlockBuilder if text has block syntax
+    let formattedMessage;
     
-    // Add main text content
-    if (text) {
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: text
-        }
-      });
+    // Check if message has block syntax markers
+    const hasBlockSyntax = text.includes('#') || text.includes('(usercontext)');
+    
+    if (hasBlockSyntax) {
+      console.log('✅ Using BlockBuilder format for message');
+      formattedMessage = await parseMessage(text);
+    } else {
+      // Use standard message formatting
+      formattedMessage = formatSlackMessage(text);
+      console.log('✅ Using standard message format');
     }
     
-    // Add actions/buttons
-    blocks.push({
+    // Create the button actions block
+    const actionsBlock = {
       type: 'actions',
       block_id: `actions_${actionPrefix}`,
       elements: buttons.map((button, index) => ({
@@ -279,33 +280,111 @@ async function createButtonMessage(args, threadState) {
         action_id: `${actionPrefix}_action_${index}`,
         style: button.style || undefined // Default: no style (gray)
       }))
-    });
-    
-    // If we're in a thread, use the thread_ts
-    const messageParams = {
-      channel: channelId,
-      blocks: blocks,
-      text: "", // Empty text to prevent duplication
-      attachments: [{
-        color: formattedColor,
-        fallback: text || "Button message"
-      }]
     };
     
-    // Update with Slack's recommended approach (using Block Kit blocks in attachments)
-    messageParams.attachments = [{
-      color: formattedColor,
-      blocks: blocks,
-      fallback: text || "Button message"
-    }];
+    // Prepare the message parameters
+    const messageParams = {
+      channel: channelId,
+      text: " ", // Empty text to prevent duplication
+    };
     
-    // Clear the blocks at the top level to prevent duplication
-    messageParams.blocks = [];
+    // If we got blocks from blockBuilder, use them
+    if (formattedMessage.blocks && formattedMessage.blocks.length > 0) {
+      // If there are attachments, add the actions block to the last attachment's blocks
+      if (formattedMessage.attachments && formattedMessage.attachments.length > 0) {
+        const lastAttachment = formattedMessage.attachments[formattedMessage.attachments.length - 1];
+        if (!lastAttachment.blocks) {
+          lastAttachment.blocks = [];
+        }
+        lastAttachment.blocks.push(actionsBlock);
+      } else {
+        // No attachments, create one with the existing blocks and actions
+        messageParams.attachments = [{
+          color: formattedColor,
+          blocks: [...formattedMessage.blocks, actionsBlock]
+        }];
+        // Clear the blocks at the top level to prevent duplication
+        formattedMessage.blocks = [];
+      }
+    } else if (formattedMessage.attachments && formattedMessage.attachments.length > 0) {
+      // We got attachments from blockBuilder, add actions to the last one
+      const lastAttachment = formattedMessage.attachments[formattedMessage.attachments.length - 1];
+      if (!lastAttachment.blocks) {
+        lastAttachment.blocks = [];
+      }
+      lastAttachment.blocks.push(actionsBlock);
+    } else {
+      // No blocks or attachments, create a new attachment with a section and actions
+      messageParams.attachments = [{
+        color: formattedColor,
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: text
+            }
+          },
+          actionsBlock
+        ]
+      }];
+    }
     
     // Add thread_ts if needed
     if (threadTimestamp) {
       messageParams.thread_ts = threadTimestamp;
     }
+    
+    // Combine the formatted message with our parameters
+    if (formattedMessage.attachments) {
+      messageParams.attachments = formattedMessage.attachments;
+    }
+    
+    // Ensure all message blocks are clean without _metadata properties
+    if (messageParams.blocks) {
+      messageParams.blocks = cleanForSlackApi(messageParams.blocks);
+      
+      // Process text in blocks
+      messageParams.blocks.forEach(block => {
+        // Process emoji shortcodes and user mentions in text
+        if (block.text && typeof block.text.text === 'string') {
+          block.text.text = processUserMentions(block.text.text);
+        }
+        
+        // Clean newlines in header blocks
+        if (block.type === 'header' && block.text && block.text.text) {
+          block.text.text = block.text.text.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
+        }
+      });
+    }
+    
+    if (messageParams.attachments) {
+      messageParams.attachments = cleanForSlackApi(messageParams.attachments);
+      
+      // Validate each attachment has properly formed blocks
+      messageParams.attachments.forEach(attachment => {
+        if (attachment.blocks) {
+          attachment.blocks.forEach(block => {
+            // Process emoji shortcodes and user mentions in text
+            if (block.text && typeof block.text.text === 'string') {
+              block.text.text = processUserMentions(block.text.text);
+            }
+            
+            // Clean newlines in header blocks
+            if (block.type === 'header' && block.text && block.text.text) {
+              block.text.text = block.text.text.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
+            }
+          });
+        }
+      });
+    }
+    
+    // Log the final message structure
+    console.log('📋 FINAL MESSAGE STRUCTURE:');
+    console.log(`  - Channel: ${messageParams.channel}`);
+    console.log(`  - Thread: ${messageParams.thread_ts || 'New thread'}`);
+    console.log(`  - Direct blocks: ${messageParams.blocks ? messageParams.blocks.length : 0}`);
+    console.log(`  - Attachments: ${messageParams.attachments ? messageParams.attachments.length : 0}`);
     
     // Send the message
     const response = await slackClient.chat.postMessage(messageParams);

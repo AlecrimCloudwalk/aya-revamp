@@ -10,7 +10,7 @@ const { updateMessage } = require('./updateMessage.js');
 const { updateButtonMessage } = require('./updateButtonMessage.js');
 const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
 const getUserAvatar = require('./getUserAvatar.js');
-const { addReaction, CUSTOM_EMOJIS } = require('./addReaction.js');
+const { addReaction, availableEmojis } = require('./addReaction.js');
 
 // Tool registry with metadata
 const toolRegistry = {
@@ -170,10 +170,10 @@ const toolRegistry = {
   },
   addReaction: {
     name: 'addReaction',
-    description: 'Adds an emoji reaction to a message. Use this to react to user messages with emojis including custom workspace emojis like "loading" and "kek-doge".',
+    description: 'Adds emoji reaction(s) to a message. Use this to react to user messages with emojis including custom workspace emojis like "loading" and "kek-doge".',
     function: addReaction,
     parameters: {
-      emoji: 'Emoji name to react with (without colons). Can use standard emojis or custom workspace emojis like "kek-doge" or "loading".',
+      emoji: 'Emoji name(s) to react with (without colons). Can be a single string like "heart" or an array like ["heart", "kek-doge", "pepebigbrain"] for multiple reactions.',
       messageTs: 'Timestamp of the message to react to (optional, defaults to the latest user message)',
       reasoning: 'Reason for adding this reaction'
     },
@@ -184,8 +184,8 @@ const toolRegistry = {
         code: '{ emoji: "thumbsup", reasoning: "Acknowledging user\'s positive feedback" }'
       },
       {
-        description: 'React with a custom emoji',
-        code: '{ emoji: "kek-doge", reasoning: "Adding a fun reaction to user\'s joke" }'
+        description: 'React with multiple emojis',
+        code: '{ emoji: ["heart", "kek-doge", "pepebigbrain"], reasoning: "Showing multiple reactions to user\'s message" }'
       },
       {
         description: 'React to a specific message',
@@ -270,7 +270,7 @@ module.exports = {
   getVoteResults,
   getUserAvatar,
   addReaction,
-  CUSTOM_EMOJIS,
+  availableEmojis,
   // Add the full registry for direct inspection
   toolRegistry
 }; 

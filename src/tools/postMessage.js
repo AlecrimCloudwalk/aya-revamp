@@ -84,6 +84,11 @@ function processUserMentions(text) {
   text = text.replace(/<<@([UW][A-Z0-9]{6,})>>/g, '<@$1>');
   text = text.replace(/<@<@([UW][A-Z0-9]{6,})>>/g, '<@$1>');
   
+  // Ensure emoji codes are properly formatted without extra colons or spaces
+  text = text.replace(/:{2,}([a-z0-9_\-\+]+):{2,}/g, ':$1:'); // Fix double colons
+  text = text.replace(/:([\s]+)([a-z0-9_\-\+]+):/g, ':$2:'); // Fix spaces after colon
+  text = text.replace(/:([a-z0-9_\-\+]+)([\s]+):/g, ':$1:'); // Fix spaces before colon
+  
   // LLM will be responsible for properly formatting user mentions,
   // so we don't need to add <@> around user IDs - that should be done by the LLM
   
@@ -375,26 +380,29 @@ async function postMessage(args, threadState) {
       ...formattedMessage // Spread in the blocks and attachments
     };
     
-    // Add text fallback to prevent Slack API errors
-    // Slack requires either a text field or attachment fallbacks
-    if (!messageParams.text) {
-      // Check if the message contains userContext syntax
-      if (args.text && (args.text.includes('(usercontext)') || 
-          (args.text.includes('#userContext:') || args.text.includes('#usercontext:')))) {
-        // For userContext, just use a space to avoid duplicating the content visibly
-        messageParams.text = " ";
-      } else {
-        messageParams.text = stripMarkdownForNotification(args.text || '');
-      }
-    }
+    // ALWAYS use a single space to avoid duplicating content visibly outside of blocks/attachments
+    messageParams.text = " ";
+    
+    // Log the formatted message structure to understand what's happening
+    console.log('FORMATTED MESSAGE STRUCTURE BEFORE SENDING:');
+    console.log(JSON.stringify({
+      text: messageParams.text,
+      hasBlocks: messageParams.blocks && messageParams.blocks.length > 0,
+      blockCount: messageParams.blocks ? messageParams.blocks.length : 0,
+      hasAttachments: messageParams.attachments && messageParams.attachments.length > 0,
+      attachmentCount: messageParams.attachments ? messageParams.attachments.length : 0,
+      firstAttachment: messageParams.attachments && messageParams.attachments.length > 0 ? 
+        JSON.stringify(messageParams.attachments[0]) : 'None'
+    }, null, 2));
     
     // Ensure all message blocks are clean without _metadata properties
     // This step is critical to prevent Slack API from rejecting the message
     if (messageParams.blocks) {
       messageParams.blocks = cleanForSlackApi(messageParams.blocks);
       
-      // Validate each block has a type field
+      // Process text in blocks
       messageParams.blocks.forEach((block, index) => {
+        // Validate each block has a type field
         if (!block.type) {
           console.error(`⚠️ Block at index ${index} missing type field:`, JSON.stringify(block));
           // Set a default type to prevent API errors
@@ -402,6 +410,18 @@ async function postMessage(args, threadState) {
           if (!block.text) {
             block.text = { type: 'mrkdwn', text: 'Error: Invalid block' };
           }
+        }
+        
+        // Clean newlines in header blocks
+        if (block.type === 'header' && block.text && block.text.text) {
+          console.log(`🔍 Processing header block text: "${block.text.text}"`);
+          block.text.text = block.text.text.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
+          console.log(`✅ Header block text after processing: "${block.text.text}"`);
+        }
+        
+        // Process emoji shortcodes in text
+        if (block.text && typeof block.text.text === 'string') {
+          block.text.text = processUserMentions(block.text.text);
         }
       });
     }
@@ -420,6 +440,18 @@ async function postMessage(args, threadState) {
               if (!block.text) {
                 block.text = { type: 'mrkdwn', text: 'Error: Invalid block' };
               }
+            }
+            
+            // Clean newlines in header blocks
+            if (block.type === 'header' && block.text && block.text.text) {
+              console.log(`🔍 Processing attachment header block text: "${block.text.text}"`);
+              block.text.text = block.text.text.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
+              console.log(`✅ Attachment header block text after processing: "${block.text.text}"`);
+            }
+            
+            // Process emoji shortcodes in text
+            if (block.text && typeof block.text.text === 'string') {
+              block.text.text = processUserMentions(block.text.text);
             }
           });
         }
