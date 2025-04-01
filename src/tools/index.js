@@ -3,14 +3,14 @@
 // Import all tools
 const { postMessage } = require('./postMessage.js');
 const { finishRequest } = require('./finishRequest.js');
-const { exampleTool } = require('./exampleTool.js');
 const { getThreadHistory } = require('./getThreadHistory.js');
 const { createButtonMessage } = require('./createButtonMessage.js');
 const { updateMessage } = require('./updateMessage.js');
-const { updateButtonMessage } = require('./updateButtonMessage.js');
 const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
 const getUserAvatar = require('./getUserAvatar.js');
 const { addReaction, availableEmojis } = require('./addReaction.js');
+const processLLMFeedback = require('../toolUtils/processLLMFeedback.js');
+const { removeReaction } = require('./removeReaction.js');
 
 // Tool registry with metadata
 const toolRegistry = {
@@ -100,18 +100,6 @@ const toolRegistry = {
     },
     isAsync: false
   },
-  updateButtonMessage: {
-    name: 'updateButtonMessage',
-    description: 'Updates a button message to highlight the selected option and disable others',
-    function: updateButtonMessage,
-    parameters: {
-      messageTs: 'Timestamp of the button message to update',
-      selectedValue: 'Value of the selected button',
-      callbackId: 'Callback ID of the button set (optional)',
-      additionalText: 'Text to add indicating selection (optional)'
-    },
-    isAsync: false
-  },
   createEmojiVote: {
     name: 'createEmojiVote',
     description: 'Creates a message with emoji voting options',
@@ -158,16 +146,6 @@ const toolRegistry = {
       }
     ]
   },
-  exampleTool: {
-    name: 'exampleTool',
-    description: 'Example tool for demonstration purposes',
-    function: exampleTool,
-    parameters: {
-      param1: 'Example parameter 1',
-      param2: 'Example parameter 2 (optional)'
-    },
-    isAsync: true // Mark as async example
-  },
   addReaction: {
     name: 'addReaction',
     description: 'Adds emoji reaction(s) to a message. Use this to react to user messages with emojis including custom workspace emojis like "loading" and "kek-doge".',
@@ -192,6 +170,52 @@ const toolRegistry = {
         code: '{ emoji: "heart", messageTs: "1234567890.123456", reasoning: "Showing appreciation for user\'s message" }'
       }
     ]
+  },
+  processLLMFeedback: {
+    name: 'processLLMFeedback',
+    description: 'Retrieves button click feedback and user selections from thread state for context awareness. Call this at the beginning of your processing to get information about button interactions.',
+    function: processLLMFeedback,
+    parameters: {
+      type: 'object',
+      properties: {
+        checkForSelection: {
+          type: 'boolean',
+          description: 'Whether to specifically check for button selections (default: true)'
+        }
+      }
+    },
+    isAsync: false,
+    examples: [
+      {
+        description: 'Check for button selection feedback',
+        code: '{ checkForSelection: true }'
+      },
+      {
+        description: 'Process all available feedback',
+        code: '{}'
+      }
+    ]
+  },
+  removeReaction: {
+    name: 'removeReaction',
+    description: 'Removes an emoji reaction from a message',
+    function: removeReaction,
+    parameters: {
+      emoji: 'Emoji name(s) to remove (without colons). Can be a single string like "heart" or an array like ["heart", "kek-doge", "pepebigbrain"] for multiple reactions.',
+      messageTs: 'Timestamp of the message to remove reaction from (optional, defaults to the latest user message)',
+      reasoning: 'Reason for removing this reaction'
+    },
+    isAsync: true,
+    examples: [
+      {
+        description: 'Remove a reaction from the current message',
+        code: '{ emoji: "heart", reasoning: "Removing appreciation for user\'s message" }'
+      },
+      {
+        description: 'Remove multiple reactions from a specific message',
+        code: '{ emoji: ["heart", "kek-doge"], messageTs: "1234567890.123456", reasoning: "Removing multiple reactions from user\'s message" }'
+      }
+    ]
   }
 };
 
@@ -211,39 +235,27 @@ const getTool = (name) => {
   // Remove functions. prefix if present
   const cleanName = name.replace(/^functions\./, '');
   
-  if (!toolRegistry[cleanName]) {
-    // Enhanced error message with available tools for debugging
-    const availableTools = Object.keys(toolRegistry).join(', ');
-    console.error(`Tool "${cleanName}" not found in registry. Available tools: ${availableTools}`);
-    throw new Error(`Tool "${cleanName}" not found in registry`);
+  // Check if the tool exists in the registry
+  if (toolRegistry[cleanName]) {
+    return toolRegistry[cleanName].function;
   }
   
-  // Check if the function is actually defined
-  if (!toolRegistry[cleanName].function) {
-    console.error(`Tool "${cleanName}" exists in registry but has no function implementation`);
-    throw new Error(`Tool "${cleanName}" implementation is missing`);
-  }
-  
-  return toolRegistry[cleanName].function;
+  // If not found, return null
+  console.log(`⚠️ Tool not found: ${name}`);
+  return null;
 };
 
-// Check if a tool is asynchronous
+// Check if a tool is async
 const isAsyncTool = (name) => {
   // Remove functions. prefix if present
   const cleanName = name.replace(/^functions\./, '');
   
-  if (!toolRegistry[cleanName]) {
-    throw new Error(`Tool "${cleanName}" not found in registry`);
-  }
-  return toolRegistry[cleanName].isAsync || false;
+  // Check if the tool exists and is async
+  return toolRegistry[cleanName] ? toolRegistry[cleanName].isAsync : false;
 };
 
 // Register a new tool
 const registerTool = (name, description, func, parameters, isAsync = false) => {
-  if (toolRegistry[name]) {
-    throw new Error(`Tool "${name}" already exists in registry`);
-  }
-  
   toolRegistry[name] = {
     name,
     description,
@@ -253,24 +265,23 @@ const registerTool = (name, description, func, parameters, isAsync = false) => {
   };
 };
 
+// Export all tools and utility functions
 module.exports = {
   getToolsForLLM,
   getTool,
   isAsyncTool,
   registerTool,
-  // For backward compatibility
-  finishRequest,
+  availableEmojis,
+  // Individual tool exports
   postMessage,
+  finishRequest,
   getThreadHistory,
-  exampleTool,
   createButtonMessage,
   updateMessage,
-  updateButtonMessage,
   createEmojiVote,
   getVoteResults,
   getUserAvatar,
   addReaction,
-  availableEmojis,
-  // Add the full registry for direct inspection
-  toolRegistry
+  removeReaction,
+  processLLMFeedback
 }; 

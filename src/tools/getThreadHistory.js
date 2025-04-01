@@ -191,11 +191,19 @@ async function getBotUserId(slackClient) {
  * @returns {string} - Formatted attachment descriptions
  */
 function formatAttachments(attachments) {
+  if (!attachments || !Array.isArray(attachments) || attachments.length === 0) {
+    return '';
+  }
+  
   let result = '';
   
   for (const attachment of attachments) {
+    // Check if attachment contains blocks (this is common for messages with interactive elements)
+    if (attachment.blocks && attachment.blocks.length > 0) {
+      result += '\n' + formatBlocks(attachment.blocks);
+    }
     // Handle images
-    if (attachment.image_url) {
+    else if (attachment.image_url) {
       result += `\n[Image: ${attachment.image_url}]`;
     }
     // Handle files
@@ -212,13 +220,140 @@ function formatAttachments(attachments) {
     else if (attachment.text) {
       result += `\n${attachment.text}`;
     }
-    // Other attachments
+    // Other attachments - use fallback text if available
     else if (attachment.fallback) {
-      result += `\n${attachment.fallback}`;
+      // Skip generic "[no preview available]" fallback
+      if (attachment.fallback !== '[no preview available]') {
+        result += `\n${attachment.fallback}`;
+      }
+    }
+    // Add color information as context if available
+    if (attachment.color) {
+      // Convert hex color to descriptive name if possible
+      const colorName = getColorName(attachment.color);
+      if (colorName) {
+        result += ` (${colorName} theme)`;
+      }
     }
   }
   
   return result;
+}
+
+/**
+ * Recursively formats blocks into text
+ * @param {Array} blocks - Slack blocks to format
+ * @returns {string} - Formatted text from blocks
+ */
+function formatBlocks(blocks) {
+  if (!blocks || !Array.isArray(blocks)) {
+    return '';
+  }
+  
+  let result = '';
+  
+  for (const block of blocks) {
+    // Handle different block types
+    switch (block.type) {
+      case 'header':
+        if (block.text && block.text.text) {
+          result += `\n# ${block.text.text}`;
+        }
+        break;
+        
+      case 'section':
+        if (block.text && block.text.text) {
+          result += `\n${block.text.text}`;
+        }
+        // Handle fields in section
+        if (block.fields && block.fields.length > 0) {
+          block.fields.forEach(field => {
+            if (field.text) {
+              result += `\n${field.text}`;
+            }
+          });
+        }
+        break;
+        
+      case 'actions':
+        // Extract button information
+        if (block.elements && block.elements.length > 0) {
+          const buttons = block.elements
+            .filter(el => el.type === 'button')
+            .map(btn => {
+              const buttonText = btn.text?.text || 'Button';
+              const buttonValue = btn.value || '';
+              return `[${buttonText}${buttonValue ? ': ' + buttonValue : ''}]`;
+            })
+            .join(', ');
+          
+          if (buttons) {
+            result += `\nButtons: ${buttons}`;
+          }
+        }
+        break;
+        
+      case 'context':
+        if (block.elements && block.elements.length > 0) {
+          block.elements.forEach(element => {
+            if (element.text) {
+              result += `\n_${element.text}_`;
+            }
+          });
+        }
+        break;
+        
+      case 'divider':
+        result += '\n---';
+        break;
+        
+      case 'image':
+        result += `\n[Image${block.title ? ': ' + block.title.text : ''}${block.alt_text ? ' (' + block.alt_text + ')' : ''}]`;
+        break;
+        
+      case 'rich_text':
+        // Process rich text elements
+        if (block.elements) {
+          for (const element of block.elements) {
+            if (element.type === 'rich_text_section' && element.elements) {
+              for (const subElement of element.elements) {
+                if (subElement.type === 'text') {
+                  result += subElement.text;
+                }
+              }
+            }
+          }
+        }
+        break;
+    }
+  }
+  
+  return result;
+}
+
+/**
+ * Convert hex color to a descriptive name
+ * @param {string} color - Color in hex or Slack color name
+ * @returns {string|null} - Descriptive color name or null if not recognized
+ */
+function getColorName(color) {
+  if (!color) return null;
+  
+  // Remove # from hex and standardize
+  const formattedColor = color.startsWith('#') ? color.toLowerCase() : color;
+  
+  // Map of common Slack colors
+  const colorMap = {
+    'good': 'green',
+    'warning': 'yellow',
+    'danger': 'red',
+    '#36c5f0': 'blue',
+    '#2eb67d': 'green',
+    '#e01e5a': 'red',
+    '#ecb22e': 'yellow'
+  };
+  
+  return colorMap[formattedColor] || null;
 }
 
 module.exports = {

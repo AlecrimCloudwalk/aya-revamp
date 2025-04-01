@@ -8,7 +8,16 @@
 const { formatSlackMessage } = require('../slackFormat.js');
 const { logError } = require('../errors.js');
 const { getSlackClient } = require('../slackClient.js');
-const { parseMessage, cleanForSlackApi } = require('./blockBuilder');
+const { parseMessage, cleanForSlackApi } = require('../toolUtils/blockBuilder');
+const { 
+  normalizeColor, 
+  formatMessageText, 
+  cleanAndProcessMessage, 
+  getChannelId, 
+  getThreadTs, 
+  logMessageStructure,
+  processBlocks 
+} = require('../toolUtils/messageFormatUtils');
 
 /**
  * Conditionally log messages based on environment variables
@@ -23,76 +32,6 @@ function debugLog(message, data) {
       console.log(message);
     }
   }
-}
-
-/**
- * Convert named colors to proper hex values
- * @param {string} color - The color name or hex value
- * @returns {string} - A properly formatted color value
- */
-function normalizeColor(color) {
-  // Default to blue if no color specified
-  if (!color) return '#0078D7';
-  
-  // If it's already a hex code with #, return as is
-  if (color.startsWith('#')) return color;
-  
-  // If it's a hex code without #, add it
-  if (color.match(/^[0-9A-Fa-f]{6}$/)) {
-    return `#${color}`;
-  }
-  
-  // Map of named colors to hex values
-  const colorMap = {
-    // Slack's standard colors
-    'good': '#2EB67D',     // Green
-    'warning': '#ECB22E',  // Yellow
-    'danger': '#E01E5A',   // Red
-    
-    // Additional standard colors
-    'blue': '#0078D7',
-    'green': '#2EB67D',
-    'red': '#E01E5A',
-    'orange': '#F2952F', 
-    'purple': '#6B46C1',
-    'cyan': '#00BCD4',
-    'teal': '#008080',
-    'magenta': '#E91E63',
-    'yellow': '#FFEB3B',
-    'pink': '#FF69B4',
-    'brown': '#795548',
-    'black': '#000000',
-    'white': '#FFFFFF',
-    'gray': '#9E9E9E',
-    'grey': '#9E9E9E'
-  };
-  
-  // Return the mapped color or default to blue
-  return colorMap[color.toLowerCase()] || '#0078D7';
-}
-
-/**
- * Process text to handle user mentions in the format <@USER_ID>
- * @param {string} text - The text to process
- * @returns {string} - Text with proper Slack user mentions
- */
-function processUserMentions(text) {
-  if (!text) return text;
-  
-  // The only correction we'll make is fixing doubled mentions which can occur from 
-  // LLM confusion or message processing errors
-  text = text.replace(/<<@([UW][A-Z0-9]{6,})>>/g, '<@$1>');
-  text = text.replace(/<@<@([UW][A-Z0-9]{6,})>>/g, '<@$1>');
-  
-  // Ensure emoji codes are properly formatted without extra colons or spaces
-  text = text.replace(/:{2,}([a-z0-9_\-\+]+):{2,}/g, ':$1:'); // Fix double colons
-  text = text.replace(/:([\s]+)([a-z0-9_\-\+]+):/g, ':$2:'); // Fix spaces after colon
-  text = text.replace(/:([a-z0-9_\-\+]+)([\s]+):/g, ':$1:'); // Fix spaces before colon
-  
-  // LLM will be responsible for properly formatting user mentions,
-  // so we don't need to add <@> around user IDs - that should be done by the LLM
-  
-  return text;
 }
 
 /**
@@ -222,115 +161,32 @@ function safeSlackText(text) {
 }
 
 /**
- * Extract channel ID from ThreadState using various fallback approaches
- * @param {Object} threadState - The thread state object
- * @returns {string|null} - The channel ID or null if not found
+ * Get a user's profile picture URL from Slack API
+ * @param {string} userId - The Slack user ID 
+ * @returns {Promise<string>} - The profile picture URL
  */
-function extractChannelFromThreadState(threadState) {
-  if (!threadState) return null;
-  
-  // Try multiple methods to get the channel, in order of preference
-  if (typeof threadState.getChannel === 'function') {
-    try {
-      const channel = threadState.getChannel();
-      if (channel) return channel;
-    } catch (e) {
-      console.log('Error getting channel from threadState.getChannel()', e.message);
-    }
-  }
-  
-  // Direct properties
-  if (threadState.channel) return threadState.channel;
-  if (threadState.channelId) return threadState.channelId;
-  
-  // Check metadata
-  if (threadState.metadata && threadState.metadata.channelId) {
-    return threadState.metadata.channelId;
-  }
-  
-  // Extract from threadId (format: channelId:timestamp)
-  if (threadState.threadId && threadState.threadId.includes(':')) {
-    const parts = threadState.threadId.split(':');
-    if (parts.length > 0) return parts[0];
-  }
-  
-  // Check event data
-  if (threadState.event && threadState.event.channel) {
-    return threadState.event.channel;
-  }
-  
-  // Check conversation context (for DMs)
-  if (threadState._conversationContext && typeof threadState._conversationContext === 'string') {
-    const contextMatch = threadState._conversationContext.match(/Channel:([CD][0-9A-Z]+)/);
-    if (contextMatch && contextMatch[1]) return contextMatch[1];
-  }
-  
-  // Check in first message if available
-  if (threadState.messages && threadState.messages.length > 0) {
-    const firstMessage = threadState.messages[0];
-    if (firstMessage.channel) return firstMessage.channel;
+async function getUserProfilePicture(userId) {
+  try {
+    // Get Slack client
+    const slack = getSlackClient();
     
-    // Check for channel ID pattern in message text
-    if (firstMessage.text && typeof firstMessage.text === 'string') {
-      const channelMatch = firstMessage.text.match(/([CD][0-9A-Z]+)/);
-      if (channelMatch) return channelMatch[1];
+    // Call users.info API to get user profile
+    const result = await slack.users.info({ user: userId });
+    
+    if (result.ok && result.user && result.user.profile) {
+      // Get the image_48 field from profile or fall back to image_24
+      const imageUrl = result.user.profile.image_48 || result.user.profile.image_24;
+      return imageUrl;
+    } else {
+      // Return default URL format 
+      const workspaceId = getWorkspaceId();
+      return `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-48`;
     }
+  } catch (error) {
+    // Return default URL format
+    const workspaceId = getWorkspaceId();
+    return `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-48`;
   }
-  
-  // Check for direct channel pattern in threadId
-  if (threadState.threadId) {
-    const directChannelMatch = threadState.threadId.match(/([CD][0-9A-Z]+)/);
-    if (directChannelMatch) return directChannelMatch[1];
-  }
-  
-  return null;
-}
-
-/**
- * Extract thread timestamp from ThreadState using various fallback approaches
- * @param {Object} threadState - The thread state object
- * @returns {string|null} - The thread timestamp or null if not found
- */
-function extractThreadTsFromThreadState(threadState) {
-  if (!threadState) return null;
-  
-  // Try thread timestamp getter function
-  if (typeof threadState.getThreadTs === 'function') {
-    try {
-      const threadTs = threadState.getThreadTs();
-      if (threadTs) return threadTs;
-    } catch (e) {
-      console.log('Error getting thread_ts from threadState.getThreadTs()', e.message);
-    }
-  }
-  
-  // Direct threadTs property
-  if (threadState.threadTs) return threadState.threadTs;
-  
-  // Extract from threadId (format: channelId:timestamp)
-  if (threadState.threadId && threadState.threadId.includes(':')) {
-    const parts = threadState.threadId.split(':');
-    if (parts.length > 1) return parts[1];
-  }
-  
-  // Check metadata
-  if (threadState.metadata && threadState.metadata.threadTs) {
-    return threadState.metadata.threadTs;
-  }
-  
-  // Check direct message property
-  if (threadState.message && threadState.message.ts) {
-    return threadState.message.ts;
-  }
-  
-  // Check first message if available
-  if (threadState.messages && threadState.messages.length > 0) {
-    const firstMessage = threadState.messages[0];
-    if (firstMessage.threadTs) return firstMessage.threadTs;
-    if (firstMessage.ts) return firstMessage.ts;
-  }
-  
-  return null;
 }
 
 /**
@@ -350,24 +206,20 @@ async function postMessage(args, threadState) {
       args = args.parameters;
     }
     
-    // Format the message using the BlockBuilder if text has block syntax
+    // Format the message text using our shared utility
     let formattedMessage;
     
-    // Check if message has block syntax markers
-    const hasBlockSyntax = args.text && (args.text.includes('#') || args.text.includes('(usercontext)'));
-    
-    if (hasBlockSyntax) {
-      console.log('✅ Using BlockBuilder format for message');
-      formattedMessage = await parseMessage(args.text);
+    // Check if we have text to format
+    if (args.text) {
+      formattedMessage = await formatMessageText(args.text);
     } else {
-      // Use standard message formatting
-      formattedMessage = formatSlackMessage(args.text);
-      console.log('✅ Using standard message format');
+      formattedMessage = { blocks: [] };
     }
     
     // Get required context info
     const context = threadState.getMetadata('context');
-    const { channelId, threadTs } = context || {};
+    const channelId = getChannelId(args, threadState);
+    const threadTs = getThreadTs(args, threadState);
     
     if (!channelId) {
       throw new Error('Channel ID not found in thread context');
@@ -383,95 +235,19 @@ async function postMessage(args, threadState) {
     // ALWAYS use a single space to avoid duplicating content visibly outside of blocks/attachments
     messageParams.text = " ";
     
-    // Log the formatted message structure to understand what's happening
-    console.log('FORMATTED MESSAGE STRUCTURE BEFORE SENDING:');
-    console.log(JSON.stringify({
-      text: messageParams.text,
-      hasBlocks: messageParams.blocks && messageParams.blocks.length > 0,
-      blockCount: messageParams.blocks ? messageParams.blocks.length : 0,
-      hasAttachments: messageParams.attachments && messageParams.attachments.length > 0,
-      attachmentCount: messageParams.attachments ? messageParams.attachments.length : 0,
-      firstAttachment: messageParams.attachments && messageParams.attachments.length > 0 ? 
-        JSON.stringify(messageParams.attachments[0]) : 'None'
-    }, null, 2));
-    
-    // Ensure all message blocks are clean without _metadata properties
-    // This step is critical to prevent Slack API from rejecting the message
-    if (messageParams.blocks) {
-      messageParams.blocks = cleanForSlackApi(messageParams.blocks);
-      
-      // Process text in blocks
-      messageParams.blocks.forEach((block, index) => {
-        // Validate each block has a type field
-        if (!block.type) {
-          console.error(`⚠️ Block at index ${index} missing type field:`, JSON.stringify(block));
-          // Set a default type to prevent API errors
-          block.type = 'section';
-          if (!block.text) {
-            block.text = { type: 'mrkdwn', text: 'Error: Invalid block' };
-          }
-        }
-        
-        // Clean newlines in header blocks
-        if (block.type === 'header' && block.text && block.text.text) {
-          console.log(`🔍 Processing header block text: "${block.text.text}"`);
-          block.text.text = block.text.text.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
-          console.log(`✅ Header block text after processing: "${block.text.text}"`);
-        }
-        
-        // Process emoji shortcodes in text
-        if (block.text && typeof block.text.text === 'string') {
-          block.text.text = processUserMentions(block.text.text);
-        }
-      });
-    }
-    
-    if (messageParams.attachments) {
-      messageParams.attachments = cleanForSlackApi(messageParams.attachments);
-      
-      // Validate each attachment has properly formed blocks
-      messageParams.attachments.forEach((attachment, attachIndex) => {
-        if (attachment.blocks) {
-          attachment.blocks.forEach((block, blockIndex) => {
-            if (!block.type) {
-              console.error(`⚠️ Block at attachment ${attachIndex}, block ${blockIndex} missing type field:`, JSON.stringify(block));
-              // Set a default type to prevent API errors
-              block.type = 'section';
-              if (!block.text) {
-                block.text = { type: 'mrkdwn', text: 'Error: Invalid block' };
-              }
-            }
-            
-            // Clean newlines in header blocks
-            if (block.type === 'header' && block.text && block.text.text) {
-              console.log(`🔍 Processing attachment header block text: "${block.text.text}"`);
-              block.text.text = block.text.text.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
-              console.log(`✅ Attachment header block text after processing: "${block.text.text}"`);
-            }
-            
-            // Process emoji shortcodes in text
-            if (block.text && typeof block.text.text === 'string') {
-              block.text.text = processUserMentions(block.text.text);
-            }
-          });
-        }
-      });
-    }
+    // Clean and process the message using our shared utility
+    const cleanedMessage = cleanAndProcessMessage(messageParams);
     
     // Log the final message structure
-    console.log('📋 FINAL MESSAGE STRUCTURE:');
-    console.log(`  - Channel: ${messageParams.channel}`);
-    console.log(`  - Thread: ${messageParams.thread_ts || 'New thread'}`);
-    console.log(`  - Direct blocks: ${messageParams.blocks ? messageParams.blocks.length : 0}`);
-    console.log(`  - Attachments: ${messageParams.attachments ? messageParams.attachments.length : 0}`);
+    logMessageStructure(cleanedMessage);
     
     // Post the message
     const slack = getSlackClient();
     
     console.log('📋 POSTING MESSAGE WITH STRUCTURE:');
-    console.log(JSON.stringify(messageParams, null, 2));
+    console.log(JSON.stringify(cleanedMessage, null, 2));
     
-    const result = await slack.chat.postMessage(messageParams);
+    const result = await slack.chat.postMessage(cleanedMessage);
     
     // Debug log the full message result structure
     console.log('📄 FULL MESSAGE RESULT STRUCTURE FROM SLACK:');
@@ -524,39 +300,10 @@ async function postMessage(args, threadState) {
   }
 }
 
-/**
- * Get a user's profile picture URL from Slack API
- * @param {string} userId - The Slack user ID 
- * @returns {Promise<string>} - The profile picture URL
- */
-async function getUserProfilePicture(userId) {
-  try {
-    // Get Slack client
-    const slack = getSlackClient();
-    
-    // Call users.info API to get user profile
-    const result = await slack.users.info({ user: userId });
-    
-    if (result.ok && result.user && result.user.profile) {
-      // Get the image_48 field from profile or fall back to image_24
-      const imageUrl = result.user.profile.image_48 || result.user.profile.image_24;
-      return imageUrl;
-    } else {
-      // Return default URL format 
-      const workspaceId = getWorkspaceId();
-      return `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-48`;
-    }
-  } catch (error) {
-    // Return default URL format
-    const workspaceId = getWorkspaceId();
-    return `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-48`;
-  }
-}
-
 // Export the postMessage function
 module.exports = {
   postMessage,
   getUserProfilePicture,
-  processUserMentions,
-  normalizeColor
+  stripMarkdownForNotification,
+  extractUserIds
 };

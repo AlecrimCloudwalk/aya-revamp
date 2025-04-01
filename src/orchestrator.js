@@ -5,6 +5,7 @@ const { getTool } = tools;
 const { logError } = require('./errors.js');
 const { getSlackClient } = require('./slackClient.js');
 const { getThreadState } = require('./threadState.js');
+const { updateButtonMessage } = require('./buttonUpdater');
 
 /**
  * Handles an incoming message from Slack
@@ -205,6 +206,9 @@ async function processThread(threadState) {
         console.log(`Channel: ${context.channelId}`);
         console.log(`Thread TS: ${context.threadTs}`);
         console.log(`User's message: "${context.text}"`);
+        if (context.isButtonClick) {
+            console.log(`Button click: ${context.buttonText} (value: ${context.actionValue})`);
+        }
     } else {
         console.log("⚠️ WARNING: No context found in thread state metadata!");
     }
@@ -237,6 +241,35 @@ async function processThread(threadState) {
     } catch (historyError) {
         console.log(`Failed to get thread history: ${historyError.message}`);
         // Continue even if history fetch fails
+    }
+    
+    // NEW: Check for LLM feedback like button clicks
+    try {
+        // Check if we have any stored feedback or recent button selections
+        if (threadState.llmFeedback && threadState.llmFeedback.length > 0) {
+            console.log(`Found ${threadState.llmFeedback.length} LLM feedback items, processing...`);
+            
+            // Get the feedback processing tool
+            const feedbackTool = getTool('processLLMFeedback');
+            if (feedbackTool) {
+                const feedbackResult = await feedbackTool({
+                    checkForSelection: true,
+                    reasoning: "Processing user feedback and button selections"
+                }, threadState);
+                
+                console.log(`Processed ${feedbackResult.feedbackCount || 0} feedback items, including ${feedbackResult.buttonSelections || 0} button selections`);
+                
+                // Record the tool execution for the LLM
+                threadState.recordToolExecution('processLLMFeedback', 
+                    { checkForSelection: true }, 
+                    feedbackResult);
+            }
+        } else {
+            console.log('No stored LLM feedback found to process');
+        }
+    } catch (feedbackError) {
+        console.log(`Failed to process LLM feedback: ${feedbackError.message}`);
+        // Continue even if feedback processing fails
     }
 
     // Initialize thread history tracking if it doesn't exist
@@ -471,6 +504,26 @@ async function processThread(threadState) {
                     console.log(`Failed to auto-complete request: ${autoCompleteError.message}`);
                 }
             }
+            
+            // Special handling for button selections that were already acknowledged
+            // Break the loop after first action if the button was visually acknowledged
+            if (messagePosted && threadState.buttonSelectionAlreadyAcknowledged) {
+                console.log("Button selection was already visually acknowledged - stopping iterations after first message");
+                requestCompleted = true;
+                
+                try {
+                    // Call finishRequest explicitly
+                    const finishTool = getTool('finishRequest');
+                    if (finishTool) {
+                        await finishTool({
+                            summary: "Request finished with finishRequest tool after button selection",
+                            reasoning: "Button selection was already visually acknowledged, completing after first response"
+                        }, threadState);
+                    }
+                } catch (error) {
+                    console.log(`Error completing button selection flow: ${error.message}`);
+                }
+            }
 
         } catch (error) {
             console.log(`Error in process loop: ${error.message}`);
@@ -596,63 +649,26 @@ async function processButtonInteraction(payload) {
     // UPDATED: Get thread state directly using the imported function
     const threadState = getThreadState(threadId);
     
-    // UPDATED: Check if we can find button metadata in the thread state
-    let buttonMetadata = {};
+    // Instead of calling the LLM tool, use our direct button updater
+    // This handles all the UI feedback (loading indicator, etc.) internally
+    const updateResult = await updateButtonMessage(payload, threadState);
+    console.log(`Button update result:`, updateResult);
     
-    if (threadState.buttonMetadataMap && threadState.buttonMetadataMap[actionId]) {
-      buttonMetadata = threadState.buttonMetadataMap[actionId];
-      console.log(`Found button metadata for exact match on ${actionId}`);
-    } else {
-      // Try to find a partial match
-      for (const key in threadState.buttonMetadataMap || {}) {
-        if (key.includes(actionId) || actionId.includes(key)) {
-          buttonMetadata = threadState.buttonMetadataMap[key];
-          console.log(`Found button metadata for partial match ${key} <-> ${actionId}`);
-          break;
-        }
-      }
-    }
-    
-    // Add a loading reaction immediately to provide visual feedback
-    try {
-      const slackClient = getSlackClient();
-      // Add a temporary loading message to indicate processing
-      await slackClient.reactions.add({
-        channel: channelId,
-        timestamp: messageTs,
-        name: 'loading' // Loading indicator emoji
-      });
-    } catch (reactionError) {
-      // Non-critical error, just log it
-      console.log(`⚠️ Could not add loading reaction: ${reactionError.message}`);
-    }
-    
-    // Build context object with all the information
-    const context = {
-      userId,
-      channelId,
-      threadTs,
-      messageTs,
-      actionId,
-      actionValue,
-      buttonText,
-      isButtonClick: true
+    // Store update result for reference
+    threadState.lastButtonUpdate = {
+      timestamp: new Date().toISOString(),
+      messageTs: messageTs,
+      success: updateResult.updated,
+      error: updateResult.error
     };
-    
-    // Add the button metadata if found
-    if (buttonMetadata) {
-      Object.assign(context, buttonMetadata);
-    }
-    
-    // Store the context in thread state
-    threadState.setMetadata('context', context);
     
     // Create a simulation of a user message with the button click info
     const buttonClickMessage = {
       user: userId,
-      text: buttonText, // Use only the button text, not "Clicked: buttonText"
+      text: `[Button Selection: ${buttonText}]`, // Make it clearer this is a button click
       isUser: true,
       isButtonClick: true, // Mark as button click
+      buttonValue: actionValue, // Store the actual value
       timestamp: Date.now(),
       threadTs
     };
@@ -660,7 +676,7 @@ async function processButtonInteraction(payload) {
     // Add the button click to the thread history
     if (typeof threadState.addMessage === 'function') {
       threadState.addMessage(buttonClickMessage);
-      console.log(`Added user's message to thread history using addMessage()`);
+      console.log(`Added button selection to thread history using addMessage()`);
     } else {
       // Initialize the messages array if it doesn't exist
       if (!Array.isArray(threadState.messages)) {
@@ -669,13 +685,29 @@ async function processButtonInteraction(payload) {
       
       // Add the message directly to the messages array instead
       threadState.messages.push(buttonClickMessage);
-      console.log(`Added user's message to thread history by pushing to messages array`);
+      console.log(`Added button selection to thread history by pushing to messages array`);
     }
     
-    // Process the button click
+    // Add a system note to guide the LLM about button selection
+    if (Array.isArray(threadState.messages)) {
+      threadState.messages.push({
+        text: `The user selected the "${buttonText}" button (value: "${actionValue}"). The original message has already been updated to show this selection. DO NOT post another confirmation message about this selection - the UI already shows "✅ Opção selecionada: ${buttonText}" on the original button message. Instead, respond with the next logical step related to the selection.`,
+        isUser: false,
+        isSystemNote: true,
+        timestamp: new Date().toISOString(),
+        threadTs: threadTs,
+        fromTool: true,
+        toolName: "system_note",
+        threadPosition: threadState.messages.length + 1
+      });
+      console.log(`Added system message explaining button selection requirements`);
+    }
+    
+    // Process the button click - this will trigger a new LLM interaction
     await processThread(threadState);
   } catch (error) {
     console.error(`Error handling button interaction:`, error);
+    
     // Attempt to send error message if possible
     try {
       const slackClient = getSlackClient();

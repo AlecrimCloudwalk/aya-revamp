@@ -2,52 +2,15 @@
 const { formatSlackMessage } = require('../slackFormat.js');
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
-
-/**
- * Convert named colors to proper hex values
- * @param {string} color - The color name or hex value
- * @returns {string} - A properly formatted color value
- */
-function normalizeColor(color) {
-  // Default to blue if no color specified
-  if (!color) return '#0078D7';
-  
-  // If it's already a hex code with #, return as is
-  if (color.startsWith('#')) return color;
-  
-  // If it's a hex code without #, add it
-  if (color.match(/^[0-9A-Fa-f]{6}$/)) {
-    return `#${color}`;
-  }
-  
-  // Map of named colors to hex values
-  const colorMap = {
-    // Slack's standard colors
-    'good': '#2EB67D',     // Green
-    'warning': '#ECB22E',  // Yellow
-    'danger': '#E01E5A',   // Red
-    
-    // Additional standard colors
-    'blue': '#0078D7',
-    'green': '#2EB67D',
-    'red': '#E01E5A',
-    'orange': '#F2952F', 
-    'purple': '#6B46C1',
-    'cyan': '#00BCD4',
-    'teal': '#008080',
-    'magenta': '#E91E63',
-    'yellow': '#FFEB3B',
-    'pink': '#FF69B4',
-    'brown': '#795548',
-    'black': '#000000',
-    'white': '#FFFFFF',
-    'gray': '#9E9E9E',
-    'grey': '#9E9E9E'
-  };
-  
-  // Return the mapped color or default to blue
-  return colorMap[color.toLowerCase()] || '#0078D7';
-}
+const { parseMessage } = require('../toolUtils/blockBuilder');
+const { 
+  normalizeColor, 
+  formatMessageText, 
+  cleanAndProcessMessage, 
+  getChannelId,
+  getThreadTs, 
+  logMessageStructure
+} = require('../toolUtils/messageFormatUtils');
 
 /**
  * Updates an existing message in Slack
@@ -117,19 +80,8 @@ async function updateMessage(args, threadState) {
       throw new Error('Either text or fields must be provided');
     }
     
-    // Get context from metadata
-    const context = threadState.getMetadata('context');
-    
-    // CRITICAL FIX: Ignore any hardcoded channel that doesn't match current context
-    let channelId;
-    if (args.channel && context?.channelId && args.channel !== context.channelId) {
-      // Channel mismatch - log warning and use context channel instead
-      console.log(`⚠️ WARNING: Ignoring mismatched channel ID "${args.channel}" - using context channel "${context.channelId}" instead`);
-      channelId = context.channelId;
-    } else {
-      // Use channel from args, or fall back to context
-      channelId = args.channel || context?.channelId;
-    }
+    // Get valid channel ID
+    const channelId = getChannelId(args, threadState);
     
     if (!channelId) {
       throw new Error('Channel ID not available in thread context');
@@ -214,6 +166,14 @@ async function updateMessage(args, threadState) {
       };
     }
     
+    // Format the message text using our shared utility
+    let formattedMessage;
+    if (text) {
+      formattedMessage = await formatMessageText(text);
+    } else {
+      formattedMessage = { blocks: [] };
+    }
+    
     // Determine if and how to update actions/buttons
     let formattedActions = actions;
     let contextText = null;
@@ -225,20 +185,6 @@ async function updateMessage(args, threadState) {
       // If selectedButtonText is provided, remove buttons and add this text as context
       formattedActions = [];
       contextText = selectedButtonText;
-    }
-    
-    // Start building our message blocks
-    const blocks = [];
-    
-    // Add main text content if provided
-    if (text) {
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: text
-        }
-      });
     }
     
     // Add fields section if provided
@@ -266,7 +212,7 @@ async function updateMessage(args, threadState) {
         };
       });
       
-      blocks.push({
+      formattedMessage.blocks.push({
         type: 'section',
         fields: formattedFields
       });
@@ -274,7 +220,7 @@ async function updateMessage(args, threadState) {
     
     // Add context text if provided (for selected button text)
     if (contextText) {
-      blocks.push({
+      formattedMessage.blocks.push({
         type: 'context',
         elements: [
           {
@@ -287,7 +233,7 @@ async function updateMessage(args, threadState) {
     
     // Add actions/buttons if provided
     if (formattedActions && Array.isArray(formattedActions) && formattedActions.length > 0) {
-      blocks.push({
+      formattedMessage.blocks.push({
         type: 'actions',
         elements: formattedActions.map((button, index) => ({
           type: 'button',
@@ -307,16 +253,29 @@ async function updateMessage(args, threadState) {
     const updateOptions = {
       channel: channelId,
       ts: messageTs,
-      text: "", // Empty text to prevent duplication
-      attachments: [{
-        color: formattedColor,
-        blocks: blocks,
-        fallback: text || "Updated message"
-      }]
+      text: " ", // Empty text to prevent duplication
     };
     
+    // If we have attachments from parseMessage, use them
+    if (formattedMessage.attachments && formattedMessage.attachments.length > 0) {
+      updateOptions.attachments = formattedMessage.attachments;
+    } else {
+      // Otherwise, create a new attachment with our blocks
+      updateOptions.attachments = [{
+        color: formattedColor,
+        blocks: formattedMessage.blocks,
+        fallback: text || "Updated message"
+      }];
+    }
+    
+    // Clean and process all blocks and attachments for Slack API
+    const cleanedMessage = cleanAndProcessMessage(updateOptions);
+    
+    // Log the final message structure
+    logMessageStructure(cleanedMessage, 'UPDATE');
+    
     // Update the message
-    const response = await slackClient.chat.update(updateOptions);
+    const response = await slackClient.chat.update(cleanedMessage);
     
     // Store that we've updated this message to prevent duplicate updates
     if (!threadState.updatedMessages) {
@@ -397,6 +356,5 @@ async function finalizeMessageUpdate(args, threadState) {
 
 module.exports = {
   updateMessage,
-  finalizeMessageUpdate,
-  normalizeColor
+  finalizeMessageUpdate
 }; 

@@ -32,7 +32,11 @@ const CRITICAL_BEHAVIOR = `1. YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WIT
 10. ALL your responses to users MUST go through the postMessage tool
 11. SEND ONLY ONE TOOL CALL AT A TIME - Do not include multiple tool calls in one response
 12. WHEN HANDLING ERRORS: Never use hardcoded responses. Always decide what to tell the user based on the error context.
-13. USE EMOJIS FREQUENTLY - Both in text responses and as emoji reactions using addReaction`;
+13. USE EMOJIS FREQUENTLY - Both in text responses and as emoji reactions using addReaction
+14. BUTTON CREATION (CRITICAL): You MUST use the tool 'postMessage' (NOT 'createButtonMessage') with #buttons:[Label|value|style, ...] syntax INSIDE the text parameter. Example: "#header: Title\\n\\n#section: Text\\n\\n#buttons:[Option 1|value1, Option 2|value2]"
+15. AVOID DUPLICATE MESSAGES: If your message failed to create buttons, don't send a nearly identical message - instead, make the content substantially different.
+16. USE CORRECT TOOL FOR BUTTONS: Always use postMessage with #buttons syntax, NOT the separate createButtonMessage tool.
+17. BUTTON SELECTIONS (CRITICAL): When a user clicks a button, the message is AUTOMATICALLY updated to show their selection. DO NOT try to update it again with updateMessage or updateButtonMessage. Instead, send a NEW message acknowledging their choice and providing next steps.`;
 
 const BBCODE_FORMATTING = `### Markdown (for basic formatting):
 - *bold* for bold text
@@ -67,7 +71,7 @@ const BBCODE_FORMATTING = `### Markdown (for basic formatting):
    This displays a full-width image in Slack.
 
 2. **Section with Image** - Use:
-   * (section:https://example.com/image.jpg:Alt text)Content with image on the right(!section)
+   * (section:https://example.com/image.jpg:Alt text)Content with image accessory(!section)
    This shows text content with a small image thumbnail on the right.
 
 3. **Image Hyperlink** - Use:
@@ -96,6 +100,46 @@ Use the block builder syntax for all formatting:
 #contextWithImages: Text | images:[https://example.com/image1.jpg|Alt text 1, https://example.com/image2.jpg|Alt text 2]
 #buttons: [Button 1|value1|primary, Button 2|value2|danger, Button 3|value3]
 #fields: [*Title*|Value]
+
+### Button Formatting (IMPORTANT):
+When creating interactive buttons, ALWAYS define explicit button labels using one of these formats:
+
+1. BlockBuilder format (preferred):
+\`\`\`
+#header: Choose an Option
+#section: Select the option you prefer
+#buttons: [First Option|option1|primary, Second Option|option2, Third Option|option3]
+\`\`\`
+
+2. Direct parameter format:
+\`\`\`
+{
+  "tool": "createButtonMessage",
+  "reasoning": "Creating interactive buttons",
+  "parameters": {
+    "text": "Choose an option",
+    "buttons": ["First Option", "Second Option", "Third Option"]
+  }
+}
+\`\`\`
+
+3. Structured button objects:
+\`\`\`
+{
+  "tool": "createButtonMessage",
+  "reasoning": "Creating interactive buttons",
+  "parameters": {
+    "text": "Choose an option",
+    "buttons": [
+      { "text": "First Option", "value": "option1", "style": "primary" },
+      { "text": "Second Option", "value": "option2" },
+      { "text": "Third Option", "value": "option3" }
+    ]
+  }
+}
+\`\`\`
+
+NEVER rely on default button labels ("Option 1", "Option 2"). Always explicitly define them.
 
 ### Hyperlinks:
 - For hyperlinks, use Slack's format: <URL|text label> 
@@ -175,43 +219,59 @@ This is the preferred way to format messages:
 #blockType: content | param1:value1 | param2:value2
 
 SUPPORTED BLOCK TYPES:
-- #header: Title text (⚠️ NOTE: Slack headers don't support rich text. Any <@USER_ID> will be converted to '@Username')
-- #section: Standard text content
-- #context: Small helper text
-- #divider: (no parameters needed)
-- #image: https://example.com/image.jpg | altText:Image description
-- #contextWithImages: Text content | images:[https://example.com/image1.jpg|Alt text 1, https://example.com/image2.jpg|Alt text 2]
-- #userContext: <@U123456> <@U789012> | Optional description text
-- #buttons: [Button 1|value1|primary, Button 2|value2|danger, Button 3|value3]
-- #fields: [*Field 1 Title*|Field 1 Value, *Field 2 Title*|Field 2 Value]
+- #header: Large title text
+- #section: Standard message content with markdown
+- #context: Smaller helper text
+- #divider: Horizontal separator line
+- #image: URL | altText:Image description
+- #contextWithImages: Text | images:[URL1|alt1, URL2|alt2]
+- #buttons: Define interactive action buttons or link buttons. See format below.
+- #fields: [*Title 1*|Value 1, *Title 2*|Value 2]
 
-EXAMPLES:
-1. Header with section:
-#header: Welcome to our Service!
-#section: Here's some important information about your account.
+BUTTONS SYNTAX (#buttons):
+The format is #buttons:[Label|ValueOrURL|Style, ...] where:
 
-2. Context with images:
-#contextWithImages: Here are some example images | images:[https://example.com/image1.jpg|First Image, https://example.com/image2.jpg|Second Image]
+1.  **Action Buttons:** Trigger bot actions.
+    -   Format: \`Label|action_value|style\` (style is optional)
+    -   Styles: primary (green), danger (red), default (grey)
+    -   *Example:* \`#buttons:[Approve|approve_task|primary, Reject|reject_task|danger, More Info|info_needed]\`
 
-3. User context (profiles):
-#userContext: <@U123456> <@U789012> | Collaborated on this project
-// This shows user profile pictures with names and the description
+2.  **Link Buttons:** Open a URL in the user's browser.
+    -   Format: \`Label|https://example.com\`
+    -   *Example:* \`#buttons:[Visit Google|https://google.com, Open Docs|https://docs.example.com]\`
 
-4. Buttons:
-#buttons: [Approve|approve_action|primary, Reject|reject_action|danger, More Info|info_action]
+-   You can mix action and link buttons in the same #buttons definition.
+-   *Example:* \`#buttons:[Confirm Order|confirm_order|primary, View Details|https://orders.example.com/123]\`
+
+⚠️ IMPORTANT: When creating action buttons, ALWAYS specify custom button labels and meaningful action values. Never rely on default "Option 1" labels.
+
+EXAMPLE OF COMPLETE MESSAGE WITH BUTTONS:
+\`\`\`
+{
+  "tool": "postMessage",
+  "reasoning": "Creating a message with buttons",
+  "parameters": {
+    "text": "#header: Choose an Option\\n\\n#section: Please select from the following options:\\n\\n#buttons:[Pizza|food_pizza|primary, Salad|food_salad, Sandwich|lunch_sandwich]"
+  }
+}
+\`\`\`
+
+EXAMPLES OF BASIC BLOCKS:
+1. Header and Section:
+#header: Project Status Report
+#section: The project is *on track* and progressing well.
+
+2. Context (smaller text):
+#context: Last updated: 2 hours ago
+
+3. Image:
+#image: https://example.com/image.jpg | altText:Project timeline visualization
+
+4. Buttons (Action and Link):
+#buttons: [Approve|approve_action|primary, Reject|reject_action|danger, Documentation|https://docs.example.com]
 
 5. Fields:
-#fields: [*Status*|Active, *Priority*|High, *Due Date*|Tomorrow]
-
-COMPLEX EXAMPLE:
-#header: Monthly Report
-#section: Here's your account summary for this month.
-#contextWithImages: Account Activity | images:[https://example.com/chart.jpg|Activity Chart]
-#divider:
-#fields: [*Balance*|$1,250, *Transactions*|43, *Status*|Good Standing]
-#section: Would you like to take any actions?
-#buttons: [View Details|view_details|primary, Download PDF|download_pdf, Contact Support|contact_support]`;
-
+#fields: [*Project*|Website Redesign, *Deadline*|March 15, *Status*|On Track]`;
 
 // Original MESSAGE_FORMATTING_EXAMPLE
 const MESSAGE_FORMATTING_EXAMPLE = `{
@@ -255,60 +315,46 @@ Example 2: After the postMessage completes, send a finishRequest:
 // Create an escaped version of TOOL_USAGE_EXAMPLES
 const ESCAPED_TOOL_USAGE_EXAMPLES = TOOL_USAGE_EXAMPLES.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
 
-const MESSAGE_FORMATTING_GUIDELINES = `You have two ways to format messages:
+const MESSAGE_FORMATTING_GUIDELINES = `We use a modern block builder approach combined with standard Markdown. This is the REQUIRED way to create buttons using the #buttons syntax.
 
-1. BASIC FORMATTING:
-Create simple messages using these parameters:
-- text: Your main message content with formatting options
-- color: Message accent color (blue, green, red, orange, purple or hex code)
+BASIC MARKDOWN (supported in most blocks):
+- *bold* for bold text
+- _italic_ for italic text
+- ~strikethrough~ for strikethrough
+- \`code\` for inline code
+- \`\`\`code block\`\`\` for multi-line code
+- > quote for blockquotes
+- * or - for bullet lists
+- 1. for numbered lists
+- <https://example.com|Link text> for links (Slack format)
 
-2. USING BLOCK BUILDER FORMATTING:
-We use a modern block builder approach combined with standard Markdown:
+BLOCK TYPES AND SYNTAX:
+1. #header: Large title text
+2. #section: Standard message content with markdown
+3. #context: Smaller helper text
+4. #divider: (no content needed)
+5. #image: URL | altText:Image description
+6. #buttons: [Label|value|style, Label2|value2, Label3|value3]
+7. #fields: [*Field title*|value, *Field2*|value2]
 
-${BLOCK_BUILDER_GUIDE}
+BUTTON CREATION RULES:
+1. ALWAYS use the #buttons: syntax INSIDE a postMessage tool call
+2. NEVER use the createButtonMessage tool directly
+3. Format: #buttons:[Label|value|style, ...] where style is optional
+4. For link buttons, use URL as value: #buttons:[Visit Site|https://example.com]
 
-USER MENTIONS FORMATTING:
-- For direct user mentions in text: <@USERID> (e.g., "Hello <@U123456>")
-- For user context blocks: #userContext: <@U123456> | optional description
-- ⚠️ NOTE: In #header blocks, user mentions like <@USER_ID> will be automatically converted to plain text "@Username" format
-- For clickable user mentions, use #section, #context, and #userContext blocks where mrkdwn formatting is supported
-- NEVER use plain @UserID format as it won't be properly formatted in Slack
-
-HYPERLINK FORMATTING:
-- Always use Slack format for links: <URL|text label>
-- Example: <https://slack.com|Click here>
-- NEVER use Markdown format [text](URL) for regular links
-- For images, see IMAGE DISPLAY OPTIONS below
-
-IMAGE DISPLAY OPTIONS (THREE METHODS):
-1. Standalone Image Block - Choose ONE of these methods:
-   * Markdown image syntax: ![Alt text](https://example.com/image.jpg)
-   * BBCode format: (image:https://example.com/image.jpg:Alt text)
-   This displays a full-width image in the message.
-
-2. Section with Image Accessory:
-   * (section:https://example.com/image.jpg:Alt text)Content with image accessory(!section)
-   This shows text content with a smaller image thumbnail on the right side.
-
-3. Image Hyperlink:
-   * <https://example.com/image.jpg|View image>
-   This shows just a clickable link but doesn't embed the image.
-
-USER CONTEXT BLOCK EXAMPLES:
-- When asked to use "user context formatting", use this block builder syntax:
-  #userContext: <@U123456>
-- For multiple users:
-  #userContext: <@U123456> <@U789012>
-- With descriptive text:
-  #userContext: <@U123456> | completed the task
-- This creates a special block that highlights the user, different from a simple mention.
-
-EXAMPLE:
+EXAMPLE FOR CREATING BUTTONS:
 \`\`\`
-${ESCAPED_MESSAGE_EXAMPLE}
+{
+  "tool": "postMessage",
+  "reasoning": "Showing options with buttons",
+  "parameters": {
+    "text": "#header: Lunch Options\\n\\n#section: What would you like for lunch?\\n\\n#buttons:[Pizza|lunch_pizza|primary, Salad|lunch_salad, Sandwich|lunch_sandwich]"
+  }
+}
 \`\`\`
 
-IMPORTANT: Do NOT attempt to specify Slack blocks directly. Use only the formatting methods above.`;
+IMPORTANT: Do NOT attempt to specify Slack blocks directly. Use only the formatting methods above. The #buttons syntax is the ONLY way to create buttons.`;
 
 /**
  * User Context Block Format guidelines
@@ -331,6 +377,123 @@ This format will display user profile pictures with names and optional descripti
 Always format user IDs with <@USER_ID> syntax - this is the LLM's responsibility.`;
 
 /**
+ * Preprocess JSON string to handle literal newlines and common formatting issues
+ * before standard JSON.parse
+ * @param {string} jsonString - Raw JSON string from LLM
+ * @returns {string} - Normalized JSON string ready for parsing
+ */
+function preprocessLlmJson(jsonString) {
+  if (!jsonString) return jsonString;
+  
+  console.log("Preprocessing LLM JSON response");
+  
+  try {
+    let processedJson = jsonString;
+    
+    // A safer approach that focuses on fixing common issues without over-processing
+    
+    // 1. Fix trailing commas (common OpenAI LLM error)
+    processedJson = processedJson
+      .replace(/,\s*}/g, '}')    // Remove trailing commas in objects
+      .replace(/,\s*\]/g, ']');  // Remove trailing commas in arrays
+    
+    // 2. Fix unquoted property names (another common error)
+    // Only apply to clear cases of unquoted property names at the start of a line or after a comma/bracket
+    processedJson = processedJson.replace(
+      /([\{\,]\s*)([a-zA-Z0-9_]+)(\s*:)/g, 
+      '$1"$2"$3'
+    );
+    
+    // 3. Remove literal tab characters that can break JSON
+    processedJson = processedJson.replace(/\t/g, ' ');
+    
+    // 4. Handle newlines in string values - this is tricky but don't overdo it
+    // Only apply to actual literal newlines inside quoted strings
+    // Match quoted strings and handle them individually
+    let inString = false;
+    let result = '';
+    
+    // Simple character-by-character parser to handle newlines in strings
+    for (let i = 0; i < processedJson.length; i++) {
+      const char = processedJson[i];
+      const nextChar = processedJson[i + 1] || '';
+      
+      // Handle string boundaries
+      if (char === '"' && (i === 0 || processedJson[i - 1] !== '\\')) {
+        inString = !inString;
+        result += char;
+      }
+      // Handle newlines inside strings only
+      else if (inString && (char === '\n' || char === '\r')) {
+        result += '\\n'; // Replace with escaped newline
+        if (char === '\r' && nextChar === '\n') i++; // Skip the \n in \r\n
+      }
+      // Everything else is unchanged
+      else {
+        result += char;
+      }
+    }
+    
+    // If we got stuck in a string parsing state, the JSON is malformed
+    // Better to return the original than a partially processed version
+    if (inString) {
+      console.log("⚠️ Warning: Malformed JSON with unclosed strings detected");
+      return jsonString;
+    }
+    
+    // Log the changes for debugging
+    if (result !== jsonString) {
+      console.log("Successfully preprocessed JSON with fixes");
+      return result;
+    } else {
+      console.log("No JSON issues detected during preprocessing");
+      return jsonString;
+    }
+  } catch (error) {
+    console.log(`Error in JSON preprocessing: ${error.message}`);
+    return jsonString; // Return original if preprocessing fails
+  }
+}
+
+/**
+ * Adds button click information to LLM context
+ * @param {Array} messages - Messages array being sent to LLM
+ * @param {Object} threadState - Thread state
+ * @returns {Array} - Updated messages array
+ */
+function addButtonClickInfoToContext(messages, threadState) {
+  // Check if we have button selection info
+  if (threadState.lastButtonSelection) {
+    const selection = threadState.lastButtonSelection;
+    
+    // Check if the button selection has already been visually acknowledged
+    let contextMessage;
+    if (threadState.buttonSelectionAlreadyAcknowledged) {
+      // STRONGER language when the button has already been visually updated
+      contextMessage = `⚠️ BUTTON SELECTION: The user clicked the "${selection.text}" button with value "${selection.value}". 
+The message UI has ALREADY been updated to show "✅ Opção selecionada: ${selection.text}".
+DO NOT send another message just to acknowledge this selection - it would be redundant and confusing.
+Instead, directly provide the next logical step related to their "${selection.value}" choice.`;
+      console.log('Added consolidated button selection context with STRONG warning about UI updates');
+    } else {
+      // Standard language for normal cases
+      contextMessage = `⚠️ BUTTON SELECTION: The user clicked the "${selection.text}" button with value "${selection.value}". 
+The message with buttons has already been updated automatically to show this selection.
+Please respond with a NEW message acknowledging their choice. DO NOT attempt to update the original message again.`;
+      console.log('Added consolidated button selection context for LLM');
+    }
+    
+    // Add a single consolidated system message right after the initial system message
+    messages.splice(1, 0, {
+      role: 'system',
+      content: contextMessage
+    });
+  }
+  
+  return messages;
+}
+
+/**
  * Sends the thread state to the LLM and gets the next action to take
  * @param {Object} threadState - The current thread state
  * @param {Array} threadState.messages - Array of user and assistant messages
@@ -339,95 +502,55 @@ Always format user IDs with <@USER_ID> syntax - this is the LLM's responsibility
  * @returns {Promise<{toolName: string, toolArgs: Object}>} - The tool to call next and its arguments
  */
 async function getNextAction(threadState) {
-  try {
-    if (!LLM_API_KEY) {
-      throw new Error('LLM_API_KEY is not configured');
+    try {
+        if (!LLM_API_KEY) {
+            throw new Error('LLM_API_KEY is not configured');
+        }
+        
+        console.log("\n🧠 SENDING REQUEST TO LLM");
+        console.log(`Model: ${LLM_MODEL}`);
+        
+        // Determine if we have a ThreadState instance or just the state object
+        const isThreadStateInstance = typeof threadState.getMetadata === 'function';
+        
+        // Get context from metadata
+        let context = isThreadStateInstance ? threadState.getMetadata('context') : null;
+        
+        if (!context && isThreadStateInstance) {
+            console.log("⚠️ WARNING: No context found in thread state metadata");
+        }
+        
+        // Get recent messages
+        const messages = formatMessagesForLLM(threadState);
+        
+        // Log the content being sent to the LLM
+        let userQuery = context?.text || 'No user query found in context!';
+        console.log('\n--- Content being sent to LLM ---');
+        console.log(userQuery);
+        console.log(`Sending ${messages.length} messages to LLM`);
+        
+        // Detailed context logging
+        logDetailedContext(threadState, messages);
+        
+        // Build the complete LLM request
+        const requestBody = {
+            model: LLM_MODEL,
+            messages,
+            temperature: 0.2,
+            top_p: 0.95,
+            frequency_penalty: 0,
+            presence_penalty: 0,
+            tools: getAvailableTools(),
+            tool_choice: "required"  // Changed from "auto" to "required" to force the model to always use a tool
+        };
+        
+        // Make the API request to the LLM
+        return await sendRequestToLLM(requestBody, threadState);
+    } catch (error) {
+        console.log(`\n❌ LLM ERROR ❌`);
+        console.log(error.message);
+        throw error;
     }
-
-    console.log("\n🧠 SENDING REQUEST TO LLM");
-    console.log(`Model: ${LLM_MODEL}`);
-
-    // Determine if we have a ThreadState instance or just the state object
-    const isThreadStateInstance = typeof threadState.getMetadata === 'function';
-    
-    // Get context from metadata
-    let context = isThreadStateInstance ? threadState.getMetadata('context') : null;
-    
-    if (!context && isThreadStateInstance) {
-      console.log("⚠️ WARNING: No context found in thread state metadata");
-    }
-    
-    // Format messages based on thread state
-    const messages = formatMessagesForLLM(threadState);
-    
-    // Log the actual content we're sending to the LLM for debugging
-    console.log("\n--- Content being sent to LLM ---");
-    if (context && context.text) {
-      console.log(`User's query: "${context.text}"`);
-      if (context.originalText) {
-        console.log(`Original (unfiltered) query: "${context.originalText}"`);
-      }
-    } else {
-      console.log("No user query found in context!");
-    }
-    console.log(`Sending ${messages.length} messages to LLM`);
-    
-    // Add detailed context logging
-    console.log("\n--- DETAILED CONTEXT LOG ---");
-    console.log("Messages in threadState:", threadState.messages?.length || 0);
-    if (threadState.messages && threadState.messages.length > 0) {
-      console.log("Thread message history:");
-      threadState.messages.forEach((msg, idx) => {
-        console.log(`[${idx + 1}] ${msg.isUser ? 'USER' : 'BOT'}: ${msg.isSystemNote ? 'SYSTEM NOTE' : ''} ${msg.text?.substring(0, 50)}${msg.text?.length > 50 ? '...' : ''}`);
-      });
-    }
-    
-    // Log tool execution history
-    if (typeof threadState.getToolExecutionHistory === 'function') {
-      const toolHistory = threadState.getToolExecutionHistory(5);
-      if (toolHistory.length > 0) {
-        console.log("\nRecent tool executions:");
-        toolHistory.forEach((exec, idx) => {
-          console.log(`[${idx + 1}] ${exec.toolName} - ${exec.error ? 'ERROR' : 'SUCCESS'}`);
-        });
-      }
-    }
-    
-    // Log messages being sent to LLM
-    console.log("\nMessages to LLM:");
-    messages.forEach((msg, idx) => {
-      const content = typeof msg.content === 'string' ? 
-        `${msg.content.substring(0, 100)}${msg.content.length > 100 ? '...' : ''}` : 
-        'Complex content';
-      console.log(`[${idx + 1}] ${msg.role.toUpperCase()}: ${content}`);
-    });
-    console.log("-------------------------");
-
-    // Build the complete LLM request
-    const requestBody = {
-      model: LLM_MODEL,
-      messages,
-      temperature: 0.2,
-      top_p: 0.95,
-      frequency_penalty: 0,
-      presence_penalty: 0,
-      tools: getAvailableTools(),
-      tool_choice: "required"  // Changed from "auto" to "required" to force the model to always use a tool
-    };
-
-    // Make the API request to the LLM
-    return await sendRequestToLLM(requestBody);
-  } catch (error) {
-    console.log(`\n❌ LLM ERROR ❌`);
-    console.log(`Message: ${error.message}`);
-    console.log("--------------------------------");
-    
-    // Handle and log any errors
-    logError('Error getting next action from LLM', error, { threadState });
-    
-    // Rethrow the error for the orchestrator to handle
-    throw error;
-  }
 }
 
 /**
@@ -704,186 +827,110 @@ ${REMEMBER_CRITICAL}`;
  * @returns {Array} - Formatted messages for the LLM
  */
 function formatMessagesForLLM(threadState) {
-  const messages = [];
+  // Create messages array
+  let messages = [];
   
-  // Get context from metadata
-  const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
-  
-  // Add system message
-  const systemMessage = getSystemMessage(context || {});
+  // Add system message first
+  const context = threadState.getMetadata ? threadState.getMetadata('context') : {};
   messages.push({
     role: 'system',
-    content: systemMessage,
+    content: getSystemMessage(context)
   });
-
-  // Debug logging of context
-  console.log(`\n---- Building Context for LLM ----`);
-  if (context) {
-    console.log(`Context details: User:${context.userId}, Channel:${context.channelId}, Thread:${context.threadTs || 'N/A'}`);
-    console.log(`Thread Stats: ${context.threadStats ? 
-      `${context.threadStats.totalMessagesInThread} total messages` : 
-      'Not available'}`);
-    console.log(`Messages in context: ${threadState.messages?.length || 0} messages`);
-    console.log(`User Message: "${context.text || 'No text'}" (${context.messageType || 'unknown type'})`);
-  } else {
-    console.log("No context found in thread state!");
-  }
   
-  // Add important system note about conversation state
-  if (threadState.messages && threadState.messages.length > 0) {
-    // Check if any messages are from the bot
-    const botMessages = threadState.messages.filter(msg => !msg.isUser);
-    if (botMessages.length > 0) {
-      messages.push({
-        role: 'system',
-        content: `⚠️ CRITICAL: You have already sent ${botMessages.length} message(s) in this conversation. DO NOT send another message with the same content or options. The user is waiting for your existing message to be processed.`
-      });
-    }
-  }
-  
-  // Format thread messages if present
-  let currentMessageFound = false;
-  let prevBotMessageCount = 0;
-  
-  if (threadState.messages && threadState.messages.length > 0) {
-    console.log(`Thread history: ${threadState.messages.length} messages being imported`);
+  // Add any explicit button selection context if available
+  if (threadState.lastButtonSelection && threadState.buttonSelectionAlreadyAcknowledged) {
+    // Add a special system message that warns about the button being acknowledged already
+    messages.push({
+      role: 'system',
+      content: `⚠️ BUTTON SELECTION: The user clicked the "${threadState.lastButtonSelection.text}" button with value "${threadState.lastButtonSelection.value}".
+The message with buttons has ALREADY been updated in the UI to show "✅ Opção selecionada: ${threadState.lastButtonSelection.text}".
+DO NOT post another message just to acknowledge this selection - it's redundant.
+Instead, directly provide the next logical step related to their "${threadState.lastButtonSelection.value}" choice.`
+    });
     
-    for (const message of threadState.messages) {
-      // Process all messages, including those with dev prefix
-      // (The dev prefix should already be stripped at this point)
-      
-      // Check if this is the current user's message (matches the context)
-      if (context && message.isUser && message.text === context.text) {
-        currentMessageFound = true;
+    console.log("Added consolidated button selection context for LLM");
+  }
+  
+  // Get all user and bot messages from thread state
+  let hasButtonClick = false;
+  if (threadState.messages && threadState.messages.length > 0) {
+    // Get last 10 messages max (to avoid overly large context)
+    const recentMessages = threadState.messages.slice(-10);
+    
+    // Check if there's a button click in the recent messages
+    hasButtonClick = recentMessages.some(msg => msg.isButtonClick);
+    
+    // For each message in the thread 
+    for (const message of recentMessages) {
+      // Skip system notes about button clicks - we'll add a consolidated message later
+      if (message.isSystemNote && message.text && message.text.includes('button')) {
+        continue;
       }
       
-      // Only add prefixes for non-system messages
-      if (!message.isSystemNote) {
-        // Determine if message is from the bot or a user
-        if (message.isUser) {
-          if (message.isButtonClick) {
-            // Format button clicks distinctively
-            messages.push({
-              role: 'user',
-              content: `USER SELECTED: ${message.text}`
-            });
-          } else {
-            // Simple format for user messages - no redundant prefixes
-            messages.push({
-              role: 'user',
-              content: message.text || 'No text content'
-            });
-          }
-        } else {
-          // For bot messages, format with clear indication this was already sent
-          prevBotMessageCount++;
-          
-          let sentMessage = '';
-          if (message.title) {
-            sentMessage += `Title: "${message.title}"\n`;
-          }
-          
-          // Use the description field if available (for messages with attachments/formatting)
-          if (message.description) {
-            sentMessage += message.description;
-          } else {
-            sentMessage += `Content: "${message.text || 'No text content'}"`;
-          }
-          
+      if (message.isUser) {
+        // Add user message - filter out button click messages, we'll handle them special
+        if (!message.isButtonClick) {
           messages.push({
-            role: 'assistant',
-            content: `PREVIOUSLY SENT: ${sentMessage}`
-          });
-        }
-      } else if (message.isSystemNote) {
-        // Only include important system notes to reduce noise
-        if (message.text.includes("Created interactive buttons") || 
-            message.text.includes("auto-completed") ||
-            message.text.includes("error")) {
-          messages.push({
-            role: 'system',
+            role: 'user',
             content: message.text
           });
         }
+      } 
+      else if (message.fromTool) {
+        // For messages from tools, show them as assistant messages
+        messages.push({
+          role: 'assistant',
+          content: message.text
+        });
+      } 
+      else {
+        // Bot messages that aren't from tools are just normal assistant messages
+        messages.push({
+          role: 'assistant',
+          content: message.text
+        });
       }
     }
-  }
-
-  // Add the current user message if not already found in message history
-  // IMPORTANT: Only add it if it wasn't already found in thread history
-  if (context && context.text && !currentMessageFound) {
-    console.log("Adding current message to context (wasn't found in message history)");
-    
-    // Check one more time through a text comparison - sometimes the object equality check might fail
-    // This fixes cases where the message was added to thread state but using different objects
-    const isDuplicate = threadState.messages && threadState.messages.some(msg => 
-      msg.isUser && msg.text === context.text
-    );
-    
-    if (!isDuplicate) {
-      messages.push({
-        role: 'user',
-        content: context.text || 'No text content'
-      });
-    } else {
-      console.log("Found duplicate message during secondary check - not adding again");
-    }
-  } else {
-    console.log("Current user message already included in thread history, not adding again");
-  }
-
-  // Handle button clicks specially
-  if (context && context.actionId) {
-    // Add a clear notice about button clicks
-    messages.push({
-      role: 'system',
-      content: `The user clicked a button with action ID "${context.actionId}" and value "${context.actionValue}". Respond to this button click directly.`
-    });
-  }
-
-  // Add a single reminder if we've already posted messages - no need for multiple warnings
-  if (prevBotMessageCount > 0) {
-    messages.push({
-      role: 'system',
-      content: `You have already sent ${prevBotMessageCount} message(s) in this conversation. Do not send duplicate messages.`
-    });
   }
   
-  // Add previous tool executions to context (limited)
-  // Use the getToolExecutionHistory method if available
+  // Add button click context information if available
+  if (hasButtonClick || threadState.lastButtonSelection) {
+    // Use our helper function to add button context
+    messages = addButtonClickInfoToContext(messages, threadState);
+  }
+  
+  // Most recent tool execution results for context
   if (typeof threadState.getToolExecutionHistory === 'function') {
-    const toolExecutionHistory = threadState.getToolExecutionHistory(3); // Just get last 3
+    const toolHistory = threadState.getToolExecutionHistory(5);
+    let toolResultsText = '';
     
-    if (toolExecutionHistory.length > 0) {
-      console.log(`Adding ${toolExecutionHistory.length} recent tool executions to context`);
+    if (toolHistory.length > 0) {
+      toolResultsText = `Recent tool executions:\n`;
+      toolHistory.forEach((execution, i) => {
+        const success = execution.error ? '❌ FAILED' : '✅ SUCCESS';
+        toolResultsText += `[${i+1}] ${execution.toolName} (${success})\n`;
+      });
       
-      // Add all tool call results to the context
-      for (const execution of toolExecutionHistory) {
-        // Include all tool results, especially getUserAvatar
-        // Don't skip any tools like we used to, because the LLM needs to see all results
-        
-        // Add error information if present
-        let functionContent = '';
-        
-        if (execution.error) {
-          functionContent = `ERROR: ${execution.error.message}`;
-        } else {
-          functionContent = typeof execution.result === 'string' 
-            ? execution.result 
-            : JSON.stringify(execution.result, null, 2);
-        }
-        
-        messages.push({
-          role: 'function',
-          name: execution.toolName,
-          content: functionContent
-        });
-        
-        console.log(`Added ${execution.toolName} result to LLM context`);
-      }
+      // Add recent tool executions as a system message
+      messages.push({
+        role: 'system',
+        content: toolResultsText
+      });
     }
   }
-
+  
+  // Add button selection info specifically for the LLM
+  if (threadState.lastButtonSelection) {
+    const selection = threadState.lastButtonSelection;
+    const selectionTime = new Date(selection.timestamp).toISOString();
+    
+    // Add this as debugging info that won't be shown to the user
+    console.log("\nButton selection:");
+    console.log(`Value: ${selection.value}`);
+    console.log(`Text: ${selection.text}`);
+    console.log(`Time: ${selectionTime}`);
+  }
+  
   return messages;
 }
 
@@ -993,121 +1040,12 @@ async function parseToolCallFromResponse(llmResponse) {
             console.log("Removed code block formatting from arguments");
           }
           
-          // Sanitize control characters that can break JSON parsing
-          cleanedArgs = cleanedArgs.replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, '');
+          // Preprocess JSON to handle literal newlines and common issues before parsing
+          cleanedArgs = preprocessLlmJson(cleanedArgs);
           
-          // Fix common JSON syntax issues
-          cleanedArgs = cleanedArgs
-            .replace(/,\s*}/g, '}')                // Remove trailing commas in objects
-            .replace(/,\s*\]/g, ']')               // Remove trailing commas in arrays
-            .replace(/\\'/g, "'")                  // Replace escaped single quotes
-            .replace(/\\"/g, '"')                  // Fix double escaped quotes
-            .replace(/\\\\/g, '\\')                // Fix double backslashes
-            .replace(/([^\\])\\n/g, '$1\\\\n');    // Fix incorrectly escaped newlines
-          
-          // Check for duplicate parameters sections which cause parsing errors
-          if (cleanedArgs.match(/"parameters"\s*:\s*{[^{}]*"parameters"\s*:/)) {
-            console.log("Detected duplicate nested parameters structure - attempting to fix");
-            
-            try {
-              // More robust approach - try to extract the inner parameters object completely
-              const outerMatch = cleanedArgs.match(/"parameters"\s*:\s*({[^]*})\s*(?:,|\})/);
-              if (outerMatch) {
-                const parametersContent = outerMatch[1];
-                // Now find the inner parameters object
-                const innerMatch = parametersContent.match(/"parameters"\s*:\s*({[^]*?})\s*(?:,|$)/);
-                
-                if (innerMatch) {
-                  // Replace the original structure with flattened parameters
-                  const flattenedContent = parametersContent.replace(/"parameters"\s*:\s*{[^]*?}\s*(?:,|$)/, '');
-                  
-                  // Now merge the inner parameters content
-                  const innerContent = innerMatch[1];
-                  
-                  // Create a merged parameters object that combines both levels
-                  const mergedParameters = `"parameters": ${flattenedContent.replace(/}$/, `, ${innerContent.replace(/^{/, '').replace(/,$/, '')}`)}`;
-                  
-                  // Replace the original parameters with our merged version
-                  cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{[^]*?}\s*(?:,|\})/, mergedParameters);
-                  
-                  console.log("Successfully flattened nested parameters structure");
-                } else {
-                  // Fallback to simpler approach
-                  cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{([^{]*)"parameters"\s*:/, (match, prefix) => {
-                    return `"parameters": {${prefix}"innerParams":`;
-                  });
-                }
-              } else {
-                // Fallback to simpler approach
-                cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{([^{]*)"parameters"\s*:/, (match, prefix) => {
-                  return `"parameters": {${prefix}"innerParams":`;
-                });
-              }
-            } catch (structureError) {
-              console.log(`Error during structure fix: ${structureError.message}`);
-              // Fallback to simpler approach
-              cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{([^{]*)"parameters"\s*:/, (match, prefix) => {
-                return `"parameters": {${prefix}"innerParams":`;
-              });
-            }
-          }
-          
-          // Similar fix for duplicate reasoning fields
-          if (cleanedArgs.match(/"parameters"\s*:\s*{[^{}]*"reasoning"\s*:/)) {
-            console.log("Detected duplicate reasoning fields - removing from nested parameters");
-            
-            // This approach preserves only the top-level reasoning if it exists
-            cleanedArgs = cleanedArgs.replace(/"parameters"\s*:\s*{([^{]*)"reasoning"\s*:\s*"([^"]+)"/, (match, prefix, reasoningValue) => {
-              return `"parameters": {${prefix}`;
-            });
-            
-            console.log("Removed duplicate reasoning from parameters object");
-          }
-          
-          // Special handling for parentheses format in text strings
-          // This regex looks for patterns like (header)text(!header) within JSON string values
-          // and ensures the parentheses are properly escaped
-          cleanedArgs = cleanedArgs.replace(/"(text|content)"\s*:\s*"(.*?)"/g, (match, propName, textValue) => {
-            // Replace unescaped parentheses in the text value with escaped ones
-            let escapedText = textValue
-              .replace(/\\\(/g, '{{ESCAPED_LEFT_PAREN}}') // Save already escaped parentheses
-              .replace(/\\\)/g, '{{ESCAPED_RIGHT_PAREN}}')
-              .replace(/\(/g, '\\(')  // Escape unescaped left parentheses
-              .replace(/\)/g, '\\)')  // Escape unescaped right parentheses
-              .replace(/{{ESCAPED_LEFT_PAREN}}/g, '\\(')  // Restore with proper escaping
-              .replace(/{{ESCAPED_RIGHT_PAREN}}/g, '\\)');
-            
-            return `"${propName}":"${escapedText}"`;
-          });
-          
-          // Leave text and content properties unchanged - no parentheses escaping needed
-          // with block builder syntax
-          
-          /* REMOVED PARENTHESES ESCAPING:
-          cleanedArgs = cleanedArgs.replace(/"(text|content)"\s*:\s*"(.*?)"/g, (match, propName, textValue) => {
-            // Replace unescaped parentheses in the text value with escaped ones
-            let escapedText = textValue
-              .replace(/\\\(/g, '{{ESCAPED_LEFT_PAREN}}') // Save already escaped parentheses
-              .replace(/\\\)/g, '{{ESCAPED_RIGHT_PAREN}}')
-              .replace(/\(/g, '\\(')  // Escape unescaped left parentheses
-              .replace(/\)/g, '\\)')  // Escape unescaped right parentheses
-              .replace(/{{ESCAPED_LEFT_PAREN}}/g, '\\(')  // Restore with proper escaping
-              .replace(/{{ESCAPED_RIGHT_PAREN}}/g, '\\)');
-            
-            return `"${propName}":"${escapedText}"`;
-          });
-          */
-          
-          // No special parentheses handling needed - block builder syntax doesn't use parentheses
-          
-          // Add quotes to unquoted property names as the final step
-          cleanedArgs = cleanedArgs.replace(/([a-zA-Z0-9_$]+):/g, '"$1":');
-          
-          console.log("Sanitized JSON arguments, attempting to parse...");
-          
-          // Log the sanitized JSON for debugging
+          // Log the preprocessed JSON for debugging
           if (process.env.DEBUG_JSON === 'true') {
-            console.log("Sanitized JSON:", cleanedArgs);
+            console.log("Preprocessed JSON:", cleanedArgs);
           }
           
           // Parse the cleaned JSON
@@ -1115,53 +1053,55 @@ async function parseToolCallFromResponse(llmResponse) {
           console.log("Successfully parsed tool parameters");
         } catch (error) {
           console.log(`Error parsing tool parameters: ${error.message}`);
-          console.log("Failed JSON:", toolCall.function.arguments.substring(0, 200) + "...");
           
-          // Log more details about the error position
-          if (error instanceof SyntaxError && error.message.includes('position')) {
+          // Attempt to recover using button extraction or text extraction
+          console.log("Attempting to recover from JSON parsing error");
+          
+          // First, try to recover button information if this is a button message
+          const buttonInfo = extractButtonInfo(toolCall.function.arguments);
+          
+          // Get the text content using more advanced regex that handles escaped chars
+          const textMatch = toolCall.function.arguments.match(/"text"\s*:\s*"((?:\\.|[^"\\])*)"/);
+          
+          // Create a simple valid parameters object with what we can recover
+          parameters = { 
+            reasoning: "Recovered from JSON parsing error"
+          };
+          
+          // Add text if we extracted it
+          if (textMatch && textMatch[1]) {
+            // Properly handle escaped characters in the recovered text
+            // Convert Unicode and special escape sequences back to characters
+            let extractedText = textMatch[1];
+            
+            // Handle special case of double-escaped newlines (\\n should become \n)
+            extractedText = extractedText.replace(/\\\\n/g, '\\n');
+            
+            // Now evaluate the string with escape sequences
             try {
-              // Extract position from error message
-              const posMatch = error.message.match(/position (\d+)/);
-              if (posMatch && posMatch[1]) {
-                const errorPos = parseInt(posMatch[1]);
-                const startPos = Math.max(0, errorPos - 50);
-                const endPos = Math.min(toolCall.function.arguments.length, errorPos + 50);
-                const errorContext = toolCall.function.arguments.substring(startPos, endPos);
-                
-                console.log(`JSON error near position ${errorPos}:`);
-                console.log("Error context:", errorContext);
-                console.log("Error location:", "^".padStart(Math.min(50, errorPos - startPos) + 1));
-              }
-            } catch (contextError) {
-              console.log("Could not extract error context:", contextError.message);
+              // Evaluate the string with proper JSON parsing to handle escapes
+              extractedText = JSON.parse(`"${extractedText.replace(/"/g, '\\"')}"`);
+            } catch (evalError) {
+              console.log(`Error evaluating extracted text: ${evalError.message}`);
+              // If evaluation fails, use the text as-is but still fix basic escapes
+              extractedText = extractedText
+                .replace(/\\n/g, '\n')
+                .replace(/\\t/g, '\t')
+                .replace(/\\"/g, '"')
+                .replace(/\\\\/g, '\\');
             }
+            
+            parameters.text = extractedText;
+            console.log("Recovered text content from damaged JSON");
+          } else {
+            parameters.text = "I couldn't process that correctly. Please try again with a simpler request.";
+            console.log("Could not recover text content, using fallback message");
           }
           
-          // Try again with a more aggressive approach for serious JSON errors
-          try {
-            console.log("Attempting more aggressive JSON repair...");
-            // Create a minimal valid JSON with just the text field
-            const textMatch = toolCall.function.arguments.match(/"text"\s*:\s*"(.*?)(?<!\\)"/);
-            if (textMatch && textMatch[1]) {
-              // Extract just the text content and create a simple valid JSON
-              parameters = { 
-                text: textMatch[1],
-                reasoning: "Recovered from JSON parsing error"
-              };
-              console.log("Recovered text content from damaged JSON");
-            } else {
-              // Fallback when we can't even extract the text
-              parameters = { 
-                text: "I couldn't process that correctly. Please try again with a simpler request.", 
-                reasoning: "Parameter parsing failed" 
-              };
-            }
-          } catch (secondError) {
-            // Ultimate fallback for catastrophic parsing failures
-            parameters = { 
-              text: "I couldn't process that correctly. Please try again with a simpler request.", 
-              reasoning: "Parameter parsing failed" 
-            };
+          // Add buttons if we found them and this is a button message
+          if (buttonInfo.buttons.length > 0 && toolName === 'createButtonMessage') {
+            parameters.buttons = buttonInfo.buttons;
+            console.log(`Added ${buttonInfo.buttons.length} recovered buttons to parameters`);
           }
         }
         
@@ -1418,11 +1358,248 @@ function getAvailableTools() {
   });
 }
 
+/**
+ * Extract button information from raw JSON or from block builder syntax
+ * @param {string} jsonString - Raw LLM response to extract button info from
+ * @returns {Object} - Object containing extracted buttons array
+ */
+function extractButtonInfo(jsonString) {
+  // Default return value
+  const result = {
+    buttons: []
+  };
+  
+  try {
+    console.log('🔍 Attempting to extract button information');
+    
+    // First check for #buttons syntax in block builder format
+    const buttonMatch = jsonString.match(/#buttons:\s*\[(.*?)\]/s);
+    if (buttonMatch) {
+      console.log("FOUND BUTTON DEFINITION IN TEXT: ", buttonMatch[0]);
+      const buttonContent = buttonMatch[1];
+      
+      // Parse button content into button objects
+      try {
+        const buttonDefinitions = buttonContent.split(',').map(btn => btn.trim());
+        console.log(`📋 Button definitions found (${buttonDefinitions.length}):`, buttonDefinitions);
+        
+        result.buttons = buttonDefinitions.map((buttonDef, index) => {
+          const parts = buttonDef.split('|').map(part => part.trim());
+          console.log(`🔘 Button ${index + 1} parts:`, parts);
+          
+          return {
+            text: parts[0],
+            value: parts[1] || `option${index + 1}`,
+            style: parts[2] || undefined
+          };
+        });
+        console.log(`✅ Parsed ${result.buttons.length} buttons from #buttons syntax`);
+        console.log(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
+      } catch (btnError) {
+        console.log(`❌ Error parsing button definitions: ${btnError.message}`);
+      }
+      
+      return result;
+    }
+    
+    // Then check for "actions" array in the raw JSON (Slack legacy format)
+    const actionsMatch = jsonString.match(/"actions"\s*:\s*\[([\s\S]*?)\]/);
+    if (actionsMatch) {
+      console.log("FOUND ACTIONS ARRAY IN JSON");
+      try {
+        const actionsText = actionsMatch[1];
+        // Parse action objects from the actions array
+        const actionObjects = extractObjectsFromJsonArray(actionsText);
+        
+        console.log(`Found ${actionObjects.length} action objects`);
+        result.buttons = actionObjects.map((objStr, index) => {
+          // Extract text and value from action object
+          const textMatch = objStr.match(/"text"\s*:\s*"([^"]*)"/);
+          const valueMatch = objStr.match(/"value"\s*:\s*"([^"]*)"/);
+          
+          const text = textMatch ? textMatch[1] : `Option ${index + 1}`;
+          console.log(`🔘 Action ${index + 1} text: "${text}"`);
+          
+          return {
+            text: text,
+            value: valueMatch ? valueMatch[1] : `option${index + 1}`
+          };
+        });
+        console.log(`✅ Extracted ${result.buttons.length} buttons from actions array`);
+        console.log(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
+      } catch (actionsError) {
+        console.log(`❌ Error parsing actions array: ${actionsError.message}`);
+      }
+      
+      return result;
+    }
+    
+    // Finally check for direct "buttons" array in the JSON
+    const buttonsMatch = jsonString.match(/"buttons"\s*:\s*\[([\s\S]*?)\]/);
+    if (buttonsMatch) {
+      console.log("FOUND BUTTONS ARRAY IN JSON");
+      try {
+        const buttonsText = buttonsMatch[1];
+        
+        // Check if it's a simple string array ["Option 1", "Option 2"]
+        const stringMatches = buttonsText.match(/"([^"]*)"/g);
+        if (stringMatches) {
+          console.log(`📋 String buttons found (${stringMatches.length}):`, stringMatches);
+          
+          result.buttons = stringMatches.map((match, index) => {
+            const text = match.replace(/"/g, '');
+            console.log(`🔘 Button ${index + 1} text: "${text}"`);
+            
+            // Check if this is pipe-separated format like "Feijoada|feijoada|primary"
+            if (text.includes('|')) {
+              const parts = text.split('|').map(part => part.trim());
+              console.log(`🔀 Splitting button ${index + 1} by pipes:`, parts);
+              
+              return {
+                text: parts[0],
+                value: parts[1] || text.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || `option${index + 1}`,
+                style: parts[2] || undefined
+              };
+            }
+            
+            return {
+              text,
+              value: text.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || `option${index + 1}`
+            };
+          });
+          console.log(`✅ Extracted ${result.buttons.length} buttons from string array`);
+          console.log(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
+          return result;
+        }
+        
+        // Otherwise try to parse as object array
+        const buttonObjects = extractObjectsFromJsonArray(buttonsText);
+        console.log(`📋 Button objects found (${buttonObjects.length})`);
+        
+        result.buttons = buttonObjects.map((objStr, index) => {
+          const textMatch = objStr.match(/"text"\s*:\s*"([^"]*)"/);
+          const valueMatch = objStr.match(/"value"\s*:\s*"([^"]*)"/);
+          const styleMatch = objStr.match(/"style"\s*:\s*"([^"]*)"/);
+          
+          let text = textMatch ? textMatch[1] : `Option ${index + 1}`;
+          console.log(`🔘 Button ${index + 1} text: "${text}"`);
+          
+          // Check if text contains pipe-separated format
+          if (text.includes('|')) {
+            const parts = text.split('|').map(part => part.trim());
+            console.log(`🔀 Splitting button ${index + 1} by pipes:`, parts);
+            
+            return {
+              text: parts[0],
+              value: parts[1] || (valueMatch ? valueMatch[1] : `option${index + 1}`),
+              style: parts[2] || (styleMatch ? styleMatch[1] : undefined)
+            };
+          }
+          
+          return {
+            text,
+            value: valueMatch ? valueMatch[1] : `option${index + 1}`,
+            style: styleMatch ? styleMatch[1] : undefined
+          };
+        });
+        console.log(`✅ Extracted ${result.buttons.length} buttons from object array`);
+        console.log(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
+      } catch (buttonsError) {
+        console.log(`❌ Error parsing buttons array: ${buttonsError.message}`);
+      }
+    }
+  } catch (error) {
+    console.log(`❌ Error in extractButtonInfo: ${error.message}`);
+  }
+  
+  return result;
+}
+
+/**
+ * Extract objects from a JSON array string using brace matching
+ * @param {string} arrayText - Text content of a JSON array
+ * @returns {Array<string>} - Array of object strings
+ */
+function extractObjectsFromJsonArray(arrayText) {
+  const objects = [];
+  let braceCount = 0;
+  let objectStart = 0;
+  
+  for (let i = 0; i <= arrayText.length; i++) {
+    const char = i < arrayText.length ? arrayText[i] : null;
+    if (char === '{') {
+      if (braceCount === 0) objectStart = i;
+      braceCount++;
+    } else if (char === '}') {
+      braceCount--;
+      if (braceCount === 0) {
+        objects.push(arrayText.substring(objectStart, i + 1));
+      }
+    }
+  }
+  
+  return objects;
+}
+
+/**
+ * Logs detailed information about the messages context for debugging
+ * @param {Object} threadState - Thread state
+ * @param {Array} messages - Messages array being sent to the LLM
+ */
+function logDetailedContext(threadState, messages) {
+  console.log("\n--- DETAILED CONTEXT LOG ---");
+  
+  // Log message history
+  console.log("Messages in threadState:", threadState.messages?.length || 0);
+  if (threadState.messages && threadState.messages.length > 0) {
+    console.log("Thread message history:");
+    threadState.messages.forEach((msg, idx) => {
+      const userType = msg.isUser ? 'USER' : 'BOT';
+      const noteType = msg.isSystemNote ? 'SYSTEM NOTE' : '';
+      const buttonType = msg.isButtonClick ? 'BUTTON CLICK' : '';
+      const textPreview = msg.text?.substring(0, 50) + (msg.text?.length > 50 ? '...' : '');
+      console.log(`[${idx + 1}] ${userType}: ${noteType} ${buttonType} ${textPreview}`);
+    });
+  }
+  
+  // Log tool execution history
+  if (typeof threadState.getToolExecutionHistory === 'function') {
+    const toolHistory = threadState.getToolExecutionHistory(5);
+    if (toolHistory.length > 0) {
+      console.log("\nRecent tool executions:");
+      toolHistory.forEach((exec, idx) => {
+        console.log(`[${idx + 1}] ${exec.toolName} - ${exec.error ? 'ERROR' : 'SUCCESS'}`);
+      });
+    }
+  }
+  
+  // Log messages being sent to LLM
+  console.log("\nMessages to LLM:");
+  messages.forEach((msg, idx) => {
+    const content = typeof msg.content === 'string' ? 
+      `${msg.content.substring(0, 100)}${msg.content.length > 100 ? '...' : ''}` : 
+      'Complex content';
+    console.log(`[${idx + 1}] ${msg.role.toUpperCase()}: ${content}`);
+  });
+  
+  // Log button selection info if available
+  if (threadState.lastButtonSelection) {
+    console.log("\nButton selection:");
+    console.log(`Value: ${threadState.lastButtonSelection.value}`);
+    console.log(`Text: ${threadState.lastButtonSelection.text}`);
+    console.log(`Time: ${threadState.lastButtonSelection.timestamp}`);
+  }
+  
+  console.log("-------------------------");
+}
+
 module.exports = {
   getNextAction,
   processJsonStringParameters,
   formatToolResponse,
   getBrazilDateTime,
+  preprocessLlmJson,
+  extractButtonInfo,
   
   // Export constants for potential reuse in other modules
   constants: {

@@ -664,6 +664,34 @@ const blockGenerators = {
           action_id: `button_${index}`
         };
       } else {
+        // Validate style - only 'primary', 'danger' or undefined are valid
+        let style;
+        if (btn.style === 'primary' || btn.style === 'danger') {
+          style = btn.style;
+        } else if (btn.style && btn.style !== 'default') {
+          console.log(`⚠️ Invalid button style "${btn.style}" for button "${btn.text}", using default`);
+        }
+        
+        // --- START EDIT: Check if value is a URL to create a link button ---
+        const value = btn.value || `button_${index}`;
+        
+        // If button value starts with http:// or https://, create a link button
+        if (typeof value === 'string' && (value.startsWith('http://') || value.startsWith('https://'))) {
+          console.log(`Creating link button: ${btn.text} → ${value}`);
+          return {
+            type: 'button',
+            text: {
+              type: 'plain_text',
+              text: btn.text,
+              emoji: true
+            },
+            url: value,
+            // Note: style and action_id are not applicable for link buttons
+          };
+        }
+        // --- END EDIT ---
+        
+        // Otherwise create a regular action button
         return {
           type: 'button',
           text: {
@@ -671,8 +699,8 @@ const blockGenerators = {
             text: btn.text,
             emoji: true
           },
-          style: btn.style || 'default',
-          value: btn.value || `button_${index}`,
+          ...(style && { style }),
+          value: value,
           action_id: btn.actionId || `button_${index}`
         };
       }
@@ -983,6 +1011,86 @@ function parseParams(blockType, content) {
       text: description,
       users: userIds
     };
+  }
+  // Handle buttons blocks
+  else if (blockType === 'buttons') {
+    debugLog(`🔘 Parsing buttons block parameters`);
+    
+    // Check if content is in the format [button1|value1|style1, button2|value2|style2]
+    const buttonsMatch = content.match(/\[(.*)\]/);
+    
+    if (buttonsMatch) {
+      const buttonsContent = buttonsMatch[1];
+      debugLog(`🔘 Found buttons content: ${buttonsContent}`);
+      
+      // Split by commas, but be careful of commas inside button text
+      const buttonDefinitions = [];
+      let currentButton = '';
+      let inButtonText = false;
+      
+      for (let i = 0; i < buttonsContent.length; i++) {
+        const char = buttonsContent[i];
+        
+        if (char === '|') {
+          // Pipe separates parts of a button definition
+          currentButton += char;
+        } else if (char === ',' && !inButtonText) {
+          // Comma outside quotes separates buttons
+          if (currentButton.trim()) {
+            buttonDefinitions.push(currentButton.trim());
+          }
+          currentButton = '';
+        } else {
+          // Regular character, add to current button
+          currentButton += char;
+          
+          // Track quotes to handle commas inside button text
+          if (char === '"' || char === "'") {
+            inButtonText = !inButtonText;
+          }
+        }
+      }
+      
+      // Add the last button if there is one
+      if (currentButton.trim()) {
+        buttonDefinitions.push(currentButton.trim());
+      }
+      
+      debugLog(`🔘 Parsed ${buttonDefinitions.length} button definitions`);
+      
+      // Process each button definition into button objects
+      const buttons = buttonDefinitions.map((buttonDef, index) => {
+        const parts = buttonDef.split('|').map(part => part.trim());
+        
+        // Create button object with text, value, and optional style
+        const buttonObj = {
+          text: parts[0],
+          value: parts[1] || `button_${index}`,
+          style: parts[2] || undefined // undefined will use default style
+        };
+        
+        // --- START EDIT: Identify if this is a link button based on value ---
+        // For consistent behavior with the generator, add a type property that
+        // identifies if this is a link button or an action button
+        if (buttonObj.value && typeof buttonObj.value === 'string' && 
+            (buttonObj.value.startsWith('http://') || buttonObj.value.startsWith('https://'))) {
+          debugLog(`🔘 Button ${index + 1}: Link button ${buttonObj.text} → ${buttonObj.value}`);
+          buttonObj.type = 'link';
+        } else {
+          debugLog(`🔘 Button ${index + 1}: Action button ${buttonObj.text} → ${buttonObj.value}`);
+          buttonObj.type = 'action';
+        }
+        // --- END EDIT ---
+        
+        debugLog(`🔘 Button ${index + 1}: ${JSON.stringify(buttonObj)}`);
+        return buttonObj;
+      });
+      
+      return { buttons };
+    }
+    
+    // If no valid button format found, return empty buttons array
+    return { buttons: [] };
   }
   
   // Default case, just return the content as text parameter
