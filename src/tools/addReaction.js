@@ -1,6 +1,8 @@
 // Tool for adding emoji reactions to messages
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
+const logger = require('../toolUtils/logger.js');
+
 
 // All available emoji names
 const AVAILABLE_EMOJIS = [
@@ -122,7 +124,7 @@ async function addReaction(args, threadState) {
           });
         } else {
           // For other errors, log but continue with other emojis
-          console.log(`Error adding reaction ${emojiName}: ${emojiError.message}`);
+          logger.warn(`Error adding reaction ${emojiName}: ${emojiError.message}`);
           results.push({
             emoji: emojiName,
             ok: false,

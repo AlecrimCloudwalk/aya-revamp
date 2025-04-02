@@ -1,6 +1,8 @@
 // Retrieves and formats thread history from Slack
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
+const logger = require('../toolUtils/logger.js');
+
 
 /**
  * Tool to retrieve the history of a thread for context rebuilding
@@ -13,7 +15,7 @@ async function getThreadHistory(args = {}, threadContext) {
   try {
     // Handle potential nested parameters structure 
     if (args.parameters && !args.limit) {
-      console.log('Detected nested parameters structure, extracting inner parameters');
+      logger.info('Detected nested parameters structure, extracting inner parameters');
       args = args.parameters;
     }
     
@@ -36,7 +38,7 @@ async function getThreadHistory(args = {}, threadContext) {
     const filteredKeys = Object.keys(args)
       .filter(key => !validFields.includes(key) && key !== 'reasoning');
     if (filteredKeys.length > 0) {
-      console.log(`Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
+      logger.info(`Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
     }
     
     // Use filtered args from now on

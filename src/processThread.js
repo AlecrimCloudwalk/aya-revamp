@@ -1,5 +1,7 @@
 // Wrapper for processing tools consistently across the application
 const { executeTool } = require('./orchestrator');
+const logger = require('./toolUtils/logger.js');
+
 
 /**
  * Processes a tool call with consistent logging and tracking
@@ -13,7 +15,7 @@ async function processTool(toolName, toolArgs, threadState) {
   // Strip any functions. prefix if it exists
   const cleanToolName = toolName.replace(/^functions\./, '');
   
-  console.log(`Processing tool: ${cleanToolName}`);
+  logger.info(`Processing tool: ${cleanToolName}`);
   
   // Use our standardized executeTool function
   try {

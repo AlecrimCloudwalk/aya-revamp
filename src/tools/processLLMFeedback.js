@@ -5,6 +5,7 @@
  * and provides a summary to the LLM. This helps the LLM understand recent actions
  * and provide appropriate responses.
  */
+const logger = require('../toolUtils/logger');
 
 /**
  * Process feedback stored in the thread state
@@ -15,7 +16,7 @@
 async function processLLMFeedback(args, threadState) {
   try {
     const startTime = Date.now();
-    console.log('🔄 Processing LLM feedback');
+    logger.detail('🔄 Processing LLM feedback');
     
     // Default return structure
     const result = {
@@ -32,7 +33,7 @@ async function processLLMFeedback(args, threadState) {
     }
     
     // Log what we found
-    console.log(`📋 Found ${threadState.llmFeedback.length} feedback items in thread state:`);
+    logger.info(`📋 Found ${threadState.llmFeedback.length} feedback items in thread state:`);
     
     // Count feedback by type
     let buttonSelections = 0;
@@ -40,7 +41,7 @@ async function processLLMFeedback(args, threadState) {
     
     // Process each feedback item
     threadState.llmFeedback.forEach((item, index) => {
-      console.log(`- Feedback ${index + 1}: Type=${item.type}, Message="${item.message}"`);
+      logger.detail(`- Feedback ${index + 1}: Type=${item.type}, Message="${item.message}"`);
       
       // Count button selections
       if (item.type === 'buttonSelected') {
@@ -58,11 +59,11 @@ async function processLLMFeedback(args, threadState) {
     result.buttonSelections = buttonSelections;
     
     // Log what we found
-    console.log(`📲 Found ${buttonSelections} button selection feedback items`);
+    logger.info(`📲 Found ${buttonSelections} button selection feedback items`);
     
     // Add detailed information about latest button selection
     if (latestButtonFeedback) {
-      console.log(`Most recent button selection: "${latestButtonFeedback.message}"`);
+      logger.detail(`Most recent button selection: "${latestButtonFeedback.message}"`);
       result.latestButtonSelection = {
         text: latestButtonFeedback.data?.buttonText || 'Unknown button',
         value: latestButtonFeedback.data?.buttonValue || 'unknown',
@@ -76,7 +77,7 @@ async function processLLMFeedback(args, threadState) {
     
     return result;
   } catch (error) {
-    console.error(`Error processing LLM feedback: ${error.message}`);
+    logger.error(`Error processing LLM feedback: ${error.message}`);
     return {
       success: false,
       error: error.message,

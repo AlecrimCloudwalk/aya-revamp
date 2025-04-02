@@ -9,6 +9,8 @@ const { logError } = require('./errors.js');
 const { setSlackClient } = require('./slackClient.js');
 // Add tools import to verify they're loaded properly
 const tools = require('./tools/index.js');
+const logger = require('./toolUtils/logger.js');
+
 
 // Reduce logging noise
 const isVerboseLogging = process.env.VERBOSE_LOGGING === 'true';
@@ -57,11 +59,11 @@ function verifyTools() {
   });
 
   if (missingTools.length > 0) {
-    console.error('❌ ERROR: Critical tools are missing:', missingTools.join(', '));
+    logger.error('❌ ERROR: Critical tools are missing:', missingTools.join(', '));
     throw new Error(`Missing required tools: ${missingTools.join(', ')}`);
   }
 
-  console.log('✅ All required tools verified successfully');
+  logger.info('✅ All required tools verified successfully');
 }
 
 // Set up Slack event listeners
@@ -74,7 +76,7 @@ setupSlackEvents(app);
     verifyTools();
     
     await app.start();
-    console.log('⚡️ Slack bot is running!');
+    logger.info('⚡️ Slack bot is running!');
   } catch (error) {
     logError('Failed to start Slack bot', error);
     process.exit(1);

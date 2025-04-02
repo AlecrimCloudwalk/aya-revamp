@@ -4,6 +4,7 @@
  */
 
 const { getSlackClient } = require('./slackClient');
+const logger = require('./toolUtils/logger');
 
 /**
  * Updates a button message in Slack to reflect a selection
@@ -26,8 +27,12 @@ async function updateButtonMessage(payload, threadContext) {
         const responseUrl = payload.response_url;
         const userId = payload.user.id;
         
-        console.log(`Updating button message - selected: ${selectedValue}`);
-        console.log(`Button details - ActionId: ${clickedActionId}, MessageTs: ${messageTs}, Channel: ${channelId}`);
+        logger.info(`Updating button message - selected: ${selectedValue}`);
+        logger.detail(`Button details:`, {
+            action_id: clickedActionId,
+            message_ts: messageTs,
+            channel: channelId
+        });
         
         // CRITICAL FIX: The original message we want to update should be available directly in the payload
         // This is the message that contains the buttons, not the one we need to fetch
@@ -35,11 +40,11 @@ async function updateButtonMessage(payload, threadContext) {
         
         // Check if the payload directly contains the message (most reliable)
         if (payload.message) {
-            console.log(`Using message directly from payload`);
+            logger.info(`Using message directly from payload`);
             originalMessage = payload.message;
         } else {
             // Fallback to fetching the message - MAKE SURE we get the right one
-            console.log(`Message not in payload, fetching from Slack API with ts=${messageTs}`);
+            logger.warn(`Message not in payload, fetching from Slack API with ts=${messageTs}`);
             const slackClient = getSlackClient();
             const originalMessageResult = await slackClient.conversations.history({
                 channel: channelId,
@@ -55,14 +60,8 @@ async function updateButtonMessage(payload, threadContext) {
             originalMessage = originalMessageResult.messages[0];
         }
         
-        // Enhanced logging for the original message structure
-        console.log(`Original message structure:`, JSON.stringify({
-            has_blocks: !!originalMessage.blocks,
-            blocks_count: originalMessage.blocks?.length || 0,
-            has_attachments: !!originalMessage.attachments,
-            attachments_count: originalMessage.attachments?.length || 0,
-            thread_ts: originalMessage.thread_ts
-        }, null, 2));
+        // Log the message structure
+        logger.logMessageStructure(originalMessage, 'ORIGINAL_MESSAGE');
         
         // Check if this is actually our message with buttons
         const hasActionButtons = (
@@ -73,9 +72,8 @@ async function updateButtonMessage(payload, threadContext) {
         );
         
         if (!hasActionButtons) {
-            console.error(`⚠️ CRITICAL ERROR: The message we're trying to update doesn't contain action buttons.`);
-            console.log(`This is likely because we're looking at the wrong message. Here's the actual structure:`);
-            console.log(JSON.stringify(originalMessage, null, 2));
+            logger.error(`The message we're trying to update doesn't contain action buttons.`);
+            logger.debug(`Full message structure:`, originalMessage);
             return {
                 updated: false,
                 error: "The message doesn't contain action buttons",
@@ -127,7 +125,7 @@ async function updateButtonMessage(payload, threadContext) {
         
         // Case 1: If message has direct blocks, update them
         if (originalMessage.blocks && originalMessage.blocks.length > 0) {
-            console.log(`Processing direct blocks (${originalMessage.blocks.length})`);
+            logger.detail(`Processing direct blocks (${originalMessage.blocks.length})`);
             
             const updatedBlocks = originalMessage.blocks.map(block => {
                 if (block.type === 'actions') {
@@ -142,7 +140,7 @@ async function updateButtonMessage(payload, threadContext) {
         
         // Case 2: If message has attachments with blocks, update those
         if (originalMessage.attachments && originalMessage.attachments.length > 0) {
-            console.log(`Processing attachments (${originalMessage.attachments.length})`);
+            logger.detail(`Processing attachments (${originalMessage.attachments.length})`);
             
             const updatedAttachments = originalMessage.attachments.map(attachment => {
                 if (attachment.blocks && attachment.blocks.length > 0) {
@@ -167,29 +165,28 @@ async function updateButtonMessage(payload, threadContext) {
         
         // Log warning if no actions block found
         if (!actionsBlockFound) {
-            console.warn(`⚠️ No actions block found in the message - button update may not work correctly`);
-            console.log(`Full message structure for debugging:`, JSON.stringify(originalMessage, null, 2));
+            logger.warn(`No actions block found in the message - button update may not work correctly`);
+            logger.debug(`Full message structure for debugging:`, originalMessage);
         }
         
-        console.log(`Sending update with params:`, JSON.stringify({
+        logger.detail(`Sending update with params:`, {
             channel: updateParams.channel,
             ts: updateParams.ts,
             has_blocks: !!updateParams.blocks,
-            blocks_count: updateParams.blocks?.length || 0,
+            block_count: updateParams.blocks?.length || 0,
             has_attachments: !!updateParams.attachments,
-            attachments_count: updateParams.attachments?.length || 0
-        }, null, 2));
+            attachment_count: updateParams.attachments?.length || 0
+        });
         
         // Update the message
         const slackClient = getSlackClient();
         const updateResult = await slackClient.chat.update(updateParams);
         
         // Log result
-        console.log(`Update result: ${updateResult.ok ? 'SUCCESS' : 'FAILED'}`);
-        if (!updateResult.ok) {
-            console.error(`Update error: ${updateResult.error}`);
+        if (updateResult.ok) {
+            logger.info(`Successfully updated message with selection`);
         } else {
-            console.log(`Successfully updated message with selection`);
+            logger.error(`Failed to update message: ${updateResult.error}`);
         }
         
         // Return result
@@ -203,7 +200,7 @@ async function updateButtonMessage(payload, threadContext) {
             error: updateResult.ok ? null : updateResult.error
         };
     } catch (error) {
-        console.error('Error updating button message:', error);
+        logger.error('Error updating button message:', error);
         
         // Return error result
         return {

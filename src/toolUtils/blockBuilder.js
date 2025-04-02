@@ -6,14 +6,16 @@
  */
 
 const { getSlackClient } = require('../slackClient.js');
+const logger = require('./logger.js');
+
 
 // Debug logging function
 function debugLog(message, data) {
   if (process.env.DEBUG === 'true' || process.env.DEBUG_SLACK === 'true') {
     if (data) {
-      console.log(message, data);
+      logger.debug(message, data);
     } else {
-      console.log(message);
+      logger.debug(message);
     }
   }
 }
@@ -33,7 +35,7 @@ async function getUserName(userId) {
     try {
       slack = getSlackClient();
     } catch (error) {
-      console.error(`Error getting Slack client: ${error.message}`);
+      logger.error(`Error getting Slack client: ${error.message}`);
       return `@User`;
     }
     
@@ -59,15 +61,15 @@ async function getUserName(userId) {
           return `@User`;
         }
       } else {
-        console.warn(`No user data returned for ${userId}`);
+        logger.warn(`No user data returned for ${userId}`);
         return `@User`;
       }
     } catch (apiError) {
-      console.error(`API error fetching user info for ${userId}: ${apiError.message}`);
+      logger.error(`API error fetching user info for ${userId}: ${apiError.message}`);
       return `@User`;
     }
   } catch (error) {
-    console.error(`Error in getUserName for ${userId}: ${error.message}`);
+    logger.error(`Error in getUserName for ${userId}: ${error.message}`);
     return `@User`;
   }
 }
@@ -213,7 +215,7 @@ const blockGenerators = {
       
       // For synchronous processing, we'll replace with placeholder text first
       headerText = headerText.replace(/<@([A-Z0-9]+)>/g, '@UserName');
-      console.log(`⚠️ Converting ${userIds.length} user mentions in header to plain text usernames`);
+      logger.warn(`⚠️ Converting ${userIds.length} user mentions in header to plain text usernames`);
       
       // Since we can't use async/await directly in this synchronous function,
       // we'll return the basic block now, but queue up the user name lookups
@@ -242,10 +244,10 @@ const blockGenerators = {
             
             // Update the block with the new text
             headerBlock.text.text = updatedText;
-            console.log('✅ Updated header with actual usernames');
+            logger.info('✅ Updated header with actual usernames');
           })
           .catch(error => {
-            console.error('Error updating usernames in header:', error);
+            logger.error('Error updating usernames in header:', error);
           });
       }
       
@@ -326,7 +328,7 @@ const blockGenerators = {
               alt_text: imgAlt
             });
           } catch (imgError) {
-            console.error(`🔴 Error adding image #${index + 1}:`, imgError);
+            logger.error(`🔴 Error adding image #${index + 1}:`, imgError);
           }
         });
       } else {
@@ -342,7 +344,7 @@ const blockGenerators = {
       debugLog('🖼️ Final context block:', JSON.stringify(block, null, 2));
       return block;
     } catch (error) {
-      console.error('🔴 Error in contextWithImages generator:', error);
+      logger.error('🔴 Error in contextWithImages generator:', error);
       // Fallback to simple context
       return {
         type: 'context',
@@ -375,7 +377,7 @@ const blockGenerators = {
       
       return section;
     } catch (error) {
-      console.error('Error in sectionWithUsers generator:', error);
+      logger.error('Error in sectionWithUsers generator:', error);
       // Fallback to simple section
       return {
         type: 'section',
@@ -424,7 +426,7 @@ const blockGenerators = {
       
       // Log found userIds for debugging
       debugLog(`👥 Processing ${userIds.length} user IDs: ${userIds.join(', ')}`);
-      console.log(`👥 User IDs to process: ${userIds.join(', ')}`);
+      logger.info(`👥 User IDs to process: ${userIds.join(', ')}`);
       
       // Extract description text (content after the pipe character)
       let descriptionText = '';
@@ -459,14 +461,14 @@ const blockGenerators = {
       // Get Slack client for fetching user info
       try {
         const slack = getSlackClient();
-        console.log('✅ Successfully got Slack client');
+        logger.info('✅ Successfully got Slack client');
         
         // Use Promise.all to fetch all user info in parallel with a timeout
         const userInfoPromises = userIds.map(userId => {
           // Create a promise that resolves after 3 seconds with a fallback
           const timeoutPromise = new Promise(resolve => {
             setTimeout(() => {
-              console.log(`⏱️ Timeout for user ${userId}, using fallback avatar`);
+              logger.info(`⏱️ Timeout for user ${userId}, using fallback avatar`);
               resolve({
                 userId,
                 name: userId,
@@ -476,13 +478,13 @@ const blockGenerators = {
           });
           
           // Create the fetch promise
-          console.log(`⏳ Starting API call for user ${userId} at ${new Date().toISOString()}`);
+          logger.info(`⏳ Starting API call for user ${userId} at ${new Date().toISOString()}`);
           const startTime = Date.now();
           
           const fetchPromise = slack.users.info({ user: userId })
             .then(result => {
               const elapsed = Date.now() - startTime;
-              console.log(`⌛ API call for user ${userId} took ${elapsed}ms`);
+              logger.info(`⌛ API call for user ${userId} took ${elapsed}ms`);
               
               if (result && result.ok && result.user && result.user.profile) {
                 const imageUrl = result.user.profile.image_72 || 
@@ -490,7 +492,7 @@ const blockGenerators = {
                                 `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`;
                 const name = result.user.profile.display_name || result.user.real_name || userId;
                 
-                console.log(`✅ Successfully fetched avatar for ${name} (${userId}): ${imageUrl}`);
+                logger.info(`✅ Successfully fetched avatar for ${name} (${userId}): ${imageUrl}`);
                 
                 return {
                   userId,
@@ -498,7 +500,7 @@ const blockGenerators = {
                   imageUrl
                 };
               } else {
-                console.log(`⚠️ Slack API returned ok but no user data for ${userId}`);
+                logger.warn(`⚠️ Slack API returned ok but no user data for ${userId}`);
                 return {
                   userId,
                   name: userId,
@@ -508,11 +510,11 @@ const blockGenerators = {
             })
             .catch(error => {
               const elapsed = Date.now() - startTime;
-              console.error(`❌ Error fetching user info for ${userId} after ${elapsed}ms:`, error);
-              console.error(`Error details: ${error.message}`);
+              logger.error(`❌ Error fetching user info for ${userId} after ${elapsed}ms:`, error);
+              logger.error(`Error details: ${error.message}`);
               
               if (error.data) {
-                console.error(`API error data:`, JSON.stringify(error.data));
+                logger.error(`API error data:`, JSON.stringify(error.data));
               }
               
               return {
@@ -563,18 +565,18 @@ const blockGenerators = {
         });
         
         // Log the final block for debugging
-        console.log('📋 Final userContext block structure:');
-        console.log(JSON.stringify(contextBlock, null, 2));
+        logger.info('📋 Final userContext block structure:');
+        logger.detail('📋 Final userContext block structure:', contextBlock);
         
         // Ensure the block has a type field
         if (!contextBlock.type) {
-          console.error('⚠️ userContext block missing type field, adding it');
+          logger.error('⚠️ userContext block missing type field, adding it');
           contextBlock.type = 'context';
         }
         
         // Check that elements are added
         if (!contextBlock.elements || contextBlock.elements.length === 0) {
-          console.error('⚠️ userContext block has no elements, adding fallback text');
+          logger.error('⚠️ userContext block has no elements, adding fallback text');
           contextBlock.elements = [{
             type: 'mrkdwn',
             text: 'User context (Error: No elements found)'
@@ -583,7 +585,7 @@ const blockGenerators = {
         
         return contextBlock;
       } catch (error) {
-        console.error('Error fetching user info:', error);
+        logger.error('Error fetching user info:', error);
         
         // Fallback to placeholder avatars if we couldn't get the Slack client
         for (let i = 0; i < avatarsToShow; i++) {
@@ -617,18 +619,18 @@ const blockGenerators = {
         });
         
         // Log the final block for debugging
-        console.log('📋 Final userContext block structure (fallback):');
-        console.log(JSON.stringify(contextBlock, null, 2));
+        logger.info('📋 Final userContext block structure (fallback):');
+        logger.detail('📋 Final userContext block structure (fallback):', contextBlock);
         
         // Ensure the block has a type field
         if (!contextBlock.type) {
-          console.error('⚠️ userContext block missing type field, adding it');
+          logger.error('⚠️ userContext block missing type field, adding it');
           contextBlock.type = 'context';
         }
         
         // Check that elements are added
         if (!contextBlock.elements || contextBlock.elements.length === 0) {
-          console.error('⚠️ userContext block has no elements, adding fallback text');
+          logger.error('⚠️ userContext block has no elements, adding fallback text');
           contextBlock.elements = [{
             type: 'mrkdwn',
             text: 'User context (Error: No elements found)'
@@ -638,7 +640,7 @@ const blockGenerators = {
         return contextBlock;
       }
     } catch (error) {
-      console.error('Error in userContext generator:', error);
+      logger.error('Error in userContext generator:', error);
       // Fallback to simple context
       return {
         type: 'context',
@@ -669,7 +671,7 @@ const blockGenerators = {
         if (btn.style === 'primary' || btn.style === 'danger') {
           style = btn.style;
         } else if (btn.style && btn.style !== 'default') {
-          console.log(`⚠️ Invalid button style "${btn.style}" for button "${btn.text}", using default`);
+          logger.warn(`⚠️ Invalid button style "${btn.style}" for button "${btn.text}", using default`);
         }
         
         // --- START EDIT: Check if value is a URL to create a link button ---
@@ -677,7 +679,7 @@ const blockGenerators = {
         
         // If button value starts with http:// or https://, create a link button
         if (typeof value === 'string' && (value.startsWith('http://') || value.startsWith('https://'))) {
-          console.log(`Creating link button: ${btn.text} → ${value}`);
+          logger.info(`Creating link button: ${btn.text} → ${value}`);
           return {
             type: 'button',
             text: {
@@ -1132,14 +1134,14 @@ function cleanForSlackApi(obj) {
  * @returns {Object|Promise<Object>} - The parsed message structure with blocks and attachments
  */
 async function parseMessage(message) {
-  console.log(`🔄 Parsing message with block syntax`);
+  logger.detail(`🔄 Parsing message with block syntax`);
   
   // Check for standalone usercontext syntax (not inside a block)
   const userContextRegex = /\(usercontext\)(.*?)(?:\|(.*?))?(?:\(!usercontext\))/g;
   const userContextMatches = Array.from(message.matchAll(userContextRegex));
   
   if (userContextMatches.length > 0 && !message.includes('#')) {
-    console.log(`👥 Found ${userContextMatches.length} standalone usercontext tags in message`);
+    logger.info(`👥 Found ${userContextMatches.length} standalone usercontext tags in message`);
     
     // We'll create one or more context blocks with user avatars
     const contextBlocks = [];
@@ -1149,14 +1151,14 @@ async function parseMessage(message) {
     let slack = null;
     try {
       slack = getSlackClient();
-      console.log('✅ Successfully got Slack client for userContext processing');
+      logger.info('✅ Successfully got Slack client for userContext processing');
     } catch (slackError) {
-      console.error('Error getting Slack client:', slackError);
+      logger.error('Error getting Slack client:', slackError);
     }
     
     // Process each usercontext match
     for (const match of userContextMatches) {
-      console.log('🔎 Processing usercontext match:', match[0]);
+      logger.info('🔎 Processing usercontext match:', match[0]);
       
       // Extract and process user IDs
       let userIdsRaw = match[1].trim();
@@ -1181,7 +1183,7 @@ async function parseMessage(message) {
       // Extract description
       const description = match[2] ? match[2].trim() : '';
       
-      console.log(`👥 Processing ${userIds.length} user IDs with description: "${description}"`);
+      logger.info(`👥 Processing ${userIds.length} user IDs with description: "${description}"`);
       
       // Determine if we need mrkdwn or plain_text based on content
       const needsMrkdwn = description.match(/[*_~`>]|\:[a-z0-9_\-\+]+\:|<@|<#|<http/);
@@ -1208,7 +1210,7 @@ async function parseMessage(message) {
             // Create a promise that resolves after 3 seconds with a fallback
             const timeoutPromise = new Promise(resolve => {
               setTimeout(() => {
-                console.log(`⏱️ Timeout for user ${userId}, using fallback avatar`);
+                logger.info(`⏱️ Timeout for user ${userId}, using fallback avatar`);
                 resolve({
                   userId,
                   name: userId,
@@ -1218,13 +1220,13 @@ async function parseMessage(message) {
             });
             
             // Create the fetch promise
-            console.log(`⏳ Starting API call for user ${userId} at ${new Date().toISOString()}`);
+            logger.info(`⏳ Starting API call for user ${userId} at ${new Date().toISOString()}`);
             const startTime = Date.now();
             
             const fetchPromise = slack.users.info({ user: userId })
               .then(result => {
                 const elapsed = Date.now() - startTime;
-                console.log(`⌛ API call for user ${userId} took ${elapsed}ms`);
+                logger.info(`⌛ API call for user ${userId} took ${elapsed}ms`);
                 
                 if (result && result.ok && result.user && result.user.profile) {
                   const imageUrl = result.user.profile.image_72 || 
@@ -1232,7 +1234,7 @@ async function parseMessage(message) {
                                   `https://ca.slack-edge.com/${workspaceId}-${userId}-4c812ee43716-72`;
                   const name = result.user.profile.display_name || result.user.real_name || userId;
                   
-                  console.log(`✅ Successfully fetched avatar for ${name} (${userId}): ${imageUrl}`);
+                  logger.info(`✅ Successfully fetched avatar for ${name} (${userId}): ${imageUrl}`);
                   
                   return {
                     userId,
@@ -1240,7 +1242,7 @@ async function parseMessage(message) {
                     imageUrl
                   };
                 } else {
-                  console.log(`⚠️ Slack API returned ok but no user data for ${userId}`);
+                  logger.warn(`⚠️ Slack API returned ok but no user data for ${userId}`);
                   return {
                     userId,
                     name: userId,
@@ -1250,11 +1252,11 @@ async function parseMessage(message) {
               })
               .catch(error => {
                 const elapsed = Date.now() - startTime;
-                console.error(`❌ Error fetching user info for ${userId} after ${elapsed}ms:`, error);
-                console.error(`Error details: ${error.message}`);
+                logger.error(`❌ Error fetching user info for ${userId} after ${elapsed}ms:`, error);
+                logger.error(`Error details: ${error.message}`);
                 
                 if (error.data) {
-                  console.error(`API error data:`, JSON.stringify(error.data));
+                  logger.error(`API error data:`, JSON.stringify(error.data));
                 }
                 
                 return {
@@ -1305,7 +1307,7 @@ async function parseMessage(message) {
           });
           
         } catch (error) {
-          console.error('Error fetching user avatars:', error);
+          logger.error('Error fetching user avatars:', error);
           
           // Fallback to placeholder avatars
           for (let i = 0; i < avatarsToShow; i++) {
@@ -1387,7 +1389,7 @@ async function parseMessage(message) {
   
   // If no blocks found, treat as plain text but put in an attachment with colored bar
   if (matches.length === 0) {
-    console.log('📦 No block syntax found, creating attachment with section for plain text');
+    logger.info('📦 No block syntax found, creating attachment with section for plain text');
     return { 
       attachments: [{
         color: defaultAttachmentColor, // Use default color for consistent experience
@@ -1402,7 +1404,7 @@ async function parseMessage(message) {
     };
   }
   
-  console.log(`🔢 Found ${matches.length} blocks to process`);
+  logger.info(`🔢 Found ${matches.length} blocks to process`);
   
   // Process each block
   const blocks = [];
@@ -1424,7 +1426,7 @@ async function parseMessage(message) {
 
     const content = match[2].trim();
     
-    console.log(`📦 Processing ${actualBlockType} block: ${content.substring(0, 40)}${content.length > 40 ? '...' : ''}`);
+    logger.info(`📦 Processing ${actualBlockType} block: ${content.substring(0, 40)}${content.length > 40 ? '...' : ''}`);
     
     // Parse parameters for this block
     const params = parseParams(actualBlockType, content);
@@ -1440,7 +1442,7 @@ async function parseMessage(message) {
     
     // Validate parameters
     if (!blockDefinitions[blockTypeToUse]) {
-      console.error(`❌ Unknown block type: ${blockTypeToUse}`);
+      logger.error(`❌ Unknown block type: ${blockTypeToUse}`);
       continue;
     }
     
@@ -1456,7 +1458,7 @@ async function parseMessage(message) {
     try {
       const generator = blockGenerators[blockTypeToUse];
       if (!generator) {
-        console.error(`❌ No generator for block type: ${blockTypeToUse}`);
+        logger.error(`❌ No generator for block type: ${blockTypeToUse}`);
         continue;
       }
       
@@ -1465,19 +1467,19 @@ async function parseMessage(message) {
       
       // Ensure the generated block has a type field
       if (!generated) {
-        console.error(`❌ Block generator for ${blockTypeToUse} returned empty result`);
+        logger.error(`❌ Block generator for ${blockTypeToUse} returned empty result`);
         continue;
       }
       
       // Additional debugging for header blocks to check for newline issues
       if (generated.type === 'header') {
-        console.log(`🔍 Header block text before sending: "${generated.text.text}"`);
+        logger.detail(`🔍 Header block text before sending: "${generated.text.text}"`);
         // Ensure we don't have any literal \n characters in header text
         if (generated.text && typeof generated.text.text === 'string') {
           if (generated.text.text.includes('\\n') || generated.text.text.includes('\n')) {
-            console.log(`⚠️ Found newlines in header text, removing...`);
+            logger.warn(`⚠️ Found newlines in header text, removing...`);
             generated.text.text = generated.text.text.replace(/\\n/g, ' ').replace(/\n/g, ' ').trim();
-            console.log(`✅ Cleaned header text: "${generated.text.text}"`);
+            logger.info(`✅ Cleaned header text: "${generated.text.text}"`);
           }
         }
       }
@@ -1497,7 +1499,7 @@ async function parseMessage(message) {
       } else {
         // Ensure the block has a type field
         if (!generated.type) {
-          console.error(`❌ Block generator for ${blockTypeToUse} returned block without type field:`, JSON.stringify(generated));
+          logger.error(`❌ Block generator for ${blockTypeToUse} returned block without type field:`, JSON.stringify(generated));
           continue;
         }
         
@@ -1522,7 +1524,7 @@ async function parseMessage(message) {
         debugLog(`📊 Is attachment wrapped: ${isAttachment}`);
       }
     } catch (error) {
-      console.error(`❌ Error generating block: ${blockTypeToUse}`, error);
+      logger.error(`❌ Error generating block: ${blockTypeToUse}`, error);
     }
   }
   
@@ -1536,8 +1538,8 @@ async function parseMessage(message) {
   }
   
   // Add debug logging of the final message structure
-  console.log('🏁 Final message structure from parseMessage:');
-  console.log(JSON.stringify(result, null, 2));
+  logger.info('🏁 Final message structure from parseMessage:');
+  logger.detail('Message structure:', result);
   
   return result;
 }

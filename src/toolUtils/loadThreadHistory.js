@@ -7,6 +7,7 @@ const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
 const { getContextBuilder } = require('../contextBuilder.js');
 const { getTool } = require('../tools/index.js');
+const logger = require('./logger');
 
 /**
  * Extracts the thread timestamp and channel ID from a context object
@@ -65,7 +66,7 @@ function extractThreadInfo(threadContext) {
 async function initializeContextIfNeeded(threadId) {
     // Skip if threadId is not provided
     if (!threadId) {
-        console.log('No threadId provided for context initialization');
+        logger.warn('No threadId provided for context initialization');
         return;
     }
     
@@ -90,20 +91,20 @@ async function initializeContextIfNeeded(threadId) {
         const messages = contextBuilder.getThreadMessages(threadId);
         
         if (messages && messages.length > 0) {
-            console.log(`Context already initialized with ${messages.length} messages`);
+            logger.info(`Context already initialized with ${messages.length} messages`);
             return;
         }
         
         // We need both threadTs and channelId to load history
         if (!threadTs || !channelId) {
-            console.log('Cannot initialize context: Missing threadTs or channelId');
+            logger.warn('Cannot initialize context: Missing threadTs or channelId');
             return;
         }
         
         // Get thread history using the getThreadHistory tool
         const historyTool = getTool('getThreadHistory');
         if (historyTool) {
-            console.log(`Initializing context with thread history for ${threadTs}`);
+            logger.info(`Initializing context with thread history for ${threadTs}`);
             
             const historyResult = await historyTool({
                 threadTs: threadTs,
@@ -117,7 +118,7 @@ async function initializeContextIfNeeded(threadId) {
                 channelId: channelId
             });
             
-            console.log(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history for initialization`);
+            logger.info(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history for initialization`);
             
             // Record the tool execution
             contextBuilder.recordToolExecution(threadId, 'getThreadHistory', 
@@ -125,7 +126,7 @@ async function initializeContextIfNeeded(threadId) {
                 historyResult);
         }
     } catch (error) {
-        console.error('Error initializing context:', error);
+        logger.error('Error initializing context:', error);
         logError('Error initializing context', error, { threadId });
     }
 }

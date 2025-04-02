@@ -3,6 +3,8 @@ const { DEV_MODE } = require('./config.js');
 const { handleIncomingSlackMessage, handleButtonClick } = require('./orchestrator.js');
 const { logError } = require('./errors.js');
 const { getSlackClient } = require('./slackClient.js');
+const logger = require('./toolUtils/logger.js');
+
 
 /**
  * Checks if a message should be processed in development mode
@@ -22,7 +24,7 @@ function shouldProcessInDevMode(text) {
 function shouldRespondToMessage(contextObj) {
   // In dev mode, only process messages containing the test key
   if (DEV_MODE && !shouldProcessInDevMode(contextObj.text)) {
-    console.log("DEV MODE: Ignoring message without dev key !@#");
+    logger.info("DEV MODE: Ignoring message without dev key !@#");
     return false;
   }
   
@@ -157,7 +159,7 @@ function setupSlackEvents(app) {
             // Pass to handler
             await handleIncomingSlackMessage(contextObj);
         } catch (error) {
-            console.error(`Error handling message event: ${error.message}`);
+            logger.error(`Error handling message event: ${error.message}`);
             // Try to send an error message
             try {
                 await say({
@@ -165,7 +167,7 @@ function setupSlackEvents(app) {
                     thread_ts: event.thread_ts || event.ts
                 });
             } catch (sayError) {
-                console.error(`Error sending error response: ${sayError.message}`);
+                logger.error(`Error sending error response: ${sayError.message}`);
             }
         }
     });
@@ -189,14 +191,14 @@ function setupSlackEvents(app) {
             
             // Check if we should respond to this message (dev mode check)
             if (DEV_MODE && !shouldProcessInDevMode(contextObj.originalText)) {
-                console.log("DEV MODE: Ignoring mention without dev key !@#");
+                logger.info("DEV MODE: Ignoring mention without dev key !@#");
                 return;
             }
             
             // Pass to handler
             await handleIncomingSlackMessage(contextObj);
         } catch (error) {
-            console.error(`Error handling app_mention event: ${error.message}`);
+            logger.error(`Error handling app_mention event: ${error.message}`);
             // Try to send an error message
             try {
                 await say({
@@ -204,7 +206,7 @@ function setupSlackEvents(app) {
                     thread_ts: event.thread_ts || event.ts
                 });
             } catch (sayError) {
-                console.error(`Error sending error response: ${sayError.message}`);
+                logger.error(`Error sending error response: ${sayError.message}`);
             }
         }
     });
@@ -215,12 +217,12 @@ function setupSlackEvents(app) {
             // Acknowledge the request right away
             await ack();
             
-            console.log(`✅ Received button click event: action_id=${body.actions?.[0]?.action_id}, value=${body.actions?.[0]?.value}`);
+            logger.info(`✅ Received button click event: action_id=${body.actions?.[0]?.action_id}, value=${body.actions?.[0]?.value}`);
             
             // Pass to handler
             await handleButtonClick(body);
         } catch (error) {
-            console.error(`Error handling button click: ${error.message}`);
+            logger.error(`Error handling button click: ${error.message}`);
             // Try to send an error message
             try {
                 await respond({
@@ -228,14 +230,14 @@ function setupSlackEvents(app) {
                     replace_original: false
                 });
             } catch (respondError) {
-                console.error(`Error sending error response: ${respondError.message}`);
+                logger.error(`Error sending error response: ${respondError.message}`);
             }
         }
     });
     
     // Log errors
     app.error(async (error) => {
-        console.error(`Slack app error: ${error.message}`);
+        logger.error(`Slack app error: ${error.message}`);
         console.error(error);
     });
 }

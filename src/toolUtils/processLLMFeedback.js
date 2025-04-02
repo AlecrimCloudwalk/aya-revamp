@@ -1,5 +1,6 @@
 // Tool for processing LLM feedback for button clicks
 const { getSlackClient } = require('../slackClient.js');
+const logger = require('./logger');
 
 /**
  * Process LLM feedback in the thread state
@@ -11,13 +12,13 @@ const { getSlackClient } = require('../slackClient.js');
  */
 async function processLLMFeedback(args, threadState) {
   try {
-    console.log(`🔄 Processing LLM feedback`);
+    logger.info(`Processing LLM feedback`);
     
     // Get any stored LLM feedback from thread state
     const feedback = threadState.llmFeedback || [];
     
     if (feedback.length === 0) {
-      console.log(`No LLM feedback found in thread state`);
+      logger.info(`No LLM feedback found in thread state`);
       return {
         processed: false,
         message: "No feedback available to process",
@@ -31,22 +32,22 @@ async function processLLMFeedback(args, threadState) {
       threadState.selectedButton;
     
     // Log all feedback for debugging
-    console.log(`📋 Found ${feedback.length} feedback items in thread state:`);
+    logger.detail(`Found ${feedback.length} feedback items in thread state:`, feedback);
     feedback.forEach((item, index) => {
-      console.log(`- Feedback ${index+1}: Type=${item.type}, Message="${item.message}"`);
+      logger.detail(`Feedback ${index+1}: Type=${item.type}, Message="${item.message}"`);
     });
     
     // Process button selection feedback specifically
     const buttonFeedback = feedback.filter(item => item.type === 'buttonSelected');
     if (buttonFeedback.length > 0) {
-      console.log(`📲 Found ${buttonFeedback.length} button selection feedback items`);
+      logger.info(`Found ${buttonFeedback.length} button selection feedback items`);
       
       // Get the most recent button selection
       const latestButtonFeedback = buttonFeedback[buttonFeedback.length - 1];
-      console.log(`Most recent button selection: "${latestButtonFeedback.message}"`);
+      logger.detail(`Most recent button selection:`, latestButtonFeedback);
       
       if (selectedButton) {
-        console.log(`Selected button value: ${selectedButton.value}`);
+        logger.detail(`Selected button value:`, selectedButton);
       }
     }
     
@@ -76,7 +77,7 @@ async function processLLMFeedback(args, threadState) {
       guidance: guidance
     };
   } catch (error) {
-    console.error(`Error processing LLM feedback: ${error.message}`);
+    logger.error(`Error processing LLM feedback:`, error);
     
     return {
       processed: false,

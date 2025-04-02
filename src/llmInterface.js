@@ -7,6 +7,8 @@ const { getContextBuilder } = require('./contextBuilder.js');
 const { readFileSync } = require('fs');
 const path = require('path');
 const { callOpenAI } = require('./openai.js');
+const logger = require('./toolUtils/logger.js');
+
 
 // Shared constants for message formatting to avoid duplication
 const COMMUNICATION_STYLE = `- Be enthusiastic, cheerful, and energetic in your responses! 🎉
@@ -190,7 +192,7 @@ const systemPrompt = readFileSync(systemPromptPath, 'utf8');
  * @returns {Promise<{toolCalls: Array<{tool: string, parameters: Object}>}>}
  */
 async function getNextAction(threadId) {
-    console.log(`\n🧠 Getting next action from LLM for thread: ${threadId}`);
+    logger.info(`🧠 Getting next action from LLM for thread: ${threadId}`);
     
     // Get context builder
     const contextBuilder = getContextBuilder();
@@ -200,7 +202,7 @@ async function getNextAction(threadId) {
     
     // Get tools directly from the tools module - they are already in the correct format
     const availableTools = getToolsForLLM();
-    console.log(`Providing ${availableTools.length} tools to OpenAI API`);
+    logger.info(`Providing ${availableTools.length} tools to OpenAI API`);
     
     // Call OpenAI with the tools
     const response = await callOpenAI({
@@ -238,27 +240,27 @@ async function getNextAction(threadId) {
     
     // Check if the message has tool_calls
     if (message.tool_calls && message.tool_calls.length > 0) {
-        console.log(`LLM wants to call ${message.tool_calls.length} tools`);
+        logger.info(`LLM wants to call ${message.tool_calls.length} tools`);
         
         // Process each tool call
         toolCalls = message.tool_calls.map(toolCall => {
             try {
                 // Only process function-type tool calls
                 if (toolCall.type !== 'function') {
-                    console.log(`Skipping non-function tool call of type: ${toolCall.type}`);
+                    logger.info(`Skipping non-function tool call of type: ${toolCall.type}`);
                     return null;
                 }
                 
                 // Get the function name - this is the name of our tool
                 const functionName = toolCall.function.name;
-                console.log(`Processing function call: ${functionName}`);
+                logger.info(`Processing function call: ${functionName}`);
                 
                 // Parse the arguments (they come as a JSON string)
                 let args;
                 try {
                     args = JSON.parse(toolCall.function.arguments);
                 } catch (parseError) {
-                    console.log(`Error parsing tool arguments: ${parseError.message}`);
+                    logger.warn(`Error parsing tool arguments: ${parseError.message}`);
                     
                     // Try to clean up any formatting issues before parsing again
                     const cleanedArgs = toolCall.function.arguments
@@ -270,10 +272,10 @@ async function getNextAction(threadId) {
                     
                     try {
                         args = JSON.parse(cleanedArgs);
-                        console.log("Successfully parsed arguments after cleanup");
+                        logger.info("Successfully parsed arguments after cleanup");
                     } catch (secondError) {
                         // If still failing, create a minimal valid object with the required reasoning
-                        console.log(`Could not parse arguments even after cleanup: ${secondError.message}`);
+                        logger.warn(`Could not parse arguments even after cleanup: ${secondError.message}`);
                         args = {
                             __parsing_error: true,
                             __raw_arguments: toolCall.function.arguments,
@@ -292,14 +294,14 @@ async function getNextAction(threadId) {
                     reasoning: args.reasoning || "No explicit reasoning provided"
                 };
             } catch (error) {
-                console.log(`Error handling tool call: ${error.message}`);
+                logger.warn(`Error handling tool call: ${error.message}`);
                 // Return null for failed processing
                 return null;
             }
         }).filter(call => call !== null); // Remove any failed tool calls
     } else if (message.content && message.content.trim()) {
         // If no tool calls but there is content, create a postMessage tool call
-        console.log("No tool calls, creating implicit postMessage from content");
+        logger.info("No tool calls, creating implicit postMessage from content");
         toolCalls = [{
             tool: "postMessage",
             parameters: {
@@ -309,7 +311,7 @@ async function getNextAction(threadId) {
             reasoning: "Implicit response converted to postMessage"
         }];
     } else {
-        console.log("No content or tool calls in response");
+        logger.info("No content or tool calls in response");
         // Create a default tool call when no response is provided
         toolCalls = [{
             tool: "postMessage",
@@ -427,7 +429,7 @@ function formatMessagesForLLM(threadState) {
                    null;
     
     if (!threadTs) {
-      console.warn("No thread timestamp found for context building");
+      logger.warn("No thread timestamp found for context building");
       
       // Add at least the system message
       const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
@@ -442,7 +444,7 @@ function formatMessagesForLLM(threadState) {
     // Get context builder
     const contextBuilder = getContextBuilder();
     if (!contextBuilder) {
-      console.error("No context builder available - cannot build context");
+      logger.error("No context builder available - cannot build context");
       
       // Add at least the system message
       const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
@@ -454,7 +456,7 @@ function formatMessagesForLLM(threadState) {
       return messages;
     }
     
-    console.log(`Building context for thread ${threadTs} using ContextBuilder...`);
+    logger.info(`Building context for thread ${threadTs} using ContextBuilder...`);
     
     // Add system message first
     const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
@@ -470,7 +472,7 @@ function formatMessagesForLLM(threadState) {
     });
     
     if (!contextMessages || contextMessages.length === 0) {
-      console.warn(`No messages found for thread ${threadTs} in contextBuilder`);
+      logger.warn(`No messages found for thread ${threadTs} in contextBuilder`);
       return messages;
     }
     
@@ -502,16 +504,16 @@ function formatMessagesForLLM(threadState) {
     }
     
     // Debug: Log the context being sent to the LLM
-    console.log(`Generated ${contextMessages.length} context messages for LLM using ContextBuilder`);
+    logger.info(`Generated ${contextMessages.length} context messages for LLM using ContextBuilder`);
     contextMessages.forEach((msg, i) => {
       const preview = msg.content.length > 50 ? msg.content.substring(0, 50) + '...' : msg.content;
-      console.log(`[${i+1}] ${msg.role.toUpperCase()}: ${preview}`);
+      logger.info(`[${i+1}] ${msg.role.toUpperCase()}: ${preview}`);
     });
     
     // Combine with system message
     return [...messages, ...contextMessages];
   } catch (error) {
-    console.error(`Error formatting messages for LLM: ${error.message}`);
+    logger.error(`Error formatting messages for LLM: ${error.message}`);
     
     // Add at least the system message
     const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
@@ -591,7 +593,7 @@ function formatToolResponse(toolName, args, response) {
 async function parseToolCallFromResponse(llmResponse) {
   try {
     // Log the format we're detecting
-    console.log("Tool call format: Using native OpenAI tool_calls format");
+    logger.info("Tool call format: Using native OpenAI tool_calls format");
 
     // Get the assistant's message
     const assistantMessage = llmResponse.choices[0].message;
@@ -606,7 +608,7 @@ async function parseToolCallFromResponse(llmResponse) {
       // Extract each tool call
       for (const toolCall of assistantMessage.tool_calls) {
         const toolName = toolCall.function.name;
-        console.log(`Tool call from LLM: ${toolName} -> Converted to: ${toolName}`);
+        logger.info(`Tool call from LLM: ${toolName} -> Converted to: ${toolName}`);
         
         // Parse the function arguments
         let parameters;
@@ -625,7 +627,7 @@ async function parseToolCallFromResponse(llmResponse) {
               // If regex didn't find code blocks but they exist, use a simpler approach
               cleanedArgs = cleanedArgs.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
             }
-            console.log("Removed code block formatting from arguments");
+            logger.info("Removed code block formatting from arguments");
           }
           
           // Preprocess JSON to handle literal newlines and common issues before parsing
@@ -633,17 +635,17 @@ async function parseToolCallFromResponse(llmResponse) {
           
           // Log the preprocessed JSON for debugging
           if (process.env.DEBUG_JSON === 'true') {
-            console.log("Preprocessed JSON:", cleanedArgs);
+            logger.info("Preprocessed JSON:", cleanedArgs);
           }
           
           // Parse the cleaned JSON
           parameters = JSON.parse(cleanedArgs);
-          console.log("Successfully parsed tool parameters");
+          logger.info("Successfully parsed tool parameters");
         } catch (error) {
-          console.log(`Error parsing tool parameters: ${error.message}`);
+          logger.warn(`Error parsing tool parameters: ${error.message}`);
           
           // Attempt to recover using button extraction or text extraction
-          console.log("Attempting to recover from JSON parsing error");
+          logger.warn("Attempting to recover from JSON parsing error");
           
           // First, try to recover button information if this is a button message
           const buttonInfo = extractButtonInfo(toolCall.function.arguments);
@@ -670,7 +672,7 @@ async function parseToolCallFromResponse(llmResponse) {
               // Evaluate the string with proper JSON parsing to handle escapes
               extractedText = JSON.parse(`"${extractedText.replace(/"/g, '\\"')}"`);
             } catch (evalError) {
-              console.log(`Error evaluating extracted text: ${evalError.message}`);
+              logger.warn(`Error evaluating extracted text: ${evalError.message}`);
               // If evaluation fails, use the text as-is but still fix basic escapes
               extractedText = extractedText
                 .replace(/\\n/g, '\n')
@@ -680,16 +682,16 @@ async function parseToolCallFromResponse(llmResponse) {
             }
             
             parameters.text = extractedText;
-            console.log("Recovered text content from damaged JSON");
+            logger.info("Recovered text content from damaged JSON");
           } else {
             parameters.text = "I couldn't process that correctly. Please try again with a simpler request.";
-            console.log("Could not recover text content, using fallback message");
+            logger.info("Could not recover text content, using fallback message");
           }
           
           // Add buttons if we found them and this is a button message
           if (buttonInfo.buttons.length > 0 && toolName === 'createButtonMessage') {
             parameters.buttons = buttonInfo.buttons;
-            console.log(`Added ${buttonInfo.buttons.length} recovered buttons to parameters`);
+            logger.info(`Added ${buttonInfo.buttons.length} recovered buttons to parameters`);
           }
         }
         
@@ -705,7 +707,7 @@ async function parseToolCallFromResponse(llmResponse) {
         });
       }
       
-      console.log(`Successfully extracted ${toolCalls.length} tool calls from native format`);
+      logger.info(`Successfully extracted ${toolCalls.length} tool calls from native format`);
       
       // Final standardization: For each tool call, ensure reasoning is at the top level
       for (const toolCall of toolCalls) {
@@ -713,20 +715,20 @@ async function parseToolCallFromResponse(llmResponse) {
         if (!toolCall.reasoning && toolCall.parameters?.reasoning) {
           toolCall.reasoning = toolCall.parameters.reasoning;
           delete toolCall.parameters.reasoning;
-          console.log('Moved reasoning from parameters to top level');
+          logger.info('Moved reasoning from parameters to top level');
         }
         
         // If there's no reasoning at all, add a default
         if (!toolCall.reasoning) {
           toolCall.reasoning = "Auto-generated reasoning for tool call";
-          console.log('Added default reasoning at top level');
+          logger.info('Added default reasoning at top level');
         }
       }
       
       return { toolCalls };
     } else {
       // Handle case where tool calls aren't present
-      console.log("No tool_calls found in response. Checking for content to use as postMessage");
+      logger.info("No tool_calls found in response. Checking for content to use as postMessage");
       
       // Default to a postMessage with the content
       if (assistantMessage.content) {
@@ -736,7 +738,7 @@ async function parseToolCallFromResponse(llmResponse) {
         // Check if content looks like a JSON object that might be a tool call
         if ((content.startsWith('{') && content.endsWith('}')) || 
             (content.includes('```json') && content.includes('```'))) {
-          console.log("Detected possible tool call in message content");
+          logger.info("Detected possible tool call in message content");
           
           try {
             // Extract JSON if it's in a code block
@@ -756,7 +758,7 @@ async function parseToolCallFromResponse(llmResponse) {
             
             // Check if it has a tool field, which indicates it's trying to be a tool call
             if (parsedContent.tool) {
-              console.log(`Detected tool call in content: ${parsedContent.tool}`);
+              logger.info(`Detected tool call in content: ${parsedContent.tool}`);
               
               // Format as a proper tool call
               return {
@@ -768,7 +770,7 @@ async function parseToolCallFromResponse(llmResponse) {
               };
             }
           } catch (parseError) {
-            console.log(`Failed to parse content as tool call JSON: ${parseError.message}`);
+            logger.warn(`Failed to parse content as tool call JSON: ${parseError.message}`);
           }
         }
         
@@ -789,7 +791,7 @@ async function parseToolCallFromResponse(llmResponse) {
       }
     }
   } catch (error) {
-    console.log(`Error parsing tool call: ${error.message}`);
+    logger.warn(`Error parsing tool call: ${error.message}`);
     throw error;
   }
 }
@@ -861,10 +863,10 @@ function processJsonStringParameters(parameters, toolName) {
         case 'createButtonMessage':
             if (typeof processedParams.buttons === 'string') {
                 try {
-                    console.log('Parsing buttons parameter from JSON string to array');
+                    logger.info('Parsing buttons parameter from JSON string to array');
                     processedParams.buttons = JSON.parse(processedParams.buttons);
                 } catch (error) {
-                    console.log(`Error parsing buttons parameter: ${error.message}`);
+                    logger.warn(`Error parsing buttons parameter: ${error.message}`);
                 }
             }
             break;
@@ -873,10 +875,10 @@ function processJsonStringParameters(parameters, toolName) {
             // Handle fields parameter for updateMessage
             if (typeof processedParams.fields === 'string') {
                 try {
-                    console.log('Parsing fields parameter from JSON string to array');
+                    logger.info('Parsing fields parameter from JSON string to array');
                     processedParams.fields = JSON.parse(processedParams.fields);
                 } catch (error) {
-                    console.log(`Error parsing fields parameter: ${error.message}`);
+                    logger.warn(`Error parsing fields parameter: ${error.message}`);
                 }
             }
             break;
@@ -885,10 +887,10 @@ function processJsonStringParameters(parameters, toolName) {
             // Handle options parameter for createEmojiVote
             if (typeof processedParams.options === 'string') {
                 try {
-                    console.log('Parsing options parameter from JSON string to array');
+                    logger.info('Parsing options parameter from JSON string to array');
                     processedParams.options = JSON.parse(processedParams.options);
                 } catch (error) {
-                    console.log(`Error parsing options parameter: ${error.message}`);
+                    logger.warn(`Error parsing options parameter: ${error.message}`);
                 }
             }
             break;
@@ -911,22 +913,22 @@ function extractButtonInfo(jsonString) {
   };
   
   try {
-    console.log('🔍 Attempting to extract button information');
+    logger.debug('🔍 Attempting to extract button information');
     
     // First check for #buttons syntax in block builder format
     const buttonMatch = jsonString.match(/#buttons:\s*\[(.*?)\]/s);
     if (buttonMatch) {
-      console.log("FOUND BUTTON DEFINITION IN TEXT: ", buttonMatch[0]);
+      logger.info("FOUND BUTTON DEFINITION IN TEXT: ", buttonMatch[0]);
       const buttonContent = buttonMatch[1];
       
       // Parse button content into button objects
       try {
         const buttonDefinitions = buttonContent.split(',').map(btn => btn.trim());
-        console.log(`📋 Button definitions found (${buttonDefinitions.length}):`, buttonDefinitions);
+        logger.info(`📋 Button definitions found (${buttonDefinitions.length}):`, buttonDefinitions);
         
         result.buttons = buttonDefinitions.map((buttonDef, index) => {
           const parts = buttonDef.split('|').map(part => part.trim());
-          console.log(`🔘 Button ${index + 1} parts:`, parts);
+          logger.info(`🔘 Button ${index + 1} parts:`, parts);
           
           return {
             text: parts[0],
@@ -934,10 +936,10 @@ function extractButtonInfo(jsonString) {
             style: parts[2] || undefined
           };
         });
-        console.log(`✅ Parsed ${result.buttons.length} buttons from #buttons syntax`);
-        console.log(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
+        logger.info(`✅ Parsed ${result.buttons.length} buttons from #buttons syntax`);
+        logger.info(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
       } catch (btnError) {
-        console.log(`❌ Error parsing button definitions: ${btnError.message}`);
+        logger.warn(`❌ Error parsing button definitions: ${btnError.message}`);
       }
       
       return result;
@@ -946,13 +948,13 @@ function extractButtonInfo(jsonString) {
     // Then check for "actions" array in the raw JSON (Slack legacy format)
     const actionsMatch = jsonString.match(/"actions"\s*:\s*\[([\s\S]*?)\]/);
     if (actionsMatch) {
-      console.log("FOUND ACTIONS ARRAY IN JSON");
+      logger.info("FOUND ACTIONS ARRAY IN JSON");
       try {
         const actionsText = actionsMatch[1];
         // Parse action objects from the actions array
         const actionObjects = extractObjectsFromJsonArray(actionsText);
         
-        console.log(`Found ${actionObjects.length} action objects`);
+        logger.info(`Found ${actionObjects.length} action objects`);
         result.buttons = actionObjects.map((objStr, index) => {
           // Extract text and value from action object
           const textMatch = objStr.match(/"text"\s*:\s*"([^"]*)"/);
@@ -966,10 +968,10 @@ function extractButtonInfo(jsonString) {
             value: valueMatch ? valueMatch[1] : `option${index + 1}`
           };
         });
-        console.log(`✅ Extracted ${result.buttons.length} buttons from actions array`);
-        console.log(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
+        logger.info(`✅ Extracted ${result.buttons.length} buttons from actions array`);
+        logger.info(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
       } catch (actionsError) {
-        console.log(`❌ Error parsing actions array: ${actionsError.message}`);
+        logger.warn(`❌ Error parsing actions array: ${actionsError.message}`);
       }
       
       return result;
@@ -978,14 +980,14 @@ function extractButtonInfo(jsonString) {
     // Finally check for direct "buttons" array in the JSON
     const buttonsMatch = jsonString.match(/"buttons"\s*:\s*\[([\s\S]*?)\]/);
     if (buttonsMatch) {
-      console.log("FOUND BUTTONS ARRAY IN JSON");
+      logger.info("FOUND BUTTONS ARRAY IN JSON");
       try {
         const buttonsText = buttonsMatch[1];
         
         // Check if it's a simple string array ["Option 1", "Option 2"]
         const stringMatches = buttonsText.match(/"([^"]*)"/g);
         if (stringMatches) {
-          console.log(`📋 String buttons found (${stringMatches.length}):`, stringMatches);
+          logger.info(`📋 String buttons found (${stringMatches.length}):`, stringMatches);
           
           result.buttons = stringMatches.map((match, index) => {
             const text = match.replace(/"/g, '');
@@ -994,7 +996,7 @@ function extractButtonInfo(jsonString) {
             // Check if this is pipe-separated format like "Feijoada|feijoada|primary"
             if (text.includes('|')) {
               const parts = text.split('|').map(part => part.trim());
-              console.log(`🔀 Splitting button ${index + 1} by pipes:`, parts);
+              logger.info(`🔀 Splitting button ${index + 1} by pipes:`, parts);
               
               return {
                 text: parts[0],
@@ -1008,14 +1010,14 @@ function extractButtonInfo(jsonString) {
               value: text.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || `option${index + 1}`
             };
           });
-          console.log(`✅ Extracted ${result.buttons.length} buttons from string array`);
-          console.log(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
+          logger.info(`✅ Extracted ${result.buttons.length} buttons from string array`);
+          logger.info(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
           return result;
         }
         
         // Otherwise try to parse as object array
         const buttonObjects = extractObjectsFromJsonArray(buttonsText);
-        console.log(`📋 Button objects found (${buttonObjects.length})`);
+        logger.info(`📋 Button objects found (${buttonObjects.length})`);
         
         result.buttons = buttonObjects.map((objStr, index) => {
           const textMatch = objStr.match(/"text"\s*:\s*"([^"]*)"/);
@@ -1028,7 +1030,7 @@ function extractButtonInfo(jsonString) {
           // Check if text contains pipe-separated format
           if (text.includes('|')) {
             const parts = text.split('|').map(part => part.trim());
-            console.log(`🔀 Splitting button ${index + 1} by pipes:`, parts);
+            logger.info(`🔀 Splitting button ${index + 1} by pipes:`, parts);
             
             return {
               text: parts[0],
@@ -1043,14 +1045,14 @@ function extractButtonInfo(jsonString) {
             style: styleMatch ? styleMatch[1] : undefined
           };
         });
-        console.log(`✅ Extracted ${result.buttons.length} buttons from object array`);
-        console.log(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
+        logger.info(`✅ Extracted ${result.buttons.length} buttons from object array`);
+        logger.info(`📦 Button objects:`, JSON.stringify(result.buttons, null, 2));
       } catch (buttonsError) {
-        console.log(`❌ Error parsing buttons array: ${buttonsError.message}`);
+        logger.warn(`❌ Error parsing buttons array: ${buttonsError.message}`);
       }
     }
   } catch (error) {
-    console.log(`❌ Error in extractButtonInfo: ${error.message}`);
+    logger.warn(`❌ Error in extractButtonInfo: ${error.message}`);
   }
   
   return result;
@@ -1088,18 +1090,18 @@ function extractObjectsFromJsonArray(arrayText) {
  * @param {Array} messages - Messages array being sent to the LLM
  */
 function logDetailedContext(threadState, messages) {
-  console.log("\n--- DETAILED CONTEXT LOG ---");
+  logger.detail("\n--- DETAILED CONTEXT LOG ---");
   
   // Log message history
-  console.log("Messages in threadState:", threadState.messages?.length || 0);
+  logger.info("Messages in threadState:", threadState.messages?.length || 0);
   if (threadState.messages && threadState.messages.length > 0) {
-    console.log("Thread message history:");
+    logger.info("Thread message history:");
     threadState.messages.forEach((msg, idx) => {
       const userType = msg.isUser ? 'USER' : 'BOT';
       const noteType = msg.isSystemNote ? 'SYSTEM NOTE' : '';
       const buttonType = msg.isButtonClick ? 'BUTTON CLICK' : '';
       const textPreview = msg.text?.substring(0, 50) + (msg.text?.length > 50 ? '...' : '');
-      console.log(`[${idx + 1}] ${userType}: ${noteType} ${buttonType} ${textPreview}`);
+      logger.info(`[${idx + 1}] ${userType}: ${noteType} ${buttonType} ${textPreview}`);
     });
   }
   
@@ -1107,7 +1109,7 @@ function logDetailedContext(threadState, messages) {
   if (typeof threadState.getToolExecutionHistory === 'function') {
     const toolHistory = threadState.getToolExecutionHistory(5);
     if (toolHistory.length > 0) {
-      console.log("\nRecent tool executions:");
+      logger.info("\nRecent tool executions:");
       toolHistory.forEach((exec, idx) => {
         console.log(`[${idx + 1}] ${exec.toolName} - ${exec.error ? 'ERROR' : 'SUCCESS'}`);
       });
@@ -1115,23 +1117,23 @@ function logDetailedContext(threadState, messages) {
   }
   
   // Log messages being sent to LLM
-  console.log("\nMessages to LLM:");
+  logger.info("\nMessages to LLM:");
   messages.forEach((msg, idx) => {
     const content = typeof msg.content === 'string' ? 
       `${msg.content.substring(0, 100)}${msg.content.length > 100 ? '...' : ''}` : 
       'Complex content';
-    console.log(`[${idx + 1}] ${msg.role.toUpperCase()}: ${content}`);
+    logger.info(`[${idx + 1}] ${msg.role.toUpperCase()}: ${content}`);
   });
   
   // Log button selection info if available
   if (threadState.lastButtonSelection) {
-    console.log("\nButton selection:");
-    console.log(`Value: ${threadState.lastButtonSelection.value}`);
-    console.log(`Text: ${threadState.lastButtonSelection.text}`);
-    console.log(`Time: ${threadState.lastButtonSelection.timestamp}`);
+    logger.info("\nButton selection:");
+    logger.info(`Value: ${threadState.lastButtonSelection.value}`);
+    logger.info(`Text: ${threadState.lastButtonSelection.text}`);
+    logger.info(`Time: ${threadState.lastButtonSelection.timestamp}`);
   }
   
-  console.log("-------------------------");
+  logger.info("-------------------------");
 }
 
 /**

@@ -3,6 +3,8 @@ const { formatSlackMessage } = require('../slackFormat.js');
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
 const { parseMessage } = require('../toolUtils/blockBuilder');
+const logger = require('../toolUtils/logger.js');
+
 const { 
   normalizeColor, 
   formatMessageText, 
@@ -30,7 +32,7 @@ async function updateMessage(args, threadState) {
   try {
     // Handle potential nested parameters structure 
     if (args.parameters && !args.messageTs && !args.text) {
-      console.log('⚠️ Detected nested parameters structure, extracting inner parameters');
+      logger.warn('⚠️ Detected nested parameters structure, extracting inner parameters');
       args = args.parameters;
     }
     
@@ -50,7 +52,7 @@ async function updateMessage(args, threadState) {
     // Log any filtered fields for debugging
     const filteredKeys = Object.keys(args).filter(key => !validFields.includes(key));
     if (filteredKeys.length > 0) {
-      console.log(`⚠️ Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
+      logger.warn(`⚠️ Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
     }
     
     // Use filtered args from now on
@@ -69,7 +71,7 @@ async function updateMessage(args, threadState) {
     
     // Normalize the color value
     const formattedColor = normalizeColor(color);
-    console.log(`Using color: ${formattedColor}`);
+    logger.info(`Using color: ${formattedColor}`);
     
     // Get required parameters
     if (!messageTs) {
@@ -91,7 +93,7 @@ async function updateMessage(args, threadState) {
     // Use messageTs as a unique key to track updates
     const updateKey = `update_${messageTs}`;
     if (threadState.updatedMessages && threadState.updatedMessages[updateKey]) {
-      console.log(`⚠️ Message with timestamp ${messageTs} has already been updated. Preventing duplicate update.`);
+      logger.warn(`⚠️ Message with timestamp ${messageTs} has already been updated. Preventing duplicate update.`);
       return {
         ok: true,
         ts: messageTs,
@@ -115,7 +117,7 @@ async function updateMessage(args, threadState) {
       });
     } catch (reactionError) {
       // Non-critical error, just log it
-      console.log(`⚠️ Could not add reaction: ${reactionError.message}`);
+      logger.warn(`⚠️ Could not add reaction: ${reactionError.message}`);
     }
     
     // First, get the current message to preserve any structure not being updated
@@ -132,7 +134,7 @@ async function updateMessage(args, threadState) {
         originalMessage = messageResponse.messages[0];
       }
     } catch (error) {
-      console.log(`⚠️ Could not fetch original message: ${error.message}`);
+      logger.warn(`⚠️ Could not fetch original message: ${error.message}`);
       // Continue with the update even if we couldn't fetch the original
     }
     
@@ -142,7 +144,7 @@ async function updateMessage(args, threadState) {
         (!originalMessage.blocks || originalMessage.blocks.length === 0) &&
         (!originalMessage.attachments || originalMessage.attachments.length === 0) &&
         originalMessage.user) { // Ensure it's a user message
-      console.log('⚠️ This appears to be a plain text user message, not a bot message.');
+      logger.warn('⚠️ This appears to be a plain text user message, not a bot message.');
       
       // Remove the loading reaction
       try {
@@ -153,7 +155,7 @@ async function updateMessage(args, threadState) {
         });
       } catch (reactionError) {
         // Non-critical error, just log it
-        console.log(`⚠️ Could not remove reaction: ${reactionError.message}`);
+        logger.warn(`⚠️ Could not remove reaction: ${reactionError.message}`);
       }
       
       // Return gracefully without modifying the message
@@ -302,7 +304,7 @@ async function updateMessage(args, threadState) {
       });
     } catch (reactionError) {
       // Non-critical error, just log it
-      console.log(`⚠️ Could not update reactions: ${reactionError.message}`);
+      logger.warn(`⚠️ Could not update reactions: ${reactionError.message}`);
     }
     
     // Return the result

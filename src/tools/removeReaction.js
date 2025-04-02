@@ -2,6 +2,8 @@
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
 const { availableEmojis } = require('./addReaction.js');
+const logger = require('../toolUtils/logger.js');
+
 
 /**
  * Removes emoji reaction(s) from a message
@@ -102,7 +104,7 @@ async function removeReaction(args, threadState) {
           });
         } else {
           // For other errors, log but continue with other emojis
-          console.log(`Error removing reaction ${emojiName}: ${emojiError.message}`);
+          logger.warn(`Error removing reaction ${emojiName}: ${emojiError.message}`);
           results.push({
             emoji: emojiName,
             ok: false,

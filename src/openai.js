@@ -5,6 +5,8 @@
 const { LLM_API_KEY, LLM_API_URL, LLM_MODEL } = require('./config.js');
 const { logError } = require('./errors.js');
 const fetch = require('node-fetch');
+const logger = require('./toolUtils/logger.js');
+
 
 /**
  * Calls the OpenAI API with the given parameters
@@ -16,7 +18,7 @@ const fetch = require('node-fetch');
  */
 async function callOpenAI(params) {
     try {
-        console.log(`Calling OpenAI with ${params.messages.length} messages`);
+        logger.info(`Calling OpenAI with ${params.messages.length} messages`);
         
         // Default to the environment model if not provided
         const model = params.model || LLM_MODEL || 'gpt-3.5-turbo';
@@ -57,9 +59,9 @@ async function callOpenAI(params) {
         }
         
         // Log request details
-        console.log(`Using model: ${model}`);
+        logger.info(`Using model: ${model}`);
         console.log(`API URL: ${LLM_API_URL || 'https://api.openai.com/v1/chat/completions'}`);
-        console.log(`Tools provided: ${params.tools ? params.tools.length : 0}`);
+        logger.info(`Tools provided: ${params.tools ? params.tools.length : 0}`);
         
         // Make request to OpenAI API
         const response = await fetch(
@@ -79,18 +81,18 @@ async function callOpenAI(params) {
         
         // Check for errors
         if (!response.ok) {
-            console.error('OpenAI API error:', data);
+            logger.error('OpenAI API error:', data);
             throw new Error(`OpenAI API error: ${data.error?.message || 'Unknown error'}`);
         }
         
         // Log total tokens used
         if (data.usage) {
-            console.log(`Tokens used: ${data.usage.total_tokens} (prompt: ${data.usage.prompt_tokens}, completion: ${data.usage.completion_tokens})`);
+            logger.info(`Tokens used: ${data.usage.total_tokens} (prompt: ${data.usage.prompt_tokens}, completion: ${data.usage.completion_tokens})`);
         }
         
         return data;
     } catch (error) {
-        console.error('Error calling OpenAI:', error);
+        logger.error('Error calling OpenAI:', error);
         logError('Error calling OpenAI', error);
         throw error;
     }

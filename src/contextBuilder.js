@@ -8,6 +8,8 @@
  */
 
 const { logError } = require('./errors.js');
+const logger = require('./toolUtils/logger.js');
+
 
 // Message types - extensible enum of supported message types
 const MessageTypes = {
@@ -171,7 +173,7 @@ class ContextBuilder {
       
       // Skip if no valid ID
       if (!contextMessage || !contextMessage.id) {
-        console.warn('Skipping message with no valid ID:', message);
+        logger.warn('Skipping message with no valid ID:', message);
         return null;
       }
       
@@ -191,7 +193,7 @@ class ContextBuilder {
       }
       
       if (this.debug) {
-        console.log(`Added message to context: ${contextMessage.id} (${contextMessage.type})`);
+        logger.info(`Added message to context: ${contextMessage.id} (${contextMessage.type})`);
       }
       
       return contextMessage.id;
@@ -441,10 +443,10 @@ class ContextBuilder {
         this.setButtonState(threadTs, result.actionId, 'active', result.metadata);
       }
       
-      console.log(`Recorded tool execution: ${toolName} in thread ${threadTs}`);
+      logger.info(`Recorded tool execution: ${toolName} in thread ${threadTs}`);
       return true;
     } catch (error) {
-      console.error(`Error recording tool execution: ${error.message}`);
+      logger.error(`Error recording tool execution: ${error.message}`);
       return false;
     }
   }
@@ -463,7 +465,7 @@ class ContextBuilder {
       const executionKey = `${toolName}-${JSON.stringify(args)}`;
       return this.toolResults.get(threadTs).has(executionKey);
     } catch (error) {
-      console.error(`Error checking if tool was executed: ${error.message}`);
+      logger.error(`Error checking if tool was executed: ${error.message}`);
       return false;
     }
   }
@@ -486,7 +488,7 @@ class ContextBuilder {
       
       return executionRecord.result;
     } catch (error) {
-      console.error(`Error getting tool result: ${error.message}`);
+      logger.error(`Error getting tool result: ${error.message}`);
       return null;
     }
   }
@@ -535,7 +537,7 @@ class ContextBuilder {
         
       return executionEntries;
     } catch (error) {
-      console.error(`Error getting tool execution history: ${error.message}`);
+      logger.error(`Error getting tool execution history: ${error.message}`);
       return [];
     }
   }
@@ -558,10 +560,10 @@ class ContextBuilder {
       
       // Set the button state
       threadButtonStates.set(actionId, { state, metadata });
-      console.log(`Set button ${actionId} state to ${state} in thread ${threadTs}`);
+      logger.info(`Set button ${actionId} state to ${state} in thread ${threadTs}`);
       return true;
     } catch (error) {
-      console.error(`Error setting button state: ${error.message}`);
+      logger.error(`Error setting button state: ${error.message}`);
       return false;
     }
   }
@@ -578,7 +580,7 @@ class ContextBuilder {
       
       return this.buttonStates.get(threadTs).get(actionId) || null;
     } catch (error) {
-      console.error(`Error getting button state: ${error.message}`);
+      logger.error(`Error getting button state: ${error.message}`);
       return null;
     }
   }
@@ -608,7 +610,7 @@ class ContextBuilder {
       
       return true;
     } catch (error) {
-      console.error(`Error setting metadata: ${error.message}`);
+      logger.error(`Error setting metadata: ${error.message}`);
       return false;
     }
   }
@@ -625,7 +627,7 @@ class ContextBuilder {
       
       return this.threadMetadata.get(threadTs).get(key) || null;
     } catch (error) {
-      console.error(`Error getting metadata: ${error.message}`);
+      logger.error(`Error getting metadata: ${error.message}`);
       return null;
     }
   }
@@ -701,7 +703,7 @@ class ContextBuilder {
           }))
       };
     } catch (error) {
-      console.error(`Error getting state for LLM: ${error.message}`);
+      logger.error(`Error getting state for LLM: ${error.message}`);
       return {
         threadTs,
         error: 'Failed to build state summary'
@@ -727,7 +729,7 @@ class ContextBuilder {
           metadata: data.metadata
         }));
     } catch (error) {
-      console.error(`Error getting active buttons: ${error.message}`);
+      logger.error(`Error getting active buttons: ${error.message}`);
       return [];
     }
   }
@@ -784,7 +786,7 @@ class ContextBuilder {
         hasUserMessages: userCount > 0
       };
     } catch (error) {
-      console.error(`Error getting thread summary: ${error.message}`);
+      logger.error(`Error getting thread summary: ${error.message}`);
       return {
         threadTs,
         counts: {
@@ -810,11 +812,11 @@ class ContextBuilder {
       const { limit = 25, includeBotMessages = true } = options;
       
       // Log what we're doing
-      console.log(`Building LLM context for thread ${threadTs} with options:`, options);
+      logger.info(`Building LLM context for thread ${threadTs} with options:`, options);
       
       // Make sure threadTs exists
       if (!threadTs || !this.threadMessages.has(threadTs)) {
-        console.warn(`No messages found for thread ${threadTs}`);
+        logger.warn(`No messages found for thread ${threadTs}`);
         return [];
       }
       
@@ -822,7 +824,7 @@ class ContextBuilder {
       const threadMsgs = this.threadMessages.get(threadTs) || [];
       
       // Debug log
-      console.log(`Found ${threadMsgs.length} messages for thread ${threadTs}`);
+      logger.info(`Found ${threadMsgs.length} messages for thread ${threadTs}`);
       
       // Get the most recent messages (up to limit)
       const latestFirst = [...threadMsgs].reverse();
@@ -866,7 +868,7 @@ class ContextBuilder {
           
           // Skip if we've already processed this button
           if (buttonClicks.has(buttonKey)) {
-            console.log(`Skipping duplicate button click: ${buttonKey}`);
+            logger.info(`Skipping duplicate button click: ${buttonKey}`);
             continue;
           }
           
@@ -885,7 +887,7 @@ class ContextBuilder {
         
         // Skip empty or obviously corrupted messages
         if (!msg.text || typeof msg.text !== 'string' || msg.text.trim() === '') {
-          console.log(`Skipping empty message: ${msgId}`);
+          logger.info(`Skipping empty message: ${msgId}`);
           continue;
         }
         
@@ -902,7 +904,7 @@ class ContextBuilder {
             // Append to previous message
             const lastMsg = messages[messages.length - 1];
             lastMsg.content = `${lastMsg.content}\n\n${content}`;
-            console.log(`Combined with previous message (${role})`);
+            logger.info(`Combined with previous message (${role})`);
             continue;
           }
         }
@@ -924,7 +926,7 @@ class ContextBuilder {
       
       // Add a warning if we have no messages
       if (messages.length === 0) {
-        console.warn(`No valid messages found for thread ${threadTs}`);
+        logger.warn(`No valid messages found for thread ${threadTs}`);
         messages.push({
           role: 'system',
           content: 'No message history found. This appears to be a new conversation.',
@@ -933,12 +935,12 @@ class ContextBuilder {
       }
       
       // Log what we're returning
-      console.log(`Returning ${messages.length} messages for LLM context`);
+      logger.info(`Returning ${messages.length} messages for LLM context`);
       
       // Return in earliest-first order (required for LLM)
       return messages.reverse();
     } catch (error) {
-      console.error('Error building LLM context:', error);
+      logger.error('Error building LLM context:', error);
       return [];
     }
   }
@@ -966,7 +968,7 @@ class ContextBuilder {
         .map(id => this.messages.get(id))
         .filter(message => !!message); // Filter out any null/undefined messages
     } catch (error) {
-      console.error(`Error getting thread messages: ${error.message}`);
+      logger.error(`Error getting thread messages: ${error.message}`);
       return [];
     }
   }

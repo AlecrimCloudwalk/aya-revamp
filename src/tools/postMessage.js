@@ -19,6 +19,7 @@ const {
   processBlocks 
 } = require('../toolUtils/messageFormatUtils');
 const { getContextBuilder } = require('../contextBuilder.js');
+const logger = require('../toolUtils/logger');
 
 /**
  * Conditionally log messages based on environment variables
@@ -28,9 +29,9 @@ const { getContextBuilder } = require('../contextBuilder.js');
 function debugLog(message, data) {
   if (process.env.DEBUG === 'true' || process.env.DEBUG_SLACK === 'true') {
     if (data) {
-      console.log(message, data);
+      logger.debug(message, data);
     } else {
-      console.log(message);
+      logger.debug(message);
     }
   }
 }
@@ -139,7 +140,7 @@ function getWorkspaceId() {
     
     return workspaceId;
   } catch (error) {
-    console.warn('⚠️ Could not determine workspace ID, using default:', error.message);
+    logger.warn(`Could not determine workspace ID, using default: ${error.message}`);
     return 'T02RAEMPK';
   }
 }
@@ -201,11 +202,12 @@ async function postMessage(args, threadState) {
   
   try {
     // Log the tool call
-    console.log('📣 postMessage tool called with args:', JSON.stringify(args, null, 2));
+    logger.info('postMessage tool called');
+    logger.detail('postMessage args:', args);
     
     // Handle potential nested parameters structure 
     if (args.parameters && !args.text) {
-      console.log('Detected nested parameters structure, extracting inner parameters');
+      logger.info('Detected nested parameters structure, extracting inner parameters');
       args = args.parameters;
     }
     
@@ -223,11 +225,11 @@ async function postMessage(args, threadState) {
           
           // Check if it has properties that suggest it's meant to be a tool call
           if (parsedText.tool && typeof parsedText.tool === 'string') {
-            console.log(`⚠️ Detected what appears to be a tool call in the text parameter: ${parsedText.tool}`);
+            logger.warn(`Detected what appears to be a tool call in the text parameter: ${parsedText.tool}`);
             
             // Special case: if it's a finishRequest tool call, we can forward it to the proper tool
             if (parsedText.tool === 'finishRequest') {
-              console.log('Converting embedded finishRequest to proper tool call');
+              logger.info('Converting embedded finishRequest to proper tool call');
               
               // Import and call the finishRequest tool directly
               const { finishRequest } = require('./finishRequest.js');
@@ -244,12 +246,12 @@ async function postMessage(args, threadState) {
             }
             
             // Provide feedback that this should have been a direct tool call
-            console.log('⚠️ The LLM tried to call another tool by embedding JSON in the message text');
+            logger.warn('The LLM tried to call another tool by embedding JSON in the message text');
             // We'll continue processing as a normal message, but log the issue
           }
         } catch (jsonError) {
-          // Not valid JSON or not a tool call, continue as normal
-          console.log(`Text parameter contains JSON-like content but isn't valid JSON or a tool call`);
+          logger.detail(`Text parameter contains JSON-like content but isn't valid JSON or a tool call`);
+          // Not valid JSON or not a tool call - continue normal processing
         }
       }
     }
@@ -297,8 +299,7 @@ async function postMessage(args, threadState) {
     const result = await slack.chat.postMessage(cleanedMessage);
     
     // Debug log the full message result structure
-    console.log('📄 FULL MESSAGE RESULT STRUCTURE FROM SLACK:');
-    console.log(JSON.stringify(result, null, 2));
+    logger.detail('Message result structure from Slack:', result);
     
     // Add to the new context builder with complete info
     try {
@@ -313,7 +314,7 @@ async function postMessage(args, threadState) {
         originalContent: result  // Keep the full message
       });
       
-      console.log('Added message to context builder');
+      logger.info('Added message to context builder');
     } catch (contextError) {
       console.error('Error adding message to context builder:', contextError);
     }
@@ -322,9 +323,9 @@ async function postMessage(args, threadState) {
     try {
       if (threadState && typeof threadState.addToHistory === 'function') {
         threadState.addToHistory('message', result);
-        console.log('Added postMessage result to thread history for future context');
+        logger.info('Added postMessage result to thread history for future context');
       } else {
-        console.log('Unable to add to thread history: threadState.addToHistory not available');
+        logger.warn('Unable to add to thread history: threadState.addToHistory not available');
       }
     } catch (historyError) {
       console.error('Error adding message to thread history:', historyError);
@@ -355,7 +356,7 @@ async function postMessage(args, threadState) {
       if (threadState && typeof threadState.addToHistory === 'function') {
         threadState.addToHistory('error', errorResponse);
       } else {
-        console.log('Unable to add error to thread history: threadState.addToHistory not available');
+        logger.warn('Unable to add error to thread history: threadState.addToHistory not available');
       }
     } catch (historyError) {
       console.error('Error adding error to thread history:', historyError);

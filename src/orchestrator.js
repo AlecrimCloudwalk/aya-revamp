@@ -7,17 +7,18 @@ const { getSlackClient } = require('./slackClient.js');
 const { getContextBuilder } = require('./contextBuilder.js');
 const { initializeContextIfNeeded } = require('./toolUtils/loadThreadHistory');
 const { updateButtonMessage } = require('./buttonUpdater');
+const logger = require('./toolUtils/logger');
 
 /**
  * Handles an incoming message from Slack
  */
 async function handleIncomingSlackMessage(context) {
     try {
-        console.log("\n📨 INCOMING MESSAGE");
-        console.log(`User: ${context.userId} | Channel: ${context.channelId}`);
-        console.log(`Text: "${context.text}"`);
-        if (context.threadTs) console.log(`Thread: ${context.threadTs}`);
-        console.log("--------------------------------");
+        logger.info("📨 INCOMING MESSAGE");
+        logger.info(`User: ${context.userId} | Channel: ${context.channelId}`);
+        logger.info(`Text: "${context.text}"`);
+        if (context.threadTs) logger.info(`Thread: ${context.threadTs}`);
+        logger.info("--------------------------------");
         
         // Get thread ID (either thread timestamp or channel ID for direct messages)
         const threadId = context.threadTs || context.channelId;
@@ -56,9 +57,9 @@ async function handleIncomingSlackMessage(context) {
                 }
             });
             
-            console.log('Added incoming message to context builder');
+            logger.info('Added incoming message to context builder');
         } catch (contextError) {
-            console.error('Error adding message to context builder:', contextError);
+            logger.error('Error adding message to context builder:', contextError);
         }
         
         // Add thinking reaction
@@ -70,7 +71,7 @@ async function handleIncomingSlackMessage(context) {
                 name: 'loading'
             });
         } catch (reactionError) {
-            console.log(`Failed to add reaction: ${reactionError.message}`);
+            logger.warn(`Failed to add reaction: ${reactionError.message}`);
         }
         
         // Process the thread
@@ -90,11 +91,11 @@ async function handleIncomingSlackMessage(context) {
                 name: 'white_check_mark'
             });
         } catch (reactionError) {
-            console.log(`Failed to update reaction: ${reactionError.message}`);
+            logger.warn(`Failed to update reaction: ${reactionError.message}`);
         }
 
     } catch (error) {
-        console.log(`\n❌ ERROR HANDLING MESSAGE: ${error.message}`);
+        logger.warn(`❌ ERROR HANDLING MESSAGE: ${error.message}`);
         logError('Error handling incoming Slack message', error, { context });
         
         // Update reaction to error
@@ -111,7 +112,7 @@ async function handleIncomingSlackMessage(context) {
                 name: 'x'
             });
         } catch (reactionError) {
-            console.log(`Failed to add error reaction: ${reactionError.message}`);
+            logger.warn(`Failed to add error reaction: ${reactionError.message}`);
         }
     }
 }
@@ -125,12 +126,12 @@ async function executeTool(toolName, args, threadId) {
     
     // Check if we've already executed this exact tool call
     if (contextBuilder.hasExecuted(threadId, toolName, args)) {
-        console.log(`Tool ${toolName} already executed with these args, skipping`);
+        logger.info(`Tool ${toolName} already executed with these args, skipping`);
         return contextBuilder.getToolResult(threadId, toolName, args);
     }
 
     try {
-        console.log(`📣 Executing tool: ${toolName}`);
+        logger.info(`📣 Executing tool: ${toolName}`);
         
         // STANDARDIZE: Handle reasoning parameter by moving it to the top level
         // We want reasoning to always be at the top level, not inside parameters
@@ -139,7 +140,7 @@ async function executeTool(toolName, args, threadId) {
         // Handle nested tool structure - this happens when the LLM returns 
         // { "tool": "toolName", "parameters": {...} } inside the parameters
         if (sanitizedArgs.tool && sanitizedArgs.parameters && sanitizedArgs.tool === toolName) {
-            console.log('Detected nested tool structure, extracting inner parameters');
+            logger.info('Detected nested tool structure, extracting inner parameters');
             sanitizedArgs = {
                 ...sanitizedArgs.parameters,
                 reasoning: sanitizedArgs.reasoning || sanitizedArgs.parameters.reasoning
@@ -151,7 +152,7 @@ async function executeTool(toolName, args, threadId) {
             sanitizedArgs.parameters && 
             sanitizedArgs.parameters.reasoning) {
             // Keep only the top-level reasoning and remove the parameters.reasoning
-            console.log('Detected duplicate reasoning fields - keeping only top-level reasoning');
+            logger.info('Detected duplicate reasoning fields - keeping only top-level reasoning');
             delete sanitizedArgs.parameters.reasoning;
         }
         
@@ -161,10 +162,10 @@ async function executeTool(toolName, args, threadId) {
             sanitizedArgs.parameters.reasoning) {
             sanitizedArgs.reasoning = sanitizedArgs.parameters.reasoning;
             delete sanitizedArgs.parameters.reasoning;
-            console.log('Moved reasoning from parameters to top level for consistency');
+            logger.info('Moved reasoning from parameters to top level for consistency');
         }
         
-        console.log(`Parameters:`, JSON.stringify(sanitizedArgs, null, 2));
+        logger.info(`Parameters:`, JSON.stringify(sanitizedArgs, null, 2));
         
         const tool = getTool(toolName);
         if (!tool) {
@@ -202,10 +203,10 @@ async function executeTool(toolName, args, threadId) {
         return result;
 
     } catch (error) {
-        console.log(`❌ Tool execution failed: ${error.message}`);
+        logger.warn(`❌ Tool execution failed: ${error.message}`);
         // Add more detailed error information
         if (error.message.includes('JSON') || error.message.includes('array') || error.message.includes('object')) {
-            console.log(`💡 This might be a parameter formatting issue. Check that arrays and objects are correctly formatted.`);
+            logger.info(`💡 This might be a parameter formatting issue. Check that arrays and objects are correctly formatted.`);
         }
         
         // Record the failed execution
@@ -220,11 +221,11 @@ async function executeTool(toolName, args, threadId) {
  */
 function logParameterTypes(toolName, args) {
     if (!args) {
-        console.log(`⚠️ No parameters provided for ${toolName}`);
+        logger.warn(`⚠️ No parameters provided for ${toolName}`);
         return;
     }
     
-    console.log(`Parameter types for ${toolName}:`);
+    logger.info(`Parameter types for ${toolName}:`);
     Object.entries(args).forEach(([key, value]) => {
         const type = typeof value;
         const isArray = Array.isArray(value);
@@ -243,7 +244,7 @@ function logParameterTypes(toolName, args) {
             additionalInfo += ` (length: ${value.length})`;
         }
         
-        console.log(`  - ${key}: ${isArray ? 'array' : type}${additionalInfo}`);
+        logger.info(`  - ${key}: ${isArray ? 'array' : type}${additionalInfo}`);
     });
 }
 
@@ -260,25 +261,25 @@ async function processThread(threadId) {
     // Debug log: Print what context is stored
     const context = contextBuilder.getMetadata(threadId, 'context');
     
-    console.log("\n--- THREAD CONTEXT ---");
+    logger.info("--- THREAD CONTEXT ---");
     if (context) {
-        console.log(`User ID: ${context.userId}`);
-        console.log(`Channel: ${context.channelId}`);
-        console.log(`Thread TS: ${context.threadTs}`);
-        console.log(`User's message: "${context.text}"`);
+        logger.info(`User ID: ${context.userId}`);
+        logger.info(`Channel: ${context.channelId}`);
+        logger.info(`Thread TS: ${context.threadTs}`);
+        logger.info(`User's message: "${context.text}"`);
         if (context.isButtonClick) {
-            console.log(`Button click: ${context.buttonText} (value: ${context.actionValue})`);
+            logger.info(`Button click: ${context.buttonText} (value: ${context.actionValue})`);
         }
     } else {
-        console.log(`No context in thread state`);
+        logger.info(`No context in thread state`);
     }
-    console.log("-----------------------");
+    logger.info("-----------------------");
 
     // Initialize the context builder with thread history if needed
     try {
         await initializeContextIfNeeded(threadId);
     } catch (contextError) {
-        console.error('Error initializing context:', contextError);
+        logger.error('Error initializing context:', contextError);
         // Continue even if context initialization fails
     }
 
@@ -286,7 +287,7 @@ async function processThread(threadId) {
     try {
         // Only fetch history if we're in a thread that exists
         if (context && context.threadTs) {
-            console.log("Fetching thread history for context...");
+            logger.info("Fetching thread history for context...");
             
             // Get history using the getThreadHistory tool
             const historyTool = getTool('getThreadHistory');
@@ -306,7 +307,7 @@ async function processThread(threadId) {
                     }
                 });
                 
-                console.log(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history`);
+                logger.info(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history`);
                 
                 // Record the tool execution so the LLM knows about it
                 contextBuilder.recordToolExecution(threadId, 'getThreadHistory', 
@@ -315,7 +316,7 @@ async function processThread(threadId) {
             }
         }
     } catch (historyError) {
-        console.log(`Failed to get thread history: ${historyError.message}`);
+        logger.warn(`Failed to get thread history: ${historyError.message}`);
         // Continue even if history fetch fails
     }
 
@@ -344,7 +345,7 @@ async function processThread(threadId) {
         for (const prevMessage of recentMessages) {
             // Simple similarity check - if the first 20 chars match, it's likely similar
             if (prevMessage.substring(0, 20) === messageText.substring(0, 20)) {
-                console.log("⚠️ Detected similar message beginning, possible duplicate");
+                logger.warn("⚠️ Detected similar message beginning, possible duplicate");
                 return true;
             }
             
@@ -355,7 +356,7 @@ async function processThread(threadId) {
             if (lengthRatio > 0.8 && 
                 (prevMessage.includes(messageText.substring(0, 30)) || 
                  messageText.includes(prevMessage.substring(0, 30)))) {
-                console.log("⚠️ Detected significant message overlap, possible duplicate");
+                logger.warn("⚠️ Detected significant message overlap, possible duplicate");
                 return true;
             }
         }
@@ -365,12 +366,12 @@ async function processThread(threadId) {
     
     while (iteration < MAX_ITERATIONS && !requestCompleted) {
         iteration++;
-        console.log(`\n🔄 Iteration ${iteration}/${MAX_ITERATIONS}`);
+        logger.info(`🔄 Iteration ${iteration}/${MAX_ITERATIONS}`);
 
         try {
             // If we've already sent a message, strongly encourage finishing the request
             if (messagePosted && messagesSent >= MAX_MESSAGES_PER_REQUEST) {
-                console.log(`Already sent ${messagesSent} messages - auto-finishing request`);
+                logger.info(`Already sent ${messagesSent} messages - auto-finishing request`);
                 
                 // Auto-finish the request to prevent message spam
                 const finishTool = getTool('finishRequest');
@@ -389,7 +390,7 @@ async function processThread(threadId) {
                     });
                     
                     requestCompleted = true;
-                    console.log("✅ Auto-completed request after message was sent");
+                    logger.info("✅ Auto-completed request after message was sent");
                     break;
                 }
             }
@@ -400,7 +401,7 @@ async function processThread(threadId) {
             // Check for tool calls
             const { toolCalls } = llmResult;
             if (!toolCalls?.length) {
-                console.log("No tool calls found in LLM response");
+                logger.info("No tool calls found in LLM response");
                 break;
             }
 
@@ -411,7 +412,7 @@ async function processThread(threadId) {
             // If tool is postMessage, check for duplicate content
             if (toolName === 'postMessage' && args?.text) {
                 if (isSimilarToRecent(args.text)) {
-                    console.log("⚠️ Skipping duplicate message content");
+                    logger.warn("⚠️ Skipping duplicate message content");
                     
                     // If we have a duplicate message but haven't finished the request,
                     // auto-finish it to prevent getting stuck in a loop
@@ -431,7 +432,7 @@ async function processThread(threadId) {
                         });
                         
                         requestCompleted = true;
-                        console.log("✅ Auto-completed request to prevent duplicate messages");
+                        logger.info("✅ Auto-completed request to prevent duplicate messages");
                         break;
                     }
                     
@@ -447,7 +448,7 @@ async function processThread(threadId) {
             if (isButtonSelection && toolName === 'postMessage') {
                 buttonResponses++;
                 if (buttonResponses > MAX_BUTTON_MESSAGES) {
-                    console.log(`Reached maximum messages (${MAX_BUTTON_MESSAGES}) for button selection - stopping iterations`);
+                    logger.info(`Reached maximum messages (${MAX_BUTTON_MESSAGES}) for button selection - stopping iterations`);
                     requestCompleted = true;
                     
                     // Auto-finish the request
@@ -497,7 +498,7 @@ async function processThread(threadId) {
             // If the tool was finishRequest, we're done
             if (toolName === 'finishRequest') {
                 requestCompleted = true;
-                console.log("Request finished with finishRequest tool");
+                logger.info("Request finished with finishRequest tool");
                 break;
             }
             
@@ -529,7 +530,7 @@ async function processThread(threadId) {
                 // For regular messages (not button clicks), auto-finish after the message
                 // This is to prevent the problematic behavior of sending multiple messages
                 if (!isButtonSelection && messagesSent >= MAX_MESSAGES_PER_REQUEST) {
-                    console.log("Auto-finishing request after sending the first message");
+                    logger.info("Auto-finishing request after sending the first message");
                     
                     // Auto-finish the request
                     const finishTool = getTool('finishRequest');
@@ -540,7 +541,7 @@ async function processThread(threadId) {
                         }, threadContext);
                         
                         requestCompleted = true;
-                        console.log("✅ Auto-completed request after message was sent");
+                        logger.info("✅ Auto-completed request after message was sent");
                         break;
                     }
                 }
@@ -548,7 +549,7 @@ async function processThread(threadId) {
                 // If this is a button selection, auto-complete after first message
                 // This prevents the LLM from sending multiple responses
                 if (isButtonSelection && buttonResponses >= MAX_BUTTON_MESSAGES) {
-                    console.log(`Button selection was already visually acknowledged - stopping iterations after first message`);
+                    logger.info(`Button selection was already visually acknowledged - stopping iterations after first message`);
                     requestCompleted = true;
                     
                     // Auto-finish the request
@@ -565,12 +566,13 @@ async function processThread(threadId) {
             }
 
         } catch (error) {
-            console.log(`Error in process loop: ${error.message}`);
+            logger.warn(`Error in process loop: ${error.message}`);
             
             // Handle error through the LLM
             try {
                 // Format the error
                 const { formatErrorForLLM } = require('./errors.js');
+
                 const formattedError = formatErrorForLLM(error);
                 
                 // Store the error in context builder
@@ -598,7 +600,7 @@ async function processThread(threadId) {
                 // Skip to next iteration to let LLM handle the error
                 continue;
             } catch (handlerError) {
-                console.log(`Error handling error: ${handlerError.message}`);
+                logger.warn(`Error handling error: ${handlerError.message}`);
                 break;
             }
         }
@@ -606,7 +608,7 @@ async function processThread(threadId) {
 
     // If we reached max iterations without explicit finishRequest
     if (iteration >= MAX_ITERATIONS && !requestCompleted) {
-        console.log(`⚠️ Reached maximum iterations (${MAX_ITERATIONS}) without explicit finishRequest - auto-completing`);
+        logger.warn(`⚠️ Reached maximum iterations (${MAX_ITERATIONS}) without explicit finishRequest - auto-completing`);
         
         // Auto-finish the request
         try {
@@ -622,7 +624,7 @@ async function processThread(threadId) {
                 });
             }
         } catch (error) {
-            console.log(`Error auto-finishing request: ${error.message}`);
+            logger.warn(`Error auto-finishing request: ${error.message}`);
         }
     }
 }
@@ -644,11 +646,13 @@ async function processButtonInteraction(payload) {
     const messageTs = payload.container.message_ts;
     
     // Log button click event for debugging
-    console.log(`\n👆 BUTTON CLICK`);
-    console.log(`User: ${userId} | Action: ${actionId} | Value: ${actionValue}`);
-    console.log(`Channel: ${channelId} | Thread: ${threadTs}`);
-    console.log(`Message TS: ${messageTs} | Thread TS: ${threadTs}`);
-    console.log(`--------------------------------`);
+    logger.info(`BUTTON CLICK: ${buttonText} (${actionValue})`);
+    logger.detail(`Button click context:`, {
+      user: userId,
+      channel: channelId,
+      message_ts: messageTs,
+      thread_ts: threadTs
+    });
     
     // Create thread ID (consistent with our other code)
     const threadId = threadTs || channelId;
@@ -668,16 +672,7 @@ async function processButtonInteraction(payload) {
     });
     
     // Log payload structure for debugging
-    console.log(`Button payload structure:`, JSON.stringify({
-      message_ts: messageTs,
-      thread_ts: threadTs, 
-      has_blocks: !!payload.message.blocks,
-      blocks_count: payload.message.blocks?.length || 0,
-      has_attachments: !!payload.message.attachments,
-      attachments_count: payload.message.attachments?.length || 0,
-      action_id: actionId,
-      action_value: actionValue
-    }, null, 2));
+    logger.logButtonClick(payload);
     
     // Update the button UI in Slack FIRST - this is critical
     const updateResult = await updateButtonMessage(payload, {
@@ -688,10 +683,10 @@ async function processButtonInteraction(payload) {
       setButtonState: (actionId, state, metadata) => contextBuilder.setButtonState(threadId, actionId, state, metadata)
     });
     
-    console.log(`Button update result:`, updateResult.updated ? 'SUCCESS' : 'FAILED');
+    logger.info(`Button update ${updateResult.updated ? 'succeeded' : 'failed'}`);
     
     if (!updateResult.updated) {
-      console.error(`⚠️ Button update failed: ${updateResult.error}`);
+      logger.error(`Button update failed: ${updateResult.error}`);
       // Send a message indicating that the button was clicked (as a fallback)
       const slackClient = getSlackClient();
       await slackClient.chat.postMessage({
@@ -700,19 +695,16 @@ async function processButtonInteraction(payload) {
         text: `<@${userId}> selected: *${buttonText}* (button update failed, sending as new message)`
       });
     } else if (!updateResult.actionsBlockFound) {
-      console.warn(`⚠️ Button was clicked but no actions block was found to update`);
+      logger.warn(`Button was clicked but no actions block was found to update`);
       
       // This means the UI wasn't visually updated, so we need to inform the user
       // ADDITIONAL DEBUG INFO: Log the payload message to see what message was actually clicked
       if (payload.message) {
-        console.log(`Payload message TS: ${payload.message.ts}`);
-        console.log(`Payload message contains attachments: ${!!payload.message.attachments}`);
-        if (payload.message.attachments) {
-          const actionBlocks = payload.message.attachments.filter(a => 
-            a.blocks && a.blocks.some(b => b.type === 'actions')
-          );
-          console.log(`Action blocks found in payload attachments: ${actionBlocks.length}`);
-        }
+        logger.detail(`Payload message info:`, {
+          ts: payload.message.ts,
+          has_attachments: !!payload.message.attachments,
+          attachment_count: payload.message.attachments?.length || 0
+        });
       }
       
       const slackClient = getSlackClient();
@@ -745,12 +737,12 @@ async function processButtonInteraction(payload) {
       }
     });
     
-    console.log('Added button click feedback to context');
+    logger.info('Added button click to context, processing thread');
     
     // Process the thread - this will trigger a new LLM interaction
     await processThread(threadId);
   } catch (error) {
-    console.error(`Error handling button interaction:`, error);
+    logger.error(`Error handling button interaction:`, error);
     
     // Enhanced error handling
     try {
@@ -761,7 +753,7 @@ async function processButtonInteraction(payload) {
         text: `I'm sorry, I encountered an error processing your button click: ${error.message}. Please try again or contact support.`
       });
     } catch (sendError) {
-      console.error(`Failed to send error message:`, sendError);
+      logger.error(`Failed to send error message:`, sendError);
     }
   }
 }

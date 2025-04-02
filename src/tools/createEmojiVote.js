@@ -2,6 +2,8 @@
 const { formatSlackMessage } = require('../slackFormat.js');
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
+const logger = require('../toolUtils/logger.js');
+
 
 /**
  * Creates a message with emoji voting options
@@ -115,7 +117,7 @@ async function createEmojiVote(args, threadState) {
         }
       }
     } catch (reactionError) {
-      console.log(`Error adding initial reactions: ${reactionError.message}`);
+      logger.warn(`Error adding initial reactions: ${reactionError.message}`);
       // Non-fatal error, continue
     }
     

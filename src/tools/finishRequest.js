@@ -1,5 +1,7 @@
 // Signals the end of a conversation loop
 const { getSlackClient } = require('../slackClient.js');
+const logger = require('../toolUtils/logger.js');
+
 
 /**
  * Tool to indicate the conversation is complete
@@ -12,7 +14,7 @@ const { getSlackClient } = require('../slackClient.js');
 async function finishRequest(args = {}, threadState) {
   // Handle nested parameters structure
   if (args.parameters && !args.summary) {
-    console.log('Detected nested parameters structure, extracting inner parameters');
+    logger.info('Detected nested parameters structure, extracting inner parameters');
     args = args.parameters;
   }
   
@@ -33,7 +35,7 @@ async function finishRequest(args = {}, threadState) {
   const filteredKeys = Object.keys(args)
     .filter(key => !validFields.includes(key) && key !== 'reasoning');
   if (filteredKeys.length > 0) {
-    console.log(`Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
+    logger.info(`Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
   }
   
   // Get the summary if provided
@@ -42,7 +44,7 @@ async function finishRequest(args = {}, threadState) {
   // Check if this finishRequest is being called after a button interaction
   // by looking for button selection info in the thread state
   if (threadState.lastButtonSelection) {
-    console.log(`Request finished with finishRequest tool after button selection`);
+    logger.info(`Request finished with finishRequest tool after button selection`);
     
     // Try to find the message that had the button
     const buttonMessageTs = threadState.lastButtonSelection.messageTs || 
@@ -65,10 +67,10 @@ async function finishRequest(args = {}, threadState) {
               timestamp: buttonMessageTs,
               name: 'loading'
             });
-            console.log(`Removed loading reaction from button message`);
+            logger.info(`Removed loading reaction from button message`);
           } catch (removeError) {
             // Not critical if it fails
-            console.log(`Note: Could not remove loading reaction: ${removeError.message}`);
+            logger.warn(`Note: Could not remove loading reaction: ${removeError.message}`);
           }
           
           // Then add success reaction
@@ -78,20 +80,20 @@ async function finishRequest(args = {}, threadState) {
               timestamp: buttonMessageTs,
               name: 'white_check_mark'
             });
-            console.log(`Added success reaction to button message`);
+            logger.info(`Added success reaction to button message`);
           } catch (addError) {
             // If this fails with "already_reacted", that's okay
             if (!addError.message.includes('already_reacted')) {
-              console.log(`Could not add success reaction: ${addError.message}`);
+              logger.warn(`Could not add success reaction: ${addError.message}`);
             }
           }
         } catch (reactionError) {
-          console.log(`Error handling button reactions: ${reactionError.message}`);
+          logger.warn(`Error handling button reactions: ${reactionError.message}`);
         }
       }
     }
   } else {
-    console.log(`Request finished with finishRequest tool`);
+    logger.info(`Request finished with finishRequest tool`);
   }
   
   // Return a success message

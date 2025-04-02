@@ -1,4 +1,5 @@
 // Handles formatting of messages for Slack
+const logger = require('./toolUtils/logger');
 
 /**
  * Formats a message for Slack with consistent styling
@@ -269,14 +270,14 @@ function formatSlackMessage(options = {}) {
     text: " " // Always a single space to prevent duplicating content in notifications
   };
   
-  console.log('SLACK FORMAT - Final message structure:');
-  console.log(JSON.stringify({
+  logger.info('SLACK FORMAT - Final message structure:');
+  logger.detail('Message details:', {
     hasBlocks: response.blocks.length > 0,
     blockCount: response.blocks.length,
     hasAttachments: response.attachments.length > 0,
     attachmentCount: response.attachments.length,
     hasText: !!response.text
-  }, null, 2));
+  });
   
   return response;
 }
