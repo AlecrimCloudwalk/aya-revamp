@@ -6,10 +6,10 @@ const { logError } = require('../errors.js');
  * Tool to retrieve the history of a thread for context rebuilding
  * @param {Object} args - Arguments
  * @param {number} [args.limit=20] - Maximum number of messages to retrieve
- * @param {Object} threadState - Current thread state
+ * @param {Object} threadContext - Thread context object
  * @returns {Promise<Object>} - Formatted thread history and thread stats
  */
-async function getThreadHistory(args = {}, threadState) {
+async function getThreadHistory(args = {}, threadContext) {
   try {
     // Handle potential nested parameters structure 
     if (args.parameters && !args.limit) {
@@ -22,7 +22,7 @@ async function getThreadHistory(args = {}, threadState) {
     
     // Filter out non-standard fields
     const validFields = [
-      'limit', 'threadTs', 'includeParent'
+      'limit', 'threadTs', 'channelId', 'includeParent'
     ];
     
     const filteredArgs = {};
@@ -44,12 +44,44 @@ async function getThreadHistory(args = {}, threadState) {
     
     // Default arguments
     const {
-      limit = 20
+      limit = 20,
+      includeParent = true
     } = args;
     
-    // Get required context info from metadata
-    const context = threadState.getMetadata('context');
-    const { channelId, threadTs, threadStats } = context || {};
+    // Get thread ID for context
+    const threadId = threadContext.threadId;
+    
+    // Try to get channel ID and thread TS from args first, then fall back to context
+    let channelId = args.channelId;
+    let threadTs = args.threadTs;
+    
+    if (!channelId && threadContext) {
+      // Try direct property
+      if (threadContext.channelId) {
+        channelId = threadContext.channelId;
+      }
+      // Try from metadata
+      else if (threadContext.getMetadata) {
+        const context = threadContext.getMetadata('context');
+        if (context && context.channelId) {
+          channelId = context.channelId;
+        }
+      }
+    }
+    
+    if (!threadTs && threadContext) {
+      // Try direct property
+      if (threadContext.threadTs) {
+        threadTs = threadContext.threadTs;
+      }
+      // Try from metadata
+      else if (threadContext.getMetadata) {
+        const context = threadContext.getMetadata('context');
+        if (context && context.threadTs) {
+          threadTs = context.threadTs;
+        }
+      }
+    }
     
     // Verify we have the necessary context
     if (!channelId) {
@@ -63,26 +95,19 @@ async function getThreadHistory(args = {}, threadState) {
     // Get Slack client
     const slackClient = getSlackClient();
     
-    // Use existing thread statistics if available and recent (less than 1 minute old)
+    // Get thread statistics
     let totalMessagesInThread = 0;
-    const threadStatsAreRecent = threadStats && 
-      new Date().getTime() - new Date(threadStats.lastChecked).getTime() < 60000;
     
-    if (threadStatsAreRecent) {
-      totalMessagesInThread = threadStats.totalMessagesInThread;
-      console.log(`- Using existing thread stats: ${totalMessagesInThread} messages in thread`);
-    } else {
-      // First get thread information to know total messages
-      // We're intentionally using a small limit first to just get the count
-      const threadInfo = await slackClient.conversations.replies({
-        channel: channelId,
-        ts: threadTs,
-        limit: 5
-      });
-      
-      // Get thread statistics
-      totalMessagesInThread = threadInfo.messages?.[0]?.reply_count || 0;
-    }
+    // First get thread information to know total messages
+    // We're intentionally using a small limit first to just get the count
+    const threadInfo = await slackClient.conversations.replies({
+      channel: channelId,
+      ts: threadTs,
+      limit: 5
+    });
+    
+    // Get thread statistics
+    totalMessagesInThread = threadInfo.messages?.[0]?.reply_count || 0;
     
     // Now fetch the actual messages we want
     const result = await slackClient.conversations.replies({
@@ -133,22 +158,26 @@ async function getThreadHistory(args = {}, threadState) {
       }
     }
     
-    // Add the formatted messages to the thread state
-    if (formattedMessages.length > 0) {
+    // Add messages to the context builder if available
+    if (threadContext && threadContext.addMessage && formattedMessages.length > 0) {
       // Sort messages by timestamp to ensure chronological order
       formattedMessages.sort((a, b) => parseFloat(a.timestamp) - parseFloat(b.timestamp));
       
-      // Clear existing messages if we're rebuilding context
-      threadState.messages = [];
-      
-      // Add all formatted messages to the thread state
+      // Add all formatted messages to the context
       for (const msg of formattedMessages) {
-        threadState.messages.push(msg);
-      }
-      
-      // Set mayNeedHistory to false since we've now loaded the history
-      if (context) {
-        context.mayNeedHistory = false;
+        threadContext.addMessage({
+          source: msg.isUser ? 'user' : 'assistant',
+          id: `${msg.isUser ? 'user' : 'bot'}_${msg.timestamp}`,
+          timestamp: new Date(msg.timestamp * 1000).toISOString(),
+          threadTs: threadId,
+          text: msg.text,
+          sourceId: msg.userId,
+          type: 'history',
+          metadata: {
+            isParent: msg.isParent,
+            fromHistory: true
+          }
+        });
       }
     }
     

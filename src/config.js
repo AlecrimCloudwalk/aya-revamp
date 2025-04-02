@@ -8,7 +8,7 @@ const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN || '';
 // LLM API configuration
 const LLM_API_KEY = process.env.LLM_API_KEY || '';
 const LLM_API_URL = process.env.LLM_API_URL || 'https://api.openai.com/v1/chat/completions'; 
-const LLM_MODEL = process.env.LLM_MODEL || 'gpt-4';
+const LLM_MODEL = process.env.LLM_MODEL || 'gpt-3.5-turbo';
 
 // Application settings
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true';

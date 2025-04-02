@@ -1,7 +1,6 @@
 // Setup and handlers for Slack events
 const { DEV_MODE } = require('./config.js');
-const { getThreadState } = require('./threadState.js');
-const { handleIncomingSlackMessage, handleButtonClick, processButtonInteraction } = require('./orchestrator');
+const { handleIncomingSlackMessage, handleButtonClick } = require('./orchestrator.js');
 const { logError } = require('./errors.js');
 const { getSlackClient } = require('./slackClient.js');
 
@@ -77,145 +76,125 @@ function createMessageContext(message = {}, context = {}) {
 }
 
 /**
- * Sets up Slack event handlers
+ * Sets up event handlers for Slack events
  * @param {Object} app - Slack Bolt app instance
  */
 function setupSlackEvents(app) {
-  // Handle direct messages to the bot
-  app.event('message', async ({ event, context, client, say }) => {
-    try {
-      // Basic log with relevant info only
-      console.log(`Slack message: "${event.text?.substring(0, 50)}${event.text?.length > 50 ? '...' : ''}" | User: ${event.user} | Channel: ${event.channel}`);
-      
-      // Skip bot messages to prevent loops
-      if (event.bot_id || event.subtype === 'bot_message') {
-        console.log("Skipped: Bot message");
-        return;
-      }
-      
-      // Only process DMs (channel type im)
-      const isDM = event.channel_type === 'im';
-      if (!isDM) {
-        console.log("Skipped: Not a DM");
-        return;
-      }
-      
-      // In dev mode, only process messages with the test key
-      if (DEV_MODE && !shouldProcessInDevMode(event.text)) {
-        console.log("Skipped: Dev mode - Missing test key");
-        return;
-      }
-
-      // Collect message metadata
-      const messageContext = createMessageContext(event, {
-        teamId: context.teamId
-      });
-
-      // Handle the message with our orchestrator
-      await handleIncomingSlackMessage(messageContext);
-    } catch (error) {
-      logError('Error handling Slack message event', error, { event });
+    if (!app) {
+        throw new Error('No Slack app instance provided to setupSlackEvents');
     }
-  });
 
-  // Handle app mentions (when someone @mentions the bot)
-  app.event('app_mention', async ({ event, context, client, say }) => {
-    try {
-      // Basic log with relevant info only
-      console.log(`Mention: "${event.text?.substring(0, 50)}${event.text?.length > 50 ? '...' : ''}" | User: ${event.user} | Channel: ${event.channel}`);
-      
-      // In dev mode, only process mentions with the test key
-      if (DEV_MODE && !shouldProcessInDevMode(event.text)) {
-        console.log("Skipped: Dev mode - Missing test key");
-        return;
-      }
-
-      // Collect message metadata
-      const messageContext = createMessageContext(event, {
-        teamId: context.teamId,
-        isMention: true
-      });
-
-      // Handle the message with our orchestrator
-      await handleIncomingSlackMessage(messageContext);
-    } catch (error) {
-      logError('Error handling app_mention event', error, { event });
-    }
-  });
-
-  // Example of handling a slash command
-  app.command('/askbot', async ({ command, ack, context, client }) => {
-    // Acknowledge the command request right away
-    await ack();
-
-    try {
-      // Basic log with relevant info only
-      console.log(`Command: /askbot "${command.text?.substring(0, 50)}${command.text?.length > 50 ? '...' : ''}" | User: ${command.user_id} | Channel: ${command.channel_id}`);
-      
-      // In dev mode, only process commands with the test key
-      if (DEV_MODE && !shouldProcessInDevMode(command.text)) {
-        console.log("Skipped: Dev mode - Missing test key");
-        return;
-      }
-
-      // Collect command metadata
-      const commandContext = {
-        text: command.text,
-        userId: command.user_id,
-        channelId: command.channel_id,
-        teamId: context.teamId,
-        isCommand: true,
-        commandName: '/askbot',
-        responseUrl: command.response_url
-      };
-
-      // Handle the command with our orchestrator
-      await handleIncomingSlackMessage(commandContext);
-    } catch (error) {
-      logError('Error handling slash command', error, { command });
-    }
-  });
-
-  // Handle button clicks from messages with blocks
-  app.action(/.*/, async ({ action, body, ack }) => {
-    try {
-      // Acknowledge receipt of the button action
-      await ack();
-      
-      // Add loading reaction immediately
-      try {
-        const slackClient = getSlackClient();
-        await slackClient.reactions.add({
-          channel: body.channel.id,
-          timestamp: body.message.ts,
-          name: 'loading'
-        });
-      } catch (reactionError) {
-        console.log(`Could not add loading reaction in event handler: ${reactionError.message}`);
-      }
-      
-      // Log the entire payload for debugging
-      console.log('Button click event payload:', JSON.stringify({
-        action_id: action.action_id,
-        button_value: action.value,
-        user_id: body.user.id,
-        channel_id: body.channel.id,
-        message_ts: body.message.ts,
-        thread_ts: body.message.thread_ts || body.container.message_ts
-      }, null, 2));
-      
-      // Process the button click
-      await processButtonInteraction(body);
-    } catch (error) {
-      console.error('Error handling button click:', error);
-    }
-  });
-
-  return app;
+    // Handle direct messages to the bot
+    app.event('message', async ({ event, context, client, say }) => {
+        try {
+            // Filter out bot messages and message_changed events
+            if (event.bot_id || event.subtype === 'message_changed' || event.subtype === 'message_deleted') {
+                return;
+            }
+            
+            // Check if this is a direct message (im) or a message in a thread
+            const isDirectMessage = event.channel_type === 'im';
+            const isThreadedMessage = !!event.thread_ts;
+            
+            // We only care about:
+            // 1. Direct messages to the bot
+            // 2. Messages in threads where the bot is active
+            if (!isDirectMessage && !isThreadedMessage) {
+                return;
+            }
+            
+            // Create context object with consistent properties
+            const contextObj = {
+                userId: event.user,
+                channelId: event.channel,
+                timestamp: event.ts,
+                threadTs: event.thread_ts || event.ts, // If not in thread, create one
+                text: event.text,
+                isDirectMessage: isDirectMessage,
+                isThreadedConversation: isThreadedMessage,
+                isMention: false // Not mentioned, just in DM or thread
+            };
+            
+            // Pass to handler
+            await handleIncomingSlackMessage(contextObj);
+        } catch (error) {
+            console.error(`Error handling message event: ${error.message}`);
+            // Try to send an error message
+            try {
+                await say({
+                    text: `I'm having trouble processing your message. Please try again later.`,
+                    thread_ts: event.thread_ts || event.ts
+                });
+            } catch (sayError) {
+                console.error(`Error sending error response: ${sayError.message}`);
+            }
+        }
+    });
+    
+    // Handle mentions of the bot
+    app.event('app_mention', async ({ event, context, client, say }) => {
+        try {
+            // Create context object with consistent properties
+            const contextObj = {
+                userId: event.user,
+                channelId: event.channel,
+                timestamp: event.ts,
+                threadTs: event.thread_ts || event.ts, // If not in thread, create one
+                text: event.text,
+                isDirectMessage: false,
+                isThreadedConversation: !!event.thread_ts,
+                isMention: true
+            };
+            
+            // Pass to handler
+            await handleIncomingSlackMessage(contextObj);
+        } catch (error) {
+            console.error(`Error handling app_mention event: ${error.message}`);
+            // Try to send an error message
+            try {
+                await say({
+                    text: `I'm having trouble processing your mention. Please try again later.`,
+                    thread_ts: event.thread_ts || event.ts
+                });
+            } catch (sayError) {
+                console.error(`Error sending error response: ${sayError.message}`);
+            }
+        }
+    });
+    
+    // Handle button clicks in messages
+    app.action(/.*/, async ({ action, body, ack, respond }) => {
+        try {
+            // Acknowledge the request right away
+            await ack();
+            
+            console.log(`✅ Received button click event: action_id=${body.actions?.[0]?.action_id}, value=${body.actions?.[0]?.value}`);
+            
+            // Pass to handler
+            await handleButtonClick(body);
+        } catch (error) {
+            console.error(`Error handling button click: ${error.message}`);
+            // Try to send an error message
+            try {
+                await respond({
+                    text: `I'm having trouble processing your selection. Please try again later.`,
+                    replace_original: false
+                });
+            } catch (respondError) {
+                console.error(`Error sending error response: ${respondError.message}`);
+            }
+        }
+    });
+    
+    // Log errors
+    app.error(async (error) => {
+        console.error(`Slack app error: ${error.message}`);
+        console.error(error);
+    });
 }
 
 module.exports = {
-  setupSlackEvents,
-  shouldProcessInDevMode,
-  createMessageContext
+    setupSlackEvents,
+    shouldProcessInDevMode,
+    createMessageContext
 }; 

@@ -59,10 +59,10 @@ async function processLLMFeedback(args, threadState) {
       // Check if the button selection has already been visually acknowledged
       if (threadState.buttonSelectionAlreadyAcknowledged) {
         // The message has already been updated to show the selection visually
-        guidance = `IMPORTANT: The user clicked the "${latestButtonFeedback.value}" button. The original message UI has ALREADY been updated to show a confirmation (✅ Opção selecionada). DO NOT post another acknowledgment message about this selection - continue the conversation directly with the next logical step related to their "${latestButtonFeedback.value}" choice.`;
+        guidance = `The user clicked the "${latestButtonFeedback.value}" button. The message has been updated to show their selection.`;
       } else {
         // Standard guidance for when button hasn't been visually updated
-        guidance = `IMPORTANT: The user clicked a button (${selectedButton?.value || 'unknown value'}). The original message has ALREADY been updated to show their selection. Do NOT try to update it again with updateMessage or updateButtonMessage. Instead, send a NEW message acknowledging their choice.`;
+        guidance = `The user clicked a button with value "${selectedButton?.value || 'unknown value'}". The message has been updated to show their selection.`;
       }
     }
     

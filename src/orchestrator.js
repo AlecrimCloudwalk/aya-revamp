@@ -4,7 +4,8 @@ const tools = require('./tools/index.js');
 const { getTool } = tools;
 const { logError } = require('./errors.js');
 const { getSlackClient } = require('./slackClient.js');
-const { getThreadState } = require('./threadState.js');
+const { getContextBuilder } = require('./contextBuilder.js');
+const { initializeContextIfNeeded } = require('./toolUtils/loadThreadHistory');
 const { updateButtonMessage } = require('./buttonUpdater');
 
 /**
@@ -17,19 +18,48 @@ async function handleIncomingSlackMessage(context) {
         console.log(`Text: "${context.text}"`);
         if (context.threadTs) console.log(`Thread: ${context.threadTs}`);
         console.log("--------------------------------");
-
-        // Get thread state
+        
+        // Get thread ID (either thread timestamp or channel ID for direct messages)
         const threadId = context.threadTs || context.channelId;
-        const threadState = getThreadState(threadId);
         
-        // Add context to thread state
-        threadState.setMetadata('context', context);
+        // Get context builder
+        const contextBuilder = getContextBuilder();
         
-        // Store the conversation context string directly in threadState for easy access
-        // This makes sure channel ID is readily available in a consistent format
-        const conversationContext = `User:${context.userId}, Channel:${context.channelId}, Thread:${context.threadTs || 'N/A'}`;
-        threadState._conversationContext = conversationContext;
-        console.log(`--- Conversation Context ---\n${conversationContext}\n---------------------`);
+        // Store context in the metadata
+        contextBuilder.setMetadata(threadId, 'context', context);
+        
+        // Add context conversational info for easy access
+        contextBuilder.setMetadata(threadId, 'conversationInfo', 
+            `User:${context.userId}, Channel:${context.channelId}, Thread:${context.threadTs || 'N/A'}`
+        );
+        
+        // Add message to context
+        try {
+            contextBuilder.addMessage({
+                source: 'user',
+                originalContent: {
+                    text: context.text,
+                    user: context.userId,
+                    ts: context.timestamp,
+                    thread_ts: context.threadTs,
+                    channel: context.channelId
+                },
+                id: `user_${context.timestamp || Date.now()}`,
+                timestamp: new Date().toISOString(),
+                threadTs: context.threadTs || context.timestamp,
+                text: context.text,
+                sourceId: context.userId,
+                metadata: {
+                    channel: context.channelId,
+                    isDirectMessage: context.isDirectMessage || false,
+                    isMention: context.isMention || false
+                }
+            });
+            
+            console.log('Added incoming message to context builder');
+        } catch (contextError) {
+            console.error('Error adding message to context builder:', contextError);
+        }
         
         // Add thinking reaction
         try {
@@ -44,7 +74,7 @@ async function handleIncomingSlackMessage(context) {
         }
         
         // Process the thread
-        await processThread(threadState);
+        await processThread(threadId);
 
         // Update reaction to checkmark
         try {
@@ -89,11 +119,14 @@ async function handleIncomingSlackMessage(context) {
 /**
  * Executes a tool and records its execution in thread state
  */
-async function executeTool(toolName, args, threadState) {
+async function executeTool(toolName, args, threadId) {
+    // Get context builder
+    const contextBuilder = getContextBuilder();
+    
     // Check if we've already executed this exact tool call
-    if (threadState.hasExecuted(toolName, args)) {
+    if (contextBuilder.hasExecuted(threadId, toolName, args)) {
         console.log(`Tool ${toolName} already executed with these args, skipping`);
-        return threadState.getToolResult(toolName, args);
+        return contextBuilder.getToolResult(threadId, toolName, args);
     }
 
     try {
@@ -141,10 +174,31 @@ async function executeTool(toolName, args, threadState) {
         // Pre-execution parameter validation and logging
         logParameterTypes(toolName, sanitizedArgs);
 
-        // Pass the entire threadState object to the tool
-        // Use the sanitized args with standardized reasoning
-        const result = await tool(sanitizedArgs, threadState);
-        threadState.recordToolExecution(toolName, sanitizedArgs, result);
+        // Create an object with thread-specific context for the tool
+        const threadContext = {
+            threadId: threadId,
+            channelId: contextBuilder.getChannel(threadId),
+            threadTs: contextBuilder.getThreadTs(threadId),
+            getMetadata: (key) => contextBuilder.getMetadata(threadId, key),
+            setMetadata: (key, value) => contextBuilder.setMetadata(threadId, key, value),
+            getButtonState: (actionId) => contextBuilder.getButtonState(threadId, actionId),
+            setButtonState: (actionId, state, metadata) => contextBuilder.setButtonState(threadId, actionId, state, metadata),
+            addMessage: (message) => {
+                message.threadTs = threadId;
+                return contextBuilder.addMessage(message);
+            },
+            addToHistory: (message) => {
+                message.threadTs = threadId;
+                return contextBuilder.addMessage(message);
+            }
+        };
+
+        // Pass the thread context object to the tool
+        const result = await tool(sanitizedArgs, threadContext);
+        
+        // Record the tool execution in context builder
+        contextBuilder.recordToolExecution(threadId, toolName, sanitizedArgs, result);
+        
         return result;
 
     } catch (error) {
@@ -153,7 +207,10 @@ async function executeTool(toolName, args, threadState) {
         if (error.message.includes('JSON') || error.message.includes('array') || error.message.includes('object')) {
             console.log(`💡 This might be a parameter formatting issue. Check that arrays and objects are correctly formatted.`);
         }
-        threadState.recordToolExecution(toolName, args, null, error);
+        
+        // Record the failed execution
+        contextBuilder.recordToolExecution(threadId, toolName, args, null, error);
+        
         throw error;
     }
 }
@@ -193,12 +250,15 @@ function logParameterTypes(toolName, args) {
 /**
  * Processes a thread with the LLM
  */
-async function processThread(threadState) {
+async function processThread(threadId) {
     const MAX_ITERATIONS = 10;
     let iteration = 0;
+    
+    // Get context builder
+    const contextBuilder = getContextBuilder();
 
-    // Debug log: Print what context is stored in the thread state
-    const context = threadState.getMetadata('context');
+    // Debug log: Print what context is stored
+    const context = contextBuilder.getMetadata(threadId, 'context');
     
     console.log("\n--- THREAD CONTEXT ---");
     if (context) {
@@ -210,9 +270,17 @@ async function processThread(threadState) {
             console.log(`Button click: ${context.buttonText} (value: ${context.actionValue})`);
         }
     } else {
-        console.log("⚠️ WARNING: No context found in thread state metadata!");
+        console.log(`No context in thread state`);
     }
-    console.log("---------------------");
+    console.log("-----------------------");
+
+    // Initialize the context builder with thread history if needed
+    try {
+        await initializeContextIfNeeded(threadId);
+    } catch (contextError) {
+        console.error('Error initializing context:', contextError);
+        // Continue even if context initialization fails
+    }
 
     // First, get the thread history to have better context for the LLM
     try {
@@ -228,12 +296,20 @@ async function processThread(threadState) {
                     limit: 10, // Get up to 10 messages
                     includeParent: true,
                     reasoning: "Getting thread history for better context"
-                }, threadState);
+                }, {
+                    threadId: threadId,
+                    threadTs: context.threadTs,
+                    channelId: context.channelId,
+                    addToHistory: (message) => {
+                        message.threadTs = threadId;
+                        return contextBuilder.addMessage(message);
+                    }
+                });
                 
                 console.log(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history`);
                 
                 // Record the tool execution so the LLM knows about it
-                threadState.recordToolExecution('getThreadHistory', 
+                contextBuilder.recordToolExecution(threadId, 'getThreadHistory', 
                     { threadTs: context.threadTs, limit: 10 }, 
                     historyResult);
             }
@@ -242,74 +318,84 @@ async function processThread(threadState) {
         console.log(`Failed to get thread history: ${historyError.message}`);
         // Continue even if history fetch fails
     }
-    
-    // NEW: Check for LLM feedback like button clicks
-    try {
-        // Check if we have any stored feedback or recent button selections
-        if (threadState.llmFeedback && threadState.llmFeedback.length > 0) {
-            console.log(`Found ${threadState.llmFeedback.length} LLM feedback items, processing...`);
-            
-            // Get the feedback processing tool
-            const feedbackTool = getTool('processLLMFeedback');
-            if (feedbackTool) {
-                const feedbackResult = await feedbackTool({
-                    checkForSelection: true,
-                    reasoning: "Processing user feedback and button selections"
-                }, threadState);
-                
-                console.log(`Processed ${feedbackResult.feedbackCount || 0} feedback items, including ${feedbackResult.buttonSelections || 0} button selections`);
-                
-                // Record the tool execution for the LLM
-                threadState.recordToolExecution('processLLMFeedback', 
-                    { checkForSelection: true }, 
-                    feedbackResult);
-            }
-        } else {
-            console.log('No stored LLM feedback found to process');
-        }
-    } catch (feedbackError) {
-        console.log(`Failed to process LLM feedback: ${feedbackError.message}`);
-        // Continue even if feedback processing fails
-    }
-
-    // Initialize thread history tracking if it doesn't exist
-    if (!threadState.messages) {
-        threadState.messages = [];
-    }
-    
-    // Check if we've already added the user's message to the message history
-    const userMessageExists = threadState.messages.some(msg => 
-        msg.isUser && msg.timestamp === context.timestamp
-    );
-    
-    // Add the current user message to our message history if not already present
-    if (!userMessageExists && context) {
-        // Make sure we're using the filtered text (without dev prefix)
-        const messageText = context.text || '';
-        
-        threadState.messages.push({
-            text: messageText,
-            isUser: true,
-            timestamp: context.timestamp,
-            threadTs: context.threadTs,
-            isParentMessage: !context.isThreadedConversation,
-            threadPosition: threadState.messages.length + 1
-        });
-        console.log("Added user's message to thread history");
-    }
 
     // Track if we've successfully processed the request
     let requestCompleted = false;
     let lastToolExecuted = null;
     let messagePosted = false;
+    let messagesSent = 0;
+    
+    // Check if we're handling a button selection
+    const isButtonSelection = context && context.isButtonClick === true;
+    
+    // Maximum message limit for button selections
+    const MAX_BUTTON_MESSAGES = 1;
+    // Maximum messages per user request (to prevent spam/duplicates)
+    const MAX_MESSAGES_PER_REQUEST = 1;
+    let buttonResponses = 0;
+    
+    // Keep track of recent message texts to detect duplicates
+    const recentMessages = [];
+    
+    // Helper function to detect duplicate/similar messages
+    function isSimilarToRecent(messageText) {
+        if (!messageText) return false;
+        
+        for (const prevMessage of recentMessages) {
+            // Simple similarity check - if the first 20 chars match, it's likely similar
+            if (prevMessage.substring(0, 20) === messageText.substring(0, 20)) {
+                console.log("⚠️ Detected similar message beginning, possible duplicate");
+                return true;
+            }
+            
+            // If messages are 80% the same length and have significant overlap, likely duplicate
+            const lengthRatio = Math.min(prevMessage.length, messageText.length) / 
+                               Math.max(prevMessage.length, messageText.length);
+            
+            if (lengthRatio > 0.8 && 
+                (prevMessage.includes(messageText.substring(0, 30)) || 
+                 messageText.includes(prevMessage.substring(0, 30)))) {
+                console.log("⚠️ Detected significant message overlap, possible duplicate");
+                return true;
+            }
+        }
+        
+        return false;
+    }
     
     while (iteration < MAX_ITERATIONS && !requestCompleted) {
         iteration++;
         console.log(`\n🔄 Iteration ${iteration}/${MAX_ITERATIONS}`);
 
         try {
+            // If we've already sent a message, strongly encourage finishing the request
+            if (messagePosted && messagesSent >= MAX_MESSAGES_PER_REQUEST) {
+                console.log(`Already sent ${messagesSent} messages - auto-finishing request`);
+                
+                // Auto-finish the request to prevent message spam
+                const finishTool = getTool('finishRequest');
+                if (finishTool) {
+                    await finishTool({
+                        summary: "Auto-completing request after sending message",
+                        reasoning: "One message per user request is the standard behavior"
+                    }, {
+                        threadId: threadId,
+                        threadTs: context?.threadTs,
+                        channelId: context?.channelId,
+                        addToHistory: (message) => {
+                            message.threadTs = threadId;
+                            return contextBuilder.addMessage(message);
+                        }
+                    });
+                    
+                    requestCompleted = true;
+                    console.log("✅ Auto-completed request after message was sent");
+                    break;
+                }
+            }
+
             // Get next action from LLM
-            const llmResult = await getNextAction(threadState);
+            const llmResult = await getNextAction(threadId);
             
             // Check for tool calls
             const { toolCalls } = llmResult;
@@ -322,8 +408,91 @@ async function processThread(threadState) {
             const { tool: toolName, parameters: args } = toolCalls[0];
             lastToolExecuted = toolName;
             
+            // If tool is postMessage, check for duplicate content
+            if (toolName === 'postMessage' && args?.text) {
+                if (isSimilarToRecent(args.text)) {
+                    console.log("⚠️ Skipping duplicate message content");
+                    
+                    // If we have a duplicate message but haven't finished the request,
+                    // auto-finish it to prevent getting stuck in a loop
+                    const finishTool = getTool('finishRequest');
+                    if (finishTool) {
+                        await finishTool({
+                            summary: "Auto-completing after detecting duplicate content",
+                            reasoning: "Prevented duplicate message"
+                        }, {
+                            threadId: threadId,
+                            threadTs: context?.threadTs,
+                            channelId: context?.channelId,
+                            addToHistory: (message) => {
+                                message.threadTs = threadId;
+                                return contextBuilder.addMessage(message);
+                            }
+                        });
+                        
+                        requestCompleted = true;
+                        console.log("✅ Auto-completed request to prevent duplicate messages");
+                        break;
+                    }
+                    
+                    // Skip to next iteration
+                    continue;
+                }
+                
+                // Store message to detect duplicates
+                recentMessages.push(args.text);
+            }
+            
+            // For button selections, limit number of messages 
+            if (isButtonSelection && toolName === 'postMessage') {
+                buttonResponses++;
+                if (buttonResponses > MAX_BUTTON_MESSAGES) {
+                    console.log(`Reached maximum messages (${MAX_BUTTON_MESSAGES}) for button selection - stopping iterations`);
+                    requestCompleted = true;
+                    
+                    // Auto-finish the request
+                    const finishTool = getTool('finishRequest');
+                    if (finishTool) {
+                        await finishTool({
+                            summary: "Button selection completed after first response message",
+                            reasoning: "Button selection was already visually acknowledged - stopping iterations after first message"
+                        }, {
+                            threadId: threadId,
+                            threadTs: context.threadTs,
+                            channelId: context.channelId,
+                            addToHistory: (message) => {
+                                message.threadTs = threadId;
+                                return contextBuilder.addMessage(message);
+                            }
+                        });
+                    }
+                    
+                    break;
+                }
+            }
+            
+            // Add proper thread context with working addToHistory
+            const threadContext = {
+                threadId: threadId,
+                threadTs: context?.threadTs,
+                channelId: context?.channelId,
+                getMetadata: (key) => contextBuilder.getMetadata(threadId, key),
+                setMetadata: (key, value) => contextBuilder.setMetadata(threadId, key, value),
+                getButtonState: (actionId) => contextBuilder.getButtonState(threadId, actionId),
+                setButtonState: (actionId, state, metadata) => 
+                    contextBuilder.setButtonState(threadId, actionId, state, metadata),
+                addMessage: (message) => {
+                    message.threadTs = threadId;
+                    return contextBuilder.addMessage(message);
+                },
+                addToHistory: (message) => {
+                    message.threadTs = threadId;
+                    return contextBuilder.addMessage(message);
+                }
+            };
+            
             // Execute the tool
-            const result = await executeTool(toolName, args, threadState);
+            const result = await executeTool(toolName, args, threadId);
 
             // If the tool was finishRequest, we're done
             if (toolName === 'finishRequest') {
@@ -335,290 +504,127 @@ async function processThread(threadState) {
             // Track message posting
             if (toolName === 'postMessage' || toolName === 'createButtonMessage') {
                 messagePosted = true;
+                messagesSent++;
                 
-                // Create a record of this message for future context
-                const messageRecord = {
-                    text: args.text || (args.blocks ? "Message with blocks content" : "Message with no text content"),
-                    isUser: false,
-                    timestamp: result.ts || result.messageTs || new Date().toISOString(),
-                    threadTs: context?.threadTs || result.threadTs,
-                    fromTool: true,
-                    toolName: toolName,
-                    requestId: Date.now().toString(),
-                    threadPosition: threadState.messages ? threadState.messages.length + 1 : 1
-                };
+                // Add to context with metadata for proper tracking
+                contextBuilder.addMessage({
+                    source: 'assistant',
+                    originalContent: {
+                        tool: toolName,
+                        parameters: args
+                    },
+                    id: `assistant_${result.ts || Date.now()}`,
+                    timestamp: new Date().toISOString(),
+                    threadTs: threadId,
+                    text: args.text || "Message with no text content",
+                    sourceId: 'assistant',
+                    type: toolName === 'createButtonMessage' ? 'button_message' : 'text',
+                    metadata: {
+                        slackTs: result.ts,
+                        toolName: toolName,
+                        reasoning: args.reasoning || "No reasoning provided"
+                    }
+                });
                 
-                // If there are attachments, save the content in a more descriptive way
-                if (args.attachments || args.color) {
-                    messageRecord.hasAttachments = true;
+                // For regular messages (not button clicks), auto-finish after the message
+                // This is to prevent the problematic behavior of sending multiple messages
+                if (!isButtonSelection && messagesSent >= MAX_MESSAGES_PER_REQUEST) {
+                    console.log("Auto-finishing request after sending the first message");
                     
-                    // Extract actual content from attachments
-                    if (args.attachments && args.attachments.length > 0) {
-                        // Try to extract text from blocks inside attachments
-                        const attachmentBlocks = args.attachments[0].blocks || [];
-                        const extractedTexts = [];
-                        
-                        // Recursively extract text from blocks
-                        function extractTextFromBlock(block) {
-                            if (!block) return null;
-                            
-                            // Direct text in a block
-                            if (block.text?.text) {
-                                return block.text.text;
-                            }
-                            // Section block
-                            else if (block.type === 'section') {
-                                if (block.text?.text) {
-                                    return block.text.text;
-                                }
-                            }
-                            // Context block with elements
-                            else if (block.type === 'context' && Array.isArray(block.elements)) {
-                                return block.elements
-                                    .map(element => element.text || null)
-                                    .filter(Boolean)
-                                    .join(" ");
-                            }
-                            // Header block
-                            else if (block.type === 'header' && block.text?.text) {
-                                return `*${block.text.text}*`;
-                            }
-                            
-                            return null;
-                        }
-                        
-                        // Process each block
-                        for (const block of attachmentBlocks) {
-                            const extractedText = extractTextFromBlock(block);
-                            if (extractedText) {
-                                extractedTexts.push(extractedText);
-                            }
-                        }
-                        
-                        if (extractedTexts.length > 0) {
-                            // Use the actual content from blocks
-                            messageRecord.text = extractedTexts.join("\n");
-                        }
-                    }
-                    
-                    // Include the first part of the text as description
-                    if (messageRecord.text) {
-                        messageRecord.description = `Sent formatted message: "${messageRecord.text.substring(0, 100)}${messageRecord.text.length > 100 ? '...' : ''}"`;
-                    } else {
-                        messageRecord.description = "Sent message with attachments but couldn't extract text content";
-                    }
-                }
-                
-                // Add the message to our thread history
-                threadState.messages.push(messageRecord);
-                
-                console.log(`Added ${toolName} result to thread history for future context`);
-                
-                // Add a brief pause to ensure message is fully processed
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
-                // If this is a button message, add a special note to help the LLM understand
-                // what was created
-                if (toolName === 'createButtonMessage') {
-                    try {
-                        // Safely extract button text descriptions
-                        let buttonDescriptions = "Created interactive buttons";
-                        
-                        // Check if args has buttons either at top level or in parameters
-                        const buttonsArray = args.buttons || (args.parameters && args.parameters.buttons);
-                        
-                        // Safe validation before attempting to process
-                        if (buttonsArray) {
-                            // Safely handle both array and string formats
-                            let buttons = buttonsArray;
-                            
-                            // If it's a JSON string, try to parse it
-                            if (typeof buttons === 'string') {
-                                try {
-                                    buttons = JSON.parse(buttons);
-                                    console.log('Successfully parsed buttons from JSON string');
-                                } catch (err) {
-                                    console.log(`Couldn't parse buttons string: ${err.message}`);
-                                    buttons = null;
-                                }
-                            }
-                            
-                            // Only proceed if buttons is a valid array now
-                            if (Array.isArray(buttons) && buttons.length > 0) {
-                                // Extract text safely from each button
-                                const buttonTexts = buttons
-                                    .filter(b => b && typeof b === 'object')
-                                    .map(b => {
-                                        // Handle various button text formats
-                                        if (b.text?.text) return b.text.text; // Slack block format
-                                        if (b.text) return b.text;           // Simple format
-                                        if (b.value) return b.value;         // Fallback to value
-                                        return 'Unnamed button';             // Last resort
-                                    });
-                                
-                                if (buttonTexts.length > 0) {
-                                    buttonDescriptions += ": " + buttonTexts.join(', ');
-                                }
-                            }
-                        }
-                        
-                        // Add a clear entry showing what buttons were created
-                        const buttonDescription = {
-                            text: buttonDescriptions,
-                            isUser: false,
-                            isSystemNote: true,
-                            timestamp: new Date().toISOString(),
-                            threadTs: context?.threadTs,
-                            fromTool: true,
-                            toolName: "system_note",
-                            threadPosition: threadState.messages.length + 1
-                        };
-                        
-                        // Add this description to thread history
-                        threadState.messages.push(buttonDescription);
-                        
-                        console.log("Added button description to thread history");
-                    } catch (error) {
-                        console.log(`Error creating button description: ${error.message}`);
-                        // Continue even if button description fails - this is not critical
-                    }
-                }
-            }
-            
-            // Auto-complete the request after message was posted
-            if (!requestCompleted && messagePosted && iteration > 1) {
-                console.log("Message posted but no finishRequest called - auto-completing request immediately");
-
-                try {
-                    // Call finishRequest implicitly
+                    // Auto-finish the request
                     const finishTool = getTool('finishRequest');
                     if (finishTool) {
                         await finishTool({
-                            summary: "Auto-completed after message was posted",
-                            reasoning: "Auto-completion to end request after message posted"
-                        }, threadState);
-                        console.log("Request auto-completed with implicit finishRequest");
+                            summary: "Request completed after sending message",
+                            reasoning: "One message per user request is the standard behavior"
+                        }, threadContext);
+                        
                         requestCompleted = true;
+                        console.log("✅ Auto-completed request after message was sent");
+                        break;
                     }
-                } catch (autoCompleteError) {
-                    console.log(`Failed to auto-complete request: ${autoCompleteError.message}`);
                 }
-            }
-            
-            // Special handling for button selections that were already acknowledged
-            // Break the loop after first action if the button was visually acknowledged
-            if (messagePosted && threadState.buttonSelectionAlreadyAcknowledged) {
-                console.log("Button selection was already visually acknowledged - stopping iterations after first message");
-                requestCompleted = true;
                 
-                try {
-                    // Call finishRequest explicitly
+                // If this is a button selection, auto-complete after first message
+                // This prevents the LLM from sending multiple responses
+                if (isButtonSelection && buttonResponses >= MAX_BUTTON_MESSAGES) {
+                    console.log(`Button selection was already visually acknowledged - stopping iterations after first message`);
+                    requestCompleted = true;
+                    
+                    // Auto-finish the request
                     const finishTool = getTool('finishRequest');
                     if (finishTool) {
                         await finishTool({
-                            summary: "Request finished with finishRequest tool after button selection",
-                            reasoning: "Button selection was already visually acknowledged, completing after first response"
-                        }, threadState);
+                            summary: "Button selection completed after first response message",
+                            reasoning: "Button selection was already visually acknowledged - stopping iterations after first message"
+                        }, threadContext);
                     }
-                } catch (error) {
-                    console.log(`Error completing button selection flow: ${error.message}`);
+                    
+                    break;
                 }
             }
 
         } catch (error) {
             console.log(`Error in process loop: ${error.message}`);
             
-            // Instead of sending a hardcoded error message, add the error to thread state
-            // and let the LLM decide how to handle it
+            // Handle error through the LLM
             try {
-                const context = threadState.getMetadata('context');
+                // Format the error
+                const { formatErrorForLLM } = require('./errors.js');
+                const formattedError = formatErrorForLLM(error);
                 
-                if (context && context.channelId) {
-                    // Format the error for the LLM
-                    const { formatErrorForLLM } = require('./errors.js');
-                    const formattedError = formatErrorForLLM(error);
-                    
-                    // Store the error in thread state as a failed tool execution
-                    // This will appear naturally in the conversation flow
-                    threadState.recordToolExecution('error_handler', 
-                        { 
-                            source: error.source || 'processThread',
-                            operation: error.operation || 'unknown'
-                        }, 
-                        formattedError,
-                        error);
-                    
-                    // Continue processing with the LLM to let it handle the error
-                    const llmResult = await getNextAction(threadState);
-                    
-                    // Check for tool calls
-                    const { toolCalls } = llmResult;
-                    if (toolCalls?.length) {
-                        // Execute the tool call from the LLM's error handling
-                        const { tool: toolName, parameters: args } = toolCalls[0];
-                        await executeTool(toolName, args, threadState);
-                        
-                        // If the tool was finishRequest, we're done
-                        if (toolName === 'finishRequest') {
-                            requestCompleted = true;
-                            break;
-                        }
+                // Store the error in context builder
+                contextBuilder.recordToolExecution(threadId, 'error_handler', 
+                    { 
+                        source: error.source || 'processThread',
+                        operation: error.operation || 'unknown'
+                    }, 
+                    formattedError,
+                    error);
+                
+                // Add as system message for context
+                contextBuilder.addMessage({
+                    source: 'system',
+                    id: `error_${Date.now()}`,
+                    timestamp: new Date().toISOString(),
+                    threadTs: threadId,
+                    text: `Error: ${error.message}`,
+                    type: 'error',
+                    metadata: {
+                        error: formattedError
                     }
-                }
-            } catch (errorHandlingError) {
-                console.log(`Failed to handle error via LLM: ${errorHandlingError.message}`);
-                // Log the original error and the error handling error
-                logError('Error handling failed', errorHandlingError, { originalError: error });
+                });
+                
+                // Skip to next iteration to let LLM handle the error
+                continue;
+            } catch (handlerError) {
+                console.log(`Error handling error: ${handlerError.message}`);
+                break;
             }
-            
-            break;
         }
     }
 
-    // Auto-complete the request if we've reached the iteration limit
-    if (!requestCompleted && iteration >= MAX_ITERATIONS) {
-        console.log("Reached maximum iterations without explicit finishRequest - auto-completing");
+    // If we reached max iterations without explicit finishRequest
+    if (iteration >= MAX_ITERATIONS && !requestCompleted) {
+        console.log(`⚠️ Reached maximum iterations (${MAX_ITERATIONS}) without explicit finishRequest - auto-completing`);
         
+        // Auto-finish the request
         try {
-            // Call finishRequest implicitly
             const finishTool = getTool('finishRequest');
             if (finishTool) {
                 await finishTool({
-                    summary: "Auto-completed due to iteration limit",
-                    reasoning: "Auto-completion due to iteration limit"
-                }, threadState);
-                
-                console.log("Request auto-completed due to iteration limit");
-                
-                // Add a clear system note about auto-completion due to iteration limit
-                if (threadState.messages) {
-                    threadState.messages.push({
-                        text: "Request auto-completed after reaching maximum iterations",
-                        isUser: false,
-                        isSystemNote: true,
-                        timestamp: new Date().toISOString(),
-                        threadTs: context?.threadTs,
-                        fromTool: true,
-                        toolName: "system_note",
-                        threadPosition: threadState.messages.length + 1
-                    });
-                }
+                    summary: `Auto-completed after ${iteration} iterations`,
+                    reasoning: "Maximum iterations reached without explicit finishRequest"
+                }, {
+                    threadId: threadId,
+                    threadTs: context?.threadTs,
+                    channelId: context?.channelId
+                });
             }
-        } catch (finishError) {
-            console.log(`Error auto-completing request: ${finishError.message}`);
-            // Continue even if auto-completion fails
+        } catch (error) {
+            console.log(`Error auto-finishing request: ${error.message}`);
         }
     }
-}
-
-/**
- * Handle a button click event from Slack
- * @param {Object} payload - The button click payload from Slack
- * @returns {Promise<void>}
- */
-async function handleButtonClick(payload) {
-  // Call the new dedicated function to process button interactions
-  await processButtonInteraction(payload);
 }
 
 /**
@@ -628,12 +634,6 @@ async function handleButtonClick(payload) {
  */
 async function processButtonInteraction(payload) {
   try {
-    console.log(`\nAction: ${payload.actions[0].action_id} | Value: ${payload.actions[0].value} | User: ${payload.user.id} | Channel: ${payload.channel.id}`);
-    
-    console.log(`\n👆 BUTTON CLICK`);
-    console.log(`User: ${payload.user.id} | Action: ${payload.actions[0].action_id}`);
-    console.log(`--------------------------------`);
-    
     // Extract key information
     const actionId = payload.actions[0].action_id;
     const actionValue = payload.actions[0].value;
@@ -643,72 +643,68 @@ async function processButtonInteraction(payload) {
     const threadTs = payload.message.thread_ts || payload.container.message_ts;
     const messageTs = payload.container.message_ts;
     
+    // Log button click event for debugging
+    console.log(`\n👆 BUTTON CLICK`);
+    console.log(`User: ${userId} | Action: ${actionId} | Value: ${actionValue}`);
+    console.log(`Channel: ${channelId} | Thread: ${threadTs}`);
+    console.log(`--------------------------------`);
+    
     // Create thread ID (consistent with our other code)
     const threadId = threadTs || channelId;
     
-    // UPDATED: Get thread state directly using the imported function
-    const threadState = getThreadState(threadId);
+    // Get context builder
+    const contextBuilder = getContextBuilder();
     
-    // Instead of calling the LLM tool, use our direct button updater
-    // This handles all the UI feedback (loading indicator, etc.) internally
-    const updateResult = await updateButtonMessage(payload, threadState);
-    console.log(`Button update result:`, updateResult);
+    // Update thread context to indicate this is a button click
+    contextBuilder.setMetadata(threadId, 'context', {
+      userId,
+      channelId,
+      threadTs,
+      isButtonClick: true,
+      buttonText,
+      actionValue,
+      timestamp: Date.now().toString()
+    });
     
-    // Store update result for reference
-    threadState.lastButtonUpdate = {
+    // Update the button UI in Slack FIRST - this is critical
+    const updateResult = await updateButtonMessage(payload, {
+      threadId: threadId,
+      threadTs: threadTs,
+      channelId: channelId,
+      getButtonState: (actionId) => contextBuilder.getButtonState(threadId, actionId),
+      setButtonState: (actionId, state, metadata) => contextBuilder.setButtonState(threadId, actionId, state, metadata)
+    });
+    
+    console.log(`Button update result:`, updateResult.updated ? 'SUCCESS' : 'FAILED');
+    
+    // Add button click to context
+    contextBuilder.addMessage({
+      source: 'button_click',
+      originalContent: payload,
+      id: `button_${messageTs}_${Date.now()}`,
+      userId: userId,
+      threadTs: threadId,
       timestamp: new Date().toISOString(),
-      messageTs: messageTs,
-      success: updateResult.updated,
-      error: updateResult.error
-    };
-    
-    // Create a simulation of a user message with the button click info
-    const buttonClickMessage = {
-      user: userId,
-      text: `[Button Selection: ${buttonText}]`, // Make it clearer this is a button click
-      isUser: true,
-      isButtonClick: true, // Mark as button click
-      buttonValue: actionValue, // Store the actual value
-      timestamp: Date.now(),
-      threadTs
-    };
-    
-    // Add the button click to the thread history
-    if (typeof threadState.addMessage === 'function') {
-      threadState.addMessage(buttonClickMessage);
-      console.log(`Added button selection to thread history using addMessage()`);
-    } else {
-      // Initialize the messages array if it doesn't exist
-      if (!Array.isArray(threadState.messages)) {
-        threadState.messages = [];
+      text: `User clicked the "${buttonText}" button with value "${actionValue}". The original message has ALREADY been updated to show this selection.`,
+      type: 'button_click',
+      metadata: {
+        buttonText,
+        buttonValue: actionValue,
+        messageTs,
+        channelId,
+        actionId,
+        type: 'button_selection'
       }
-      
-      // Add the message directly to the messages array instead
-      threadState.messages.push(buttonClickMessage);
-      console.log(`Added button selection to thread history by pushing to messages array`);
-    }
+    });
     
-    // Add a system note to guide the LLM about button selection
-    if (Array.isArray(threadState.messages)) {
-      threadState.messages.push({
-        text: `The user selected the "${buttonText}" button (value: "${actionValue}"). The original message has already been updated to show this selection. DO NOT post another confirmation message about this selection - the UI already shows "✅ Opção selecionada: ${buttonText}" on the original button message. Instead, respond with the next logical step related to the selection.`,
-        isUser: false,
-        isSystemNote: true,
-        timestamp: new Date().toISOString(),
-        threadTs: threadTs,
-        fromTool: true,
-        toolName: "system_note",
-        threadPosition: threadState.messages.length + 1
-      });
-      console.log(`Added system message explaining button selection requirements`);
-    }
+    console.log('Added button click feedback to context');
     
-    // Process the button click - this will trigger a new LLM interaction
-    await processThread(threadState);
+    // Process the thread - this will trigger a new LLM interaction
+    await processThread(threadId);
   } catch (error) {
     console.error(`Error handling button interaction:`, error);
     
-    // Attempt to send error message if possible
+    // Simple error handling
     try {
       const slackClient = getSlackClient();
       await slackClient.chat.postMessage({
@@ -722,10 +718,19 @@ async function processButtonInteraction(payload) {
   }
 }
 
+/**
+ * Handle a button click event from Slack
+ * @param {Object} payload - The button click payload from Slack
+ * @returns {Promise<void>}
+ */
+async function handleButtonClick(payload) {
+  // Call our updated processButtonInteraction function
+  await processButtonInteraction(payload);
+}
+
 module.exports = {
     handleIncomingSlackMessage,
     handleButtonClick,
     executeTool,
-    processThread,
-    processButtonInteraction
+    processThread
 };

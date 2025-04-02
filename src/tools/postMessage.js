@@ -18,6 +18,7 @@ const {
   logMessageStructure,
   processBlocks 
 } = require('../toolUtils/messageFormatUtils');
+const { getContextBuilder } = require('../contextBuilder.js');
 
 /**
  * Conditionally log messages based on environment variables
@@ -196,6 +197,8 @@ async function getUserProfilePicture(userId) {
  * @returns {Promise<Object>} - Result of the post operation
  */
 async function postMessage(args, threadState) {
+  let messageParams;
+  
   try {
     // Log the tool call
     console.log('📣 postMessage tool called with args:', JSON.stringify(args, null, 2));
@@ -226,7 +229,7 @@ async function postMessage(args, threadState) {
     }
     
     // Prepare the message parameters
-    const messageParams = {
+    messageParams = {
       channel: channelId,
       thread_ts: threadTs, // Will be ignored if no thread_ts exists
       ...formattedMessage // Spread in the blocks and attachments
@@ -253,7 +256,25 @@ async function postMessage(args, threadState) {
     console.log('📄 FULL MESSAGE RESULT STRUCTURE FROM SLACK:');
     console.log(JSON.stringify(result, null, 2));
     
-    // Add the message to thread history for future reference
+    // Add to the new context builder with complete info
+    try {
+      const contextBuilder = getContextBuilder();
+      contextBuilder.addMessage({
+        source: 'llm',
+        llmResponse: args,  // The original LLM tool call
+        slackResult: result, // The Slack API result
+        id: result.ts,
+        timestamp: new Date().toISOString(),
+        threadTs: threadTs || result.ts,
+        originalContent: result  // Keep the full message
+      });
+      
+      console.log('Added message to context builder');
+    } catch (contextError) {
+      console.error('Error adding message to context builder:', contextError);
+    }
+    
+    // Legacy: Add the message to thread history for future reference
     try {
       if (threadState && typeof threadState.addToHistory === 'function') {
         threadState.addToHistory('message', result);
