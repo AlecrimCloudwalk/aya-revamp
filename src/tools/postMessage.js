@@ -209,6 +209,51 @@ async function postMessage(args, threadState) {
       args = args.parameters;
     }
     
+    // Check if the text appears to be a JSON string representing a tool call
+    if (args.text && typeof args.text === 'string') {
+      const trimmedText = args.text.trim();
+      
+      // Check if it looks like a JSON object that might be a tool call
+      if ((trimmedText.startsWith('{') && trimmedText.endsWith('}')) &&
+          (trimmedText.includes('"tool"') || trimmedText.includes('"parameters"'))) {
+        
+        try {
+          // Try to parse as JSON
+          const parsedText = JSON.parse(trimmedText);
+          
+          // Check if it has properties that suggest it's meant to be a tool call
+          if (parsedText.tool && typeof parsedText.tool === 'string') {
+            console.log(`⚠️ Detected what appears to be a tool call in the text parameter: ${parsedText.tool}`);
+            
+            // Special case: if it's a finishRequest tool call, we can forward it to the proper tool
+            if (parsedText.tool === 'finishRequest') {
+              console.log('Converting embedded finishRequest to proper tool call');
+              
+              // Import and call the finishRequest tool directly
+              const { finishRequest } = require('./finishRequest.js');
+              
+              if (finishRequest) {
+                const result = await finishRequest(parsedText.parameters || {}, threadState);
+                return {
+                  forwarded: true,
+                  originalTool: 'postMessage',
+                  executedTool: 'finishRequest',
+                  result
+                };
+              }
+            }
+            
+            // Provide feedback that this should have been a direct tool call
+            console.log('⚠️ The LLM tried to call another tool by embedding JSON in the message text');
+            // We'll continue processing as a normal message, but log the issue
+          }
+        } catch (jsonError) {
+          // Not valid JSON or not a tool call, continue as normal
+          console.log(`Text parameter contains JSON-like content but isn't valid JSON or a tool call`);
+        }
+      }
+    }
+    
     // Format the message text using our shared utility
     let formattedMessage;
     
@@ -247,8 +292,7 @@ async function postMessage(args, threadState) {
     // Post the message
     const slack = getSlackClient();
     
-    console.log('📋 POSTING MESSAGE WITH STRUCTURE:');
-    console.log(JSON.stringify(cleanedMessage, null, 2));
+    logMessageStructure(messageParams, 'POSTING_MESSAGE');
     
     const result = await slack.chat.postMessage(cleanedMessage);
     

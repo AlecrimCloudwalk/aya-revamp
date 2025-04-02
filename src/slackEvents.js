@@ -15,6 +15,32 @@ function shouldProcessInDevMode(text) {
 }
 
 /**
+ * Determines if bot should respond to a message based on context
+ * @param {Object} contextObj - Message context object
+ * @returns {boolean} - Whether the message should be processed
+ */
+function shouldRespondToMessage(contextObj) {
+  // In dev mode, only process messages containing the test key
+  if (DEV_MODE && !shouldProcessInDevMode(contextObj.text)) {
+    console.log("DEV MODE: Ignoring message without dev key !@#");
+    return false;
+  }
+  
+  // Always respond if directly mentioned
+  if (contextObj.isMention) {
+    return true;
+  }
+  
+  // In DMs, only respond if it's a one-on-one conversation (no other users)
+  if (contextObj.isDirectMessage && !contextObj.hasMultipleUsers) {
+    return true;
+  }
+  
+  // Don't respond in channels or multi-user DMs without being mentioned
+  return false;
+}
+
+/**
  * Processes a message from Slack
  * @param {Object} message - The message from Slack
  * @param {Object} context - Additional context for processing
@@ -29,8 +55,12 @@ function createMessageContext(message = {}, context = {}) {
   ctx.channelId = message.channel || ctx.channelId;
   ctx.userId = message.user || ctx.userId;
   
+  // Store original text for dev mode checking
+  const originalText = message.text || ctx.text || '';
+  ctx.originalText = originalText;
+  
   // Filter out dev prefix '!@#' from the text
-  let processedText = message.text || ctx.text || '';
+  let processedText = originalText;
   if (processedText.startsWith('!@#')) {
     // Simply remove the prefix without logging
     processedText = processedText.substring(3).trim();
@@ -51,9 +81,16 @@ function createMessageContext(message = {}, context = {}) {
     ctx.isThreadedConversation = false;
   }
   
-  // Determine if this is a direct message
+  // Determine if this is a direct message with multiple users
   if (message.channel_type === 'im') {
     ctx.isDirectMessage = true;
+    ctx.hasMultipleUsers = false; // One-on-one DM
+  } else if (message.channel_type === 'mpim') {
+    ctx.isDirectMessage = true;
+    ctx.hasMultipleUsers = true; // Multi-person DM
+  } else {
+    ctx.isDirectMessage = false;
+    ctx.hasMultipleUsers = true; // Channel
   }
   
   // Add current message data for LLM context
@@ -94,14 +131,8 @@ function setupSlackEvents(app) {
             
             // Check if this is a direct message (im) or a message in a thread
             const isDirectMessage = event.channel_type === 'im';
+            const isMultiPersonDM = event.channel_type === 'mpim';
             const isThreadedMessage = !!event.thread_ts;
-            
-            // We only care about:
-            // 1. Direct messages to the bot
-            // 2. Messages in threads where the bot is active
-            if (!isDirectMessage && !isThreadedMessage) {
-                return;
-            }
             
             // Create context object with consistent properties
             const contextObj = {
@@ -110,10 +141,18 @@ function setupSlackEvents(app) {
                 timestamp: event.ts,
                 threadTs: event.thread_ts || event.ts, // If not in thread, create one
                 text: event.text,
-                isDirectMessage: isDirectMessage,
+                originalText: event.text,
+                isDirectMessage: isDirectMessage || isMultiPersonDM,
+                hasMultipleUsers: isMultiPersonDM,
                 isThreadedConversation: isThreadedMessage,
                 isMention: false // Not mentioned, just in DM or thread
             };
+            
+            // Check if we should respond to this message
+            if (!shouldRespondToMessage(contextObj)) {
+                console.log("Ignoring message - doesn't meet response criteria");
+                return;
+            }
             
             // Pass to handler
             await handleIncomingSlackMessage(contextObj);
@@ -141,10 +180,18 @@ function setupSlackEvents(app) {
                 timestamp: event.ts,
                 threadTs: event.thread_ts || event.ts, // If not in thread, create one
                 text: event.text,
+                originalText: event.text,
                 isDirectMessage: false,
+                hasMultipleUsers: true,
                 isThreadedConversation: !!event.thread_ts,
                 isMention: true
             };
+            
+            // Check if we should respond to this message (dev mode check)
+            if (DEV_MODE && !shouldProcessInDevMode(contextObj.originalText)) {
+                console.log("DEV MODE: Ignoring mention without dev key !@#");
+                return;
+            }
             
             // Pass to handler
             await handleIncomingSlackMessage(contextObj);
@@ -196,5 +243,6 @@ function setupSlackEvents(app) {
 module.exports = {
     setupSlackEvents,
     shouldProcessInDevMode,
+    shouldRespondToMessage,
     createMessageContext
 }; 

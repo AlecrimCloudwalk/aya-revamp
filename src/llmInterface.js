@@ -7,8 +7,6 @@ const { getContextBuilder } = require('./contextBuilder.js');
 const { readFileSync } = require('fs');
 const path = require('path');
 const { callOpenAI } = require('./openai.js');
-const tools = require('./tools/index.js');
-const { getToolsForLLM: getAvailableTools } = tools;
 
 // Shared constants for message formatting to avoid duplication
 const COMMUNICATION_STYLE = `- Be enthusiastic, cheerful, and energetic in your responses! 🎉
@@ -200,11 +198,15 @@ async function getNextAction(threadId) {
     // Build the prompt with thread-specific information
     const messages = buildPrompt(threadId);
     
-    // Call OpenAI
+    // Get tools directly from the tools module - they are already in the correct format
+    const availableTools = getToolsForLLM();
+    console.log(`Providing ${availableTools.length} tools to OpenAI API`);
+    
+    // Call OpenAI with the tools
     const response = await callOpenAI({
         messages,
-        tools: getAvailableTools(),
-        tool_choice: "auto"
+        tools: availableTools,
+        tool_choice: "auto"  // Let the model decide whether to use tools
     });
     
     if (!response || !response.choices || response.choices.length === 0) {
@@ -214,7 +216,7 @@ async function getNextAction(threadId) {
     // Get the message from the response
     const message = response.choices[0].message;
     
-    // Add the LLM's thinking to the context
+    // Add the LLM's thinking to the context if content is present
     if (message.content) {
         contextBuilder.addMessage({
             source: 'llm_thinking',
@@ -234,49 +236,89 @@ async function getNextAction(threadId) {
     // Format the response for our orchestrator
     let toolCalls = [];
     
+    // Check if the message has tool_calls
     if (message.tool_calls && message.tool_calls.length > 0) {
         console.log(`LLM wants to call ${message.tool_calls.length} tools`);
         
+        // Process each tool call
         toolCalls = message.tool_calls.map(toolCall => {
             try {
-                // Parse the function arguments
-                const args = JSON.parse(toolCall.function.arguments);
+                // Only process function-type tool calls
+                if (toolCall.type !== 'function') {
+                    console.log(`Skipping non-function tool call of type: ${toolCall.type}`);
+                    return null;
+                }
                 
-                // Return the tool call
+                // Get the function name - this is the name of our tool
+                const functionName = toolCall.function.name;
+                console.log(`Processing function call: ${functionName}`);
+                
+                // Parse the arguments (they come as a JSON string)
+                let args;
+                try {
+                    args = JSON.parse(toolCall.function.arguments);
+                } catch (parseError) {
+                    console.log(`Error parsing tool arguments: ${parseError.message}`);
+                    
+                    // Try to clean up any formatting issues before parsing again
+                    const cleanedArgs = toolCall.function.arguments
+                        .replace(/\\n/g, '\n')  // Handle escaped newlines
+                        .replace(/\n/g, ' ')    // Replace actual newlines with spaces
+                        .replace(/\t/g, ' ')    // Replace tabs with spaces
+                        .replace(/\s+/g, ' ')   // Replace multiple spaces with a single space
+                        .trim();
+                    
+                    try {
+                        args = JSON.parse(cleanedArgs);
+                        console.log("Successfully parsed arguments after cleanup");
+                    } catch (secondError) {
+                        // If still failing, create a minimal valid object with the required reasoning
+                        console.log(`Could not parse arguments even after cleanup: ${secondError.message}`);
+                        args = {
+                            __parsing_error: true,
+                            __raw_arguments: toolCall.function.arguments,
+                            error: parseError.message,
+                            reasoning: "Error parsing tool arguments"
+                        };
+                    }
+                }
+                
+                // Format the tool call for our orchestrator
+                // Keep the reasoning in the parameters for backward compatibility 
+                // with tools that expect it there
                 return {
-                    tool: toolCall.function.name,
-                    parameters: args
+                    tool: functionName,
+                    parameters: args,
+                    reasoning: args.reasoning || "No explicit reasoning provided"
                 };
             } catch (error) {
-                // Log error but don't throw it - some errors might be recoverable
-                console.log(`Error parsing tool call: ${error.message}`);
-                console.log(`Raw arguments: ${toolCall.function.arguments}`);
-                
-                // Return a malformed tool call that our orchestrator can handle
-                return {
-                    tool: toolCall.function.name,
-                    parameters: {
-                        __parsing_error: true,
-                        __raw_arguments: toolCall.function.arguments,
-                        error: error.message
-                    }
-                };
+                console.log(`Error handling tool call: ${error.message}`);
+                // Return null for failed processing
+                return null;
             }
-        });
+        }).filter(call => call !== null); // Remove any failed tool calls
+    } else if (message.content && message.content.trim()) {
+        // If no tool calls but there is content, create a postMessage tool call
+        console.log("No tool calls, creating implicit postMessage from content");
+        toolCalls = [{
+            tool: "postMessage",
+            parameters: {
+                text: message.content.trim(),
+                reasoning: "Implicit response converted to postMessage"
+            },
+            reasoning: "Implicit response converted to postMessage"
+        }];
     } else {
-        console.log("No explicit tool calls in LLM response");
-        
-        // If there's content but no tool calls, we'll create a "postMessage" tool call
-        if (message.content && message.content.trim()) {
-            console.log("Creating implicit postMessage tool call from content");
-            toolCalls = [{
-                tool: "postMessage",
-                parameters: {
-                    text: message.content.trim(),
-                    reasoning: "Implicit response from LLM content"
-                }
-            }];
-        }
+        console.log("No content or tool calls in response");
+        // Create a default tool call when no response is provided
+        toolCalls = [{
+            tool: "postMessage",
+            parameters: {
+                text: "I apologize, but I'm having trouble processing your request right now. Could you please try again or rephrase your question?",
+                reasoning: "Fallback due to empty response"
+            },
+            reasoning: "Fallback due to empty response"
+        }];
     }
     
     // Return the formatted response
@@ -688,6 +730,50 @@ async function parseToolCallFromResponse(llmResponse) {
       
       // Default to a postMessage with the content
       if (assistantMessage.content) {
+        // Try to detect if the content is actually a JSON string representing a tool call
+        const content = assistantMessage.content.trim();
+        
+        // Check if content looks like a JSON object that might be a tool call
+        if ((content.startsWith('{') && content.endsWith('}')) || 
+            (content.includes('```json') && content.includes('```'))) {
+          console.log("Detected possible tool call in message content");
+          
+          try {
+            // Extract JSON if it's in a code block
+            let jsonContent = content;
+            if (content.includes('```json')) {
+              const matches = content.match(/```json\s*([\s\S]*?)\s*```/);
+              if (matches && matches[1]) {
+                jsonContent = matches[1].trim();
+              }
+            }
+            
+            // Clean up any escaping issues
+            jsonContent = preprocessLlmJson(jsonContent);
+            
+            // Try to parse as JSON
+            const parsedContent = JSON.parse(jsonContent);
+            
+            // Check if it has a tool field, which indicates it's trying to be a tool call
+            if (parsedContent.tool) {
+              console.log(`Detected tool call in content: ${parsedContent.tool}`);
+              
+              // Format as a proper tool call
+              return {
+                toolCalls: [{
+                  tool: parsedContent.tool,
+                  parameters: parsedContent.parameters || {},
+                  reasoning: parsedContent.reasoning || "Auto-extracted from message content"
+                }]
+              };
+            }
+          } catch (parseError) {
+            console.log(`Failed to parse content as tool call JSON: ${parseError.message}`);
+          }
+        }
+        
+        // If we couldn't parse as a tool call or it wasn't a valid tool call JSON,
+        // fall back to treating as regular message content
         return {
           toolCalls: [{
             tool: 'postMessage',

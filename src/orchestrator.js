@@ -647,6 +647,7 @@ async function processButtonInteraction(payload) {
     console.log(`\n👆 BUTTON CLICK`);
     console.log(`User: ${userId} | Action: ${actionId} | Value: ${actionValue}`);
     console.log(`Channel: ${channelId} | Thread: ${threadTs}`);
+    console.log(`Message TS: ${messageTs} | Thread TS: ${threadTs}`);
     console.log(`--------------------------------`);
     
     // Create thread ID (consistent with our other code)
@@ -666,6 +667,18 @@ async function processButtonInteraction(payload) {
       timestamp: Date.now().toString()
     });
     
+    // Log payload structure for debugging
+    console.log(`Button payload structure:`, JSON.stringify({
+      message_ts: messageTs,
+      thread_ts: threadTs, 
+      has_blocks: !!payload.message.blocks,
+      blocks_count: payload.message.blocks?.length || 0,
+      has_attachments: !!payload.message.attachments,
+      attachments_count: payload.message.attachments?.length || 0,
+      action_id: actionId,
+      action_value: actionValue
+    }, null, 2));
+    
     // Update the button UI in Slack FIRST - this is critical
     const updateResult = await updateButtonMessage(payload, {
       threadId: threadId,
@@ -677,6 +690,39 @@ async function processButtonInteraction(payload) {
     
     console.log(`Button update result:`, updateResult.updated ? 'SUCCESS' : 'FAILED');
     
+    if (!updateResult.updated) {
+      console.error(`⚠️ Button update failed: ${updateResult.error}`);
+      // Send a message indicating that the button was clicked (as a fallback)
+      const slackClient = getSlackClient();
+      await slackClient.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: `<@${userId}> selected: *${buttonText}* (button update failed, sending as new message)`
+      });
+    } else if (!updateResult.actionsBlockFound) {
+      console.warn(`⚠️ Button was clicked but no actions block was found to update`);
+      
+      // This means the UI wasn't visually updated, so we need to inform the user
+      // ADDITIONAL DEBUG INFO: Log the payload message to see what message was actually clicked
+      if (payload.message) {
+        console.log(`Payload message TS: ${payload.message.ts}`);
+        console.log(`Payload message contains attachments: ${!!payload.message.attachments}`);
+        if (payload.message.attachments) {
+          const actionBlocks = payload.message.attachments.filter(a => 
+            a.blocks && a.blocks.some(b => b.type === 'actions')
+          );
+          console.log(`Action blocks found in payload attachments: ${actionBlocks.length}`);
+        }
+      }
+      
+      const slackClient = getSlackClient();
+      await slackClient.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: `<@${userId}> selected: *${buttonText}* (selection processed)`
+      });
+    }
+    
     // Add button click to context
     contextBuilder.addMessage({
       source: 'button_click',
@@ -685,7 +731,7 @@ async function processButtonInteraction(payload) {
       userId: userId,
       threadTs: threadId,
       timestamp: new Date().toISOString(),
-      text: `User clicked the "${buttonText}" button with value "${actionValue}". The original message has ALREADY been updated to show this selection.`,
+      text: `User clicked the "${buttonText}" button with value "${actionValue}". ${updateResult.updated ? 'The original message has been updated to show this selection.' : 'Button update status: FAILED.'}`,
       type: 'button_click',
       metadata: {
         buttonText,
@@ -693,7 +739,9 @@ async function processButtonInteraction(payload) {
         messageTs,
         channelId,
         actionId,
-        type: 'button_selection'
+        type: 'button_selection',
+        updateStatus: updateResult.updated ? 'success' : 'failed',
+        error: updateResult.error || null
       }
     });
     
@@ -704,13 +752,13 @@ async function processButtonInteraction(payload) {
   } catch (error) {
     console.error(`Error handling button interaction:`, error);
     
-    // Simple error handling
+    // Enhanced error handling
     try {
       const slackClient = getSlackClient();
       await slackClient.chat.postMessage({
         channel: payload.channel.id,
         thread_ts: payload.message.thread_ts || payload.container.message_ts,
-        text: "I'm sorry, I encountered an error processing your button click. Please try again or contact support."
+        text: `I'm sorry, I encountered an error processing your button click: ${error.message}. Please try again or contact support.`
       });
     } catch (sendError) {
       console.error(`Failed to send error message:`, sendError);

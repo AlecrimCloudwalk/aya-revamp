@@ -167,6 +167,9 @@ function cleanAndProcessMessage(messageParams) {
     });
   }
   
+  // Log final structure
+  logMessageStructure(result, 'PROCESSED');
+  
   return result;
 }
 
@@ -409,31 +412,112 @@ function getThreadTs(args, threadContext) {
 }
 
 /**
- * Log a message structure for debugging
- * @param {Object} messageParams - Message parameters to log
- * @param {string} label - Label for the log message
+ * Logs the structure of a message for debugging
+ * @param {Object} messageParams - Message parameters
+ * @param {string} label - Label for the log entry
  */
 function logMessageStructure(messageParams, label = 'MESSAGE') {
-  console.log(`📋 FINAL ${label} STRUCTURE:`);
-  console.log(`  - Channel: ${messageParams.channel || 'Not specified'}`);
-  
-  if (messageParams.thread_ts) {
-    console.log(`  - Thread: ${messageParams.thread_ts}`);
+  if (!messageParams) {
+    console.log(`📋 ${label} STRUCTURE: undefined or null`);
+    return;
   }
   
-  if (messageParams.ts) {
-    console.log(`  - Message TS: ${messageParams.ts}`);
+  // Create a simpler version for logging
+  const structure = {
+    hasBlocks: !!messageParams.blocks,
+    blockCount: messageParams.blocks?.length || 0,
+    hasAttachments: !!messageParams.attachments,
+    attachmentCount: messageParams.attachments?.length || 0,
+    hasText: !!messageParams.text,
+    messageId: messageParams.ts || 'unknown'
+  };
+  
+  console.log(`📋 ${label} STRUCTURE:
+  - Message ID/TS: ${structure.messageId}
+  - Channel: ${messageParams.channel}
+  - Thread: ${messageParams.thread_ts || 'N/A'}
+  - Direct blocks: ${structure.blockCount}
+  - Attachments: ${structure.attachmentCount}
+  - Blocks in first attachment: ${messageParams.attachments?.[0]?.blocks?.length || 0}`);
+  
+  // Log more detailed block structure for debugging
+  console.log(`📋 ${label} DETAILED STRUCTURE:`, JSON.stringify({
+    ts: messageParams.ts,
+    channel: messageParams.channel,
+    thread_ts: messageParams.thread_ts,
+    has_blocks: structure.hasBlocks,
+    block_count: structure.blockCount,
+    has_attachments: structure.hasAttachments,
+    attachment_count: structure.attachmentCount
+  }, null, 2));
+  
+  // If there are blocks, log their types
+  if (messageParams.blocks && messageParams.blocks.length > 0) {
+    const blockTypes = messageParams.blocks.map(b => ({
+      type: b.type,
+      block_id: b.block_id || 'no_id'
+    }));
+    console.log(`Direct Blocks:`, JSON.stringify(blockTypes, null, 2));
+    
+    // Look specifically for action blocks in direct blocks
+    const actionBlocks = messageParams.blocks.filter(b => b.type === 'actions');
+    if (actionBlocks.length > 0) {
+      console.log(`✅ Found ${actionBlocks.length} actions blocks in direct blocks`);
+      actionBlocks.forEach((block, i) => {
+        if (block.elements && block.elements.length > 0) {
+          const buttonCount = block.elements.filter(e => e.type === 'button').length;
+          console.log(`   - Actions block ${i+1} has ${buttonCount} buttons with block_id: ${block.block_id || 'none'}`);
+          
+          // Log button details
+          if (buttonCount > 0) {
+            const buttons = block.elements.filter(e => e.type === 'button').map(b => ({
+              action_id: b.action_id,
+              text: b.text?.text || 'no text',
+              value: b.value || 'no value'
+            }));
+            console.log(`   - Button details: ${JSON.stringify(buttons, null, 2)}`);
+          }
+        }
+      });
+    }
   }
-  
-  console.log(`  - Direct blocks: ${messageParams.blocks ? messageParams.blocks.length : 0}`);
-  console.log(`  - Attachments: ${messageParams.attachments ? messageParams.attachments.length : 0}`);
-  
+
+  // Log attachment block types
   if (messageParams.attachments && messageParams.attachments.length > 0) {
-    console.log(`  - Blocks in first attachment: ${
-      messageParams.attachments[0].blocks ? 
-      messageParams.attachments[0].blocks.length : 0
-    }`);
+    messageParams.attachments.forEach((attachment, idx) => {
+      if (attachment.blocks && attachment.blocks.length > 0) {
+        const blockTypes = attachment.blocks.map(b => ({
+          type: b.type,
+          block_id: b.block_id || 'no_id'
+        }));
+        console.log(`Attachment ${idx+1} Blocks:`, JSON.stringify(blockTypes, null, 2));
+        
+        // Specifically identify the actions blocks that we'll want to update for button clicks
+        const actionBlocks = attachment.blocks.filter(b => b.type === 'actions');
+        if (actionBlocks.length > 0) {
+          console.log(`✅ Found ${actionBlocks.length} actions blocks in attachment ${idx+1}`);
+          actionBlocks.forEach((block, i) => {
+            if (block.elements && block.elements.length > 0) {
+              const buttonCount = block.elements.filter(e => e.type === 'button').length;
+              console.log(`   - Actions block ${i+1} has ${buttonCount} buttons with block_id: ${block.block_id || 'none'}`);
+              
+              // Log button details
+              if (buttonCount > 0) {
+                const buttons = block.elements.filter(e => e.type === 'button').map(b => ({
+                  action_id: b.action_id,
+                  text: b.text?.text || 'no text',
+                  value: b.value || 'no value'
+                }));
+                console.log(`   - Button details: ${JSON.stringify(buttons, null, 2)}`);
+              }
+            }
+          });
+        }
+      }
+    });
   }
+
+  return structure;
 }
 
 module.exports = {

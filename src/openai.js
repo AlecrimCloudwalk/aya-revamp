@@ -11,7 +11,7 @@ const fetch = require('node-fetch');
  * @param {Object} params - Parameters for the OpenAI call
  * @param {Array<{role: string, content: string}>} params.messages - Messages to send to the API
  * @param {Array} [params.tools] - Tools to include in the API call
- * @param {string} [params.tool_choice] - Whether to force a tool choice
+ * @param {string|Object} [params.tool_choice] - Whether to force a tool choice
  * @returns {Promise<Object>} - The OpenAI API response
  */
 async function callOpenAI(params) {
@@ -26,16 +26,40 @@ async function callOpenAI(params) {
             model,
             messages: params.messages,
             temperature: params.temperature || 0.7,
-            // Include tools if provided
-            ...(params.tools && { tools: params.tools }),
-            ...(params.tool_choice && { tool_choice: params.tool_choice }),
-            // Force JSON response format when using tools
-            ...(params.tools && { response_format: { type: "json_object" } })
         };
+        
+        // Handle tools and tool_choice according to OpenAI's latest API
+        if (params.tools && params.tools.length > 0) {
+            // Tools are already in the correct format from the tool registry
+            requestBody.tools = params.tools;
+            
+            // Handle tool_choice parameter
+            if (params.tool_choice) {
+                // If it's an object with name, format it correctly
+                if (typeof params.tool_choice === 'object' && params.tool_choice.name) {
+                    requestBody.tool_choice = {
+                        type: "function",
+                        function: {
+                            name: params.tool_choice.name
+                        }
+                    };
+                } else {
+                    // If it's a string like "auto" or "required", use as is
+                    requestBody.tool_choice = params.tool_choice;
+                }
+            } else {
+                // Default to "auto" per documentation recommendation
+                requestBody.tool_choice = "auto";
+            }
+            
+            console.log(`Tool choice: ${typeof requestBody.tool_choice === 'object' ? 
+                JSON.stringify(requestBody.tool_choice) : requestBody.tool_choice}`);
+        }
         
         // Log request details
         console.log(`Using model: ${model}`);
         console.log(`API URL: ${LLM_API_URL || 'https://api.openai.com/v1/chat/completions'}`);
+        console.log(`Tools provided: ${params.tools ? params.tools.length : 0}`);
         
         // Make request to OpenAI API
         const response = await fetch(
