@@ -201,14 +201,18 @@ async function postMessage(args, threadState) {
   let messageParams;
   
   try {
-    // Log the tool call
+    // Log the tool call and reasoning
     logger.info('postMessage tool called');
+    if (args.reasoning) {
+      logger.info(`🧠 REASONING: ${args.reasoning}`);
+    }
     logger.detail('postMessage args:', args);
     
     // Handle potential nested parameters structure 
     if (args.parameters && !args.text) {
+      // The parameters are one level too deep - fix it
       logger.info('Detected nested parameters structure, extracting inner parameters');
-      args = args.parameters;
+      args = { ...args.parameters, reasoning: args.reasoning };
     }
     
     // Check if the text appears to be a JSON string representing a tool call
@@ -291,6 +295,35 @@ async function postMessage(args, threadState) {
     // Log the final message structure
     logMessageStructure(cleanedMessage);
     
+    // Final message params have been prepared, log them for inspection
+    logger.info("Final message params prepared for Slack API:");
+    if (messageParams.text) {
+      logger.info(`Text content: ${messageParams.text.length > 100 ? 
+        messageParams.text.substring(0, 100) + '...' : messageParams.text}`);
+    }
+    
+    if (messageParams.attachments && messageParams.attachments.length > 0) {
+      logger.info(`Attachments: ${messageParams.attachments.length}`);
+      messageParams.attachments.forEach((attachment, idx) => {
+        logger.info(`Attachment [${idx}] color: ${attachment.color || 'none'}`);
+        
+        if (attachment.blocks && attachment.blocks.length > 0) {
+          logger.info(`Attachment [${idx}] has ${attachment.blocks.length} blocks`);
+          
+          // Log text content from blocks
+          const textContent = attachment.blocks
+            .filter(block => block.type === 'section' && block.text && block.text.text)
+            .map(block => block.text.text)
+            .join('\n');
+            
+          if (textContent) {
+            logger.info(`Attachment [${idx}] text content: ${textContent.length > 200 ? 
+              textContent.substring(0, 200) + '...' : textContent}`);
+          }
+        }
+      });
+    }
+    
     // Post the message
     const slack = getSlackClient();
     
@@ -301,62 +334,108 @@ async function postMessage(args, threadState) {
     // Debug log the full message result structure
     logger.detail('Message result structure from Slack:', result);
     
-    // Add to the new context builder with complete info
+    // Add to the context builder
     try {
-      const contextBuilder = getContextBuilder();
+      // Record the tool execution first
+      const toolExecutionId = contextBuilder.recordToolExecution(
+        threadTs,
+        'postMessage', 
+        args, 
+        result
+      );
+      
+      // Now add the message, associating it with the tool execution
       contextBuilder.addMessage({
         source: 'llm',
-        llmResponse: args,  // The original LLM tool call
-        slackResult: result, // The Slack API result
-        id: result.ts,
+        id: `bot_${result.ts || Date.now()}`,
         timestamp: new Date().toISOString(),
-        threadTs: threadTs || result.ts,
-        originalContent: result  // Keep the full message
+        threadTs: threadTs,
+        text: args.text || '',
+        type: 'message',
+        fromToolExecution: true, // Mark that this came from a tool call
+        toolExecutionId: toolExecutionId, // Link to the tool execution
+        metadata: {
+          messageTs: result.ts,
+          channelId: channelId,
+          update: false,
+          buttons: null,
+          color: normalizeColor(args.color),
+          actions: [],
+          userDisplay: '',
+          threadTs: threadTs
+        }
       });
       
       logger.info('Added message to context builder');
-    } catch (contextError) {
-      console.error('Error adding message to context builder:', contextError);
+    } catch (err) {
+      logger.warn(`Error adding message to context builder: ${err.message}`);
     }
     
-    // Legacy: Add the message to thread history for future reference
+    // Legacy: Add the message to thread history using addMessage for consistency
     try {
-      if (threadState && typeof threadState.addToHistory === 'function') {
-        threadState.addToHistory('message', result);
+      if (threadState && typeof threadState.addMessage === 'function') {
+        threadState.addMessage({
+          source: 'assistant',
+          id: `message_${result.ts}`,
+          timestamp: new Date().toISOString(),
+          threadTs: threadTs || result.ts,
+          text: args.text || '',
+          metadata: {
+            slackTs: result.ts,
+            color: args.color,
+            channelId: channelId
+          }
+        });
         logger.info('Added postMessage result to thread history for future context');
       } else {
-        logger.warn('Unable to add to thread history: threadState.addToHistory not available');
+        logger.warn('Unable to add to thread history: threadState.addMessage not available');
       }
     } catch (historyError) {
       console.error('Error adding message to thread history:', historyError);
     }
     
-    return result;
+    // Return a summary of what was posted
+    return {
+      ok: result.ok,
+      ts: result.ts,
+      message: {
+        ts: result.ts,
+        text: args.text ? (args.text.length > 100 ? args.text.substring(0, 100) + '...' : args.text) : '',
+        thread_ts: threadTs
+      }
+    };
   } catch (error) {
-    console.error('Error in postMessage tool:', error);
+    logError('Error posting message', error, { args });
     
-    // Additional debug info for API errors
-    if (error.code === 'slack_webapi_platform_error') {
-      console.error('Slack API Error Details:');
-      console.error(JSON.stringify(error.data, null, 2));
-      
-      // Log the actual message that failed
-      console.error('Failed message structure:');
-      console.error(JSON.stringify(messageParams, null, 2));
-    }
-    
+    // Create a friendly error response for the LLM
     const errorResponse = {
       error: true,
       message: error.message,
-      details: error.stack
+      friendlyMessage: 'There was an error posting your message to Slack.',
+      suggestions: [
+        'Try simplifying your message content',
+        'Check for invalid formatting or characters',
+        'Make sure the channel exists and the bot has access'
+      ]
     };
     
-    // Safely add error to history if possible
+    // Add the error to thread history for context
     try {
-      if (threadState && typeof threadState.addToHistory === 'function') {
-        threadState.addToHistory('error', errorResponse);
+      if (threadState && typeof threadState.addMessage === 'function') {
+        threadState.addMessage({
+          source: 'system',
+          id: `error_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          threadTs: threadTs,
+          text: `Error posting message: ${error.message}`,
+          type: 'error',
+          metadata: {
+            error: error.message,
+            stack: error.stack
+          }
+        });
       } else {
-        logger.warn('Unable to add error to thread history: threadState.addToHistory not available');
+        logger.warn('Unable to add error to thread history: threadState.addMessage not available');
       }
     } catch (historyError) {
       console.error('Error adding error to thread history:', historyError);

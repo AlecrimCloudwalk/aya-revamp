@@ -8,6 +8,7 @@ const logger = require('../toolUtils/logger.js');
  * @param {Object} args - Arguments
  * @param {string} [args.summary] - Optional summary or final thoughts
  * @param {string} [args.reasoning] - Reasoning for ending the conversation at top level
+ * @param {boolean} [args.clearCache] - Whether to clear the thread history cache
  * @param {Object} threadState - Current thread state
  * @returns {Object} - Success response
  */
@@ -22,7 +23,7 @@ async function finishRequest(args = {}, threadState) {
   const reasoning = args.reasoning;
   
   // Filter out non-standard fields that shouldn't be included in the response
-  const validFields = ['summary'];
+  const validFields = ['summary', 'clearCache'];
   
   const filteredArgs = {};
   for (const key of validFields) {
@@ -38,8 +39,26 @@ async function finishRequest(args = {}, threadState) {
     logger.info(`Filtered out non-standard fields: ${filteredKeys.join(', ')}`);
   }
   
-  // Get the summary if provided
-  const { summary } = filteredArgs;
+  // Get the summary and clearCache flag if provided
+  const { summary, clearCache = false } = filteredArgs;
+  
+  // If clearCache is true, clear the thread history cache for this thread
+  if (clearCache && threadState && threadState.threadId) {
+    try {
+      // Import the threadHistoryCache from getThreadHistory.js
+      const getThreadHistoryModule = require('./getThreadHistory.js');
+      
+      // Check if the module exports the cache
+      if (getThreadHistoryModule.clearThreadCache) {
+        getThreadHistoryModule.clearThreadCache(threadState.threadId);
+        logger.info(`Thread history cache cleared for thread ${threadState.threadId}`);
+      } else {
+        logger.warn('clearThreadCache function not found in getThreadHistory module');
+      }
+    } catch (cacheError) {
+      logger.warn(`Error clearing thread history cache: ${cacheError.message}`);
+    }
+  }
   
   // Check if this finishRequest is being called after a button interaction
   // by looking for button selection info in the thread state

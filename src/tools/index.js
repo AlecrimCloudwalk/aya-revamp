@@ -80,15 +80,18 @@ const toolRegistry = {
         properties: {
           summary: {
             type: 'string',
-            description: 'Brief summary of the completed action'
+            description: 'Optional summary of the completed task or final thoughts'
+          },
+          clearCache: {
+            type: 'boolean',
+            description: 'Whether to clear the thread history cache for this thread (default: false)'
           },
           reasoning: {
             type: 'string',
-            description: 'Explanation for why you are finishing the request'
+            description: 'Explanation for why the conversation is being ended'
           }
         },
-        required: ['reasoning'],
-        additionalProperties: false
+        required: []
       },
       strict: true
     },
@@ -98,29 +101,33 @@ const toolRegistry = {
     type: "function",
     function: {
       name: 'getThreadHistory',
-      description: 'Retrieves and formats thread history from Slack',
+      description: 'Retrieves the conversation history from the current thread. Results are cached for 30 seconds to prevent redundant API calls.',
       parameters: {
         type: 'object',
         properties: {
-          threadTs: {
-            type: 'string',
-            description: 'Thread timestamp to retrieve history for'
-          },
           limit: {
             type: 'integer',
-            description: 'Maximum number of messages to retrieve (optional)'
+            description: 'Maximum number of messages to retrieve (default: 20)'
           },
           includeParent: {
             type: 'boolean',
-            description: 'Whether to include the parent message (default: true)'
+            description: 'Whether to include the parent message (first message) in the thread (default: true)'
+          },
+          order: {
+            type: 'string',
+            description: 'Message ordering: "chronological" (oldest first) or "reverse_chronological" (newest first). Default is "chronological".',
+            enum: ['chronological', 'reverse_chronological']
+          },
+          forceRefresh: {
+            type: 'boolean',
+            description: 'Force a refresh of thread history, ignoring cached results (default: false)'
           },
           reasoning: {
             type: 'string',
-            description: 'Explanation for why you need the thread history'
+            description: 'Explanation for why thread history is needed'
           }
         },
-        required: ['reasoning'],
-        additionalProperties: false
+        required: []
       },
       strict: true
     },

@@ -3,6 +3,8 @@
 ## Core Principles
 
 - **LLM-Driven Architecture**: The LLM must be the central decision-maker with full agency over all aspects of user interaction
+- **No Hardcoded Responses**: All responses to users must be generated dynamically by the LLM, never hardcoded in the application
+- **Consistent Persona**: The bot must maintain its defined assistant role and never assume alternate personas based on special triggers
 - **Simplicity Over Complexity**: Prefer simple solutions that are easy to maintain
 - **Kubernetes-Native**: Design with Kubernetes deployment in mind
 - **Modular Tool System**: Enable easy addition of new tools without modifying core code

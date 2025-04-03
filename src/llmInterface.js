@@ -187,6 +187,45 @@ const systemPromptPath = path.join(__dirname, 'prompts', 'system_prompt.md');
 const systemPrompt = readFileSync(systemPromptPath, 'utf8');
 
 /**
+ * Get the system message for the LLM
+ * @param {Object} context - Context for the conversation
+ * @returns {string} - System message
+ */
+function getSystemMessage(context) {
+  // Add context-specific information if available
+  const contextInfo = context ? 
+    `You are currently in a conversation with a user in a Slack channel (${context.channelId}).` : 
+    `You are chatting with a user in Slack.`;
+  
+  return `You are a helpful AI assistant integrated with Slack. ${contextInfo}
+You have various tools you can use to help users.
+
+When retrieving thread history:
+1. You can use the getThreadHistory tool whenever you need context
+2. Thread history contains messages with position indices like [0], [1], [2]
+3. Message [0] is ALWAYS the first/parent message in the thread
+4. Once you have thread history, you don't need to request it again
+5. Use forceRefresh:true if you need absolutely fresh data
+6. Thread history is cached for 30 seconds to avoid redundant API calls
+
+For users asking to see thread history:
+- Call getThreadHistory with forceRefresh:true to get the latest messages
+- Use the provided formattedHistoryText field from the response when displaying history
+- If a user asks multiple times, always get fresh history with forceRefresh:true
+- Display ALL messages, not just the first one or parent message
+- Thread history display should follow this format:
+  #header: Aqui está o histórico da nossa conversa:
+  [Content from formattedHistoryText]
+  #divider:
+
+Important guidelines:
+- Be concise, helpful, and friendly in your responses
+- Use thread history indices to understand conversation flow
+- When someone asks a follow-up question, refer to thread history before asking for details they may have already provided
+- YOU decide when to retrieve thread history - no external code will force you to do so`;
+}
+
+/**
  * Get the next action from the LLM
  * @param {string} threadId The thread ID to get the next action for
  * @returns {Promise<{toolCalls: Array<{tool: string, parameters: Object}>}>}
@@ -208,7 +247,7 @@ async function getNextAction(threadId) {
     const response = await callOpenAI({
         messages,
         tools: availableTools,
-        tool_choice: "auto"  // Let the model decide whether to use tools
+        tool_choice: "required"  // Let the model decide whether to use tools
     });
     
     if (!response || !response.choices || response.choices.length === 0) {
@@ -313,13 +352,30 @@ async function getNextAction(threadId) {
     } else {
         logger.info("No content or tool calls in response");
         // Create a default tool call when no response is provided
+        
+        // First, add a system message to inform the LLM about the empty response issue
+        contextBuilder.addMessage({
+            source: 'system',
+            id: `empty_response_${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            threadTs: threadId,
+            text: `The LLM provided an empty response. This might indicate an issue with the context, model, or request. The LLM should acknowledge this and provide a helpful response.`,
+            type: 'error',
+            metadata: {
+                isError: true,
+                errorType: 'empty_response',
+                errorSource: 'llm_response'
+            }
+        });
+        
+        // Call processEmptyResponse which will prompt the LLM again to handle this specific error
+        // Use the postMessage tool to route the response through the LLM instead of hardcoding
         toolCalls = [{
             tool: "postMessage",
             parameters: {
-                text: "I apologize, but I'm having trouble processing your request right now. Could you please try again or rephrase your question?",
-                reasoning: "Fallback due to empty response"
+                reasoning: "Handling empty LLM response"
             },
-            reasoning: "Fallback due to empty response"
+            reasoning: "Empty response handling - letting the LLM decide what to say"
         }];
     }
     
@@ -334,82 +390,128 @@ async function getNextAction(threadId) {
 
 /**
  * Builds the prompt for the LLM
- * @param {string} threadId The thread ID to build the prompt for
- * @returns {Array<{role: string, content: string}>}
+ * @param {string} threadId - Thread ID
+ * @returns {Array} - Messages array for the LLM
  */
 function buildPrompt(threadId) {
     // Get context builder
     const contextBuilder = getContextBuilder();
     
+    // Get the context information for this thread
+    const context = contextBuilder.getMetadata(threadId, 'context');
+    
     // Start with the system prompt
     const messages = [{
         role: "system",
-        content: systemPrompt
+        content: getSystemMessage(context)
     }];
     
     // Get thread state representation for the LLM
-    const stateInfo = contextBuilder.getStateForLLM(threadId);
-    if (stateInfo) {
-        messages.push({
-            role: "system",
-            content: `# Thread Context Information\n${stateInfo}`
-        });
-    }
-    
-    // Convert context builder messages to the format needed for the LLM
     const contextMessages = contextBuilder.getThreadMessages(threadId);
     
-    // Map each message to the appropriate role and content
-    const mappedMessages = contextMessages.map(msg => {
-        // Determine the role based on the source
-        let role = "user";
-        if (msg.source === 'assistant' || msg.source === 'bot') {
-            role = "assistant";
-        } else if (msg.source === 'system' || msg.source === 'llm_thinking') {
-            role = "system";
-        }
+    // Add messages to prompt
+    if (contextMessages && contextMessages.length > 0) {
+        logger.info(`Adding ${contextMessages.length} messages to the prompt`);
         
-        // Build the content including metadata if it's helpful
-        let content = msg.text || "";
+        // Map internal message format to LLM message format
+        const mappedMessages = contextMessages.map(msg => {
+            if (msg.source === 'user') {
+                // User message
+                return {
+                    role: 'user',
+                    content: msg.text || '',
+                    name: `user_${Date.now().toString()}`
+                };
+            } else if (msg.source === 'llm' || msg.source === 'assistant') {
+                // Assistant message - include reasoning if available
+                let content = msg.text || '';
+                if (msg.reasoning) {
+                    content += `\n\n[Reasoning: ${msg.reasoning}]`;
+                }
+                return {
+                    role: 'assistant',
+                    content: content,
+                    name: `assistant_${Date.now().toString()}`
+                };
+            } else if (msg.source === 'system') {
+                // System message
+                return {
+                    role: 'system',
+                    content: msg.text || '',
+                    name: `system_${Date.now().toString()}`
+                };
+            } else {
+                logger.warn(`Unknown message source: ${msg.source}`);
+                return null;
+            }
+        }).filter(Boolean);
         
-        // For special message types, add clarifying information
-        if (msg.type === 'button_click' || msg.source === 'button_click') {
-            content = `[Button Selection] ${content}`;
-        } else if (msg.type === 'error') {
-            content = `[Error] ${content}`;
-        } else if (msg.type === 'thinking' || msg.source === 'llm_thinking') {
-            content = `[Previous Thinking] ${content}`;
-        } else if (msg.type === 'system_note' || msg.source === 'system') {
-            content = `[System Note] ${content}`;
-        }
-        
-        return { role, content };
-    });
-    
-    // Add mapped messages to the prompt
-    messages.push(...mappedMessages);
-    
-    // Get tool execution history
-    const toolExecutionHistory = contextBuilder.getToolExecutionHistory(threadId);
-    
-    // Add tool execution history if available
-    if (toolExecutionHistory && toolExecutionHistory.length > 0) {
-        messages.push({
-            role: "system",
-            content: `# Recent Tool Executions\n${
-                toolExecutionHistory.map((exec, i) => {
-                    // Format the key information about the tool execution
-                    return `## [${i+1}] Tool: ${exec.tool}\n` + 
-                           `Args: ${JSON.stringify(exec.args)}\n` +
-                           `Result: ${exec.error ? 'ERROR: ' + exec.error.message : 
-                                   (typeof exec.result === 'object' ? 
-                                   JSON.stringify(exec.result, null, 2) : 
-                                   String(exec.result))}\n`;
-                }).join('\n')
-            }`
-        });
+        messages.push(...mappedMessages);
     }
     
+    // Get the latest user message for thread history detection
+    let latestUserMessage = '';
+    // Look through contextMessages in reverse to find the most recent user message
+    for (let i = contextMessages.length - 1; i >= 0; i--) {
+        const msg = contextMessages[i];
+        if (msg.source === 'user') {
+            latestUserMessage = msg.text || '';
+            break;
+        }
+    }
+    
+    // Get tool execution history
+    const toolExecutions = contextBuilder.getToolExecutionHistory(threadId);
+    
+    // Add tool executions to the prompt
+    if (toolExecutions && toolExecutions.length > 0) {
+        logger.info(`Adding ${toolExecutions.length} tool executions to the prompt`);
+        
+        // Process tool executions to be added to the prompt
+        const toolMessages = [];
+        
+        // Find all getThreadHistory calls
+        const threadHistoryTools = toolExecutions.filter(exec => exec.toolName === 'getThreadHistory');
+        
+        // Check for loop detection in any of the thread history calls
+        const loopDetected = threadHistoryTools.some(exec => 
+            exec.result && exec.result.loopDetected === true);
+            
+        // If loop detection was triggered, add a very clear warning
+        if (loopDetected) {
+            messages.push({
+                role: "system",
+                content: `⚠️ CRITICAL WARNING: THREAD HISTORY LOOP DETECTED ⚠️
+
+You have called getThreadHistory multiple times in succession, which has triggered loop detection.
+This is usually caused by:
+1. Repeatedly calling getThreadHistory when you already have the thread history
+2. Not using the thread history information you already have
+3. Trying to get thread history again without using forceRefresh:true
+
+WHAT TO DO NOW:
+- Work with the thread history you already have in your context
+- The messages are already prefixed with indices like [0], [1], etc.
+- If you absolutely need fresh data, use { forceRefresh: true } when calling getThreadHistory
+- AVOID calling getThreadHistory again unless absolutely necessary
+
+This warning is triggered to prevent infinite loops.`,
+                name: "loop_detection_warning"
+            });
+        }
+        
+        // Add a special message when thread history has been requested multiple times
+        if (threadHistoryTools.length > 1) {
+            messages.push({
+                role: "system",
+                content: `IMPORTANT: You have already called getThreadHistory ${threadHistoryTools.length} times. 
+You already have the thread history. Do not request it again unless you need different parameters.
+The most recent thread history call ${threadHistoryTools[0].error ? 'failed' : 'succeeded'} and ${threadHistoryTools[0].result?.fromCache ? 'returned cached data' : 'retrieved fresh data'}.`
+            });
+        }
+    }
+    
+    // Build the full set of messages for the LLM
     return messages;
 }
 
@@ -547,12 +649,40 @@ function formatToolResponse(toolName, args, response) {
       };
     } else if (toolName === 'getThreadHistory') {
       // For getThreadHistory, show summary of what was retrieved
-      formattedResponse = {
-        thread_history_retrieved: true,
-        reasoning: reasoning,
-        messages_count: response?.messagesRetrieved || 0,
-        has_parent: response?.threadStats?.parentMessageRetrieved || false
-      };
+      if (response?.loopDetected) {
+        // Loop detected - make this VERY obvious to the LLM
+        formattedResponse = {
+          WARNING: "⚠️ LOOP DETECTED in thread history requests!",
+          message: response.warning || "You've called getThreadHistory too many times. Use existing history.",
+          recommendation: response.recommendation || "Use the thread history you already have. If you need fresh data, use forceRefresh:true",
+          thread_history_calls: response.previousCalls || "multiple",
+          reasoning: reasoning,
+          loopDetected: true
+        };
+      } else {
+        // Normal getThreadHistory response - Make it more helpful for displaying thread history
+        formattedResponse = {
+          thread_history_retrieved: true,
+          reasoning: reasoning,
+          messages_count: response?.messagesRetrieved || 0,
+          has_parent: response?.threadStats?.parentMessageRetrieved || false,
+          // Add the ready-to-use formatted history text at the top level for visibility
+          READY_TO_USE_FORMATTED_HISTORY: response?.formattedHistoryText || "",
+          INSTRUCTION: "Use the READY_TO_USE_FORMATTED_HISTORY text above for displaying thread history. It already contains all messages properly formatted.",
+          message_details: response?.messages || [],
+          indexing: response?.indexInfo ? {
+            message_range: response.indexInfo.indexRange,
+            total_messages: response.indexInfo.messageCount,
+            missing_messages: response.indexInfo.missingMessages,
+            note: "Each message is prefixed with its [index]. The parent message is always [0]. Use indices to understand which messages you have and which might be missing."
+          } : undefined,
+          fromCache: response?.fromCache || false,
+          cachedAt: response?.cachedAt || null,
+          important_note: response?.fromCache 
+            ? "⚠️ This data is from cache. The messages are already in your context. Use forceRefresh:true for fresh data." 
+            : "✅ This is fresh thread history data. All messages have been added to your context."
+        };
+      }
     } else if (toolName === 'finishRequest') {
       // For finishRequest, just confirm it was completed
       formattedResponse = {
@@ -592,111 +722,133 @@ function formatToolResponse(toolName, args, response) {
  */
 async function parseToolCallFromResponse(llmResponse) {
   try {
-    // Log the format we're detecting
-    logger.info("Tool call format: Using native OpenAI tool_calls format");
-
-    // Get the assistant's message
-    const assistantMessage = llmResponse.choices[0].message;
-    if (!assistantMessage) {
-      throw new Error('No assistant message found in response');
+    // Log the full LLM response format (first choice only)
+    const choice = llmResponse.choices && llmResponse.choices.length > 0 ? llmResponse.choices[0] : null;
+    if (!choice) {
+      logger.error("❌ No choices found in LLM response");
+      throw new Error('No choices in LLM response');
     }
-
-    // Handle native OpenAI tool_calls format
-    if (assistantMessage.tool_calls && Array.isArray(assistantMessage.tool_calls)) {
-      const toolCalls = [];
+    
+    logger.info("🔍 ANALYZING LLM RESPONSE STRUCTURE:");
+    logger.info(`Finish reason: ${choice.finish_reason}`);
+    
+    // Get the assistant's message
+    const assistantMessage = choice.message;
+    if (!assistantMessage) {
+      logger.error("❌ No message found in LLM response choice");
+      throw new Error('No message in LLM response');
+    }
+    
+    // Log message components
+    logger.info(`Message role: ${assistantMessage.role || 'unknown'}`);
+    logger.info(`Has content: ${assistantMessage.content ? 'yes' : 'no'}`);
+    logger.info(`Has tool_calls: ${assistantMessage.tool_calls ? 'yes (' + assistantMessage.tool_calls.length + ')' : 'no'}`);
+    
+    // Check content field more carefully
+    if (assistantMessage.content) {
+      const contentLength = assistantMessage.content.length;
+      logger.info(`Content length: ${contentLength} characters`);
       
-      // Extract each tool call
-      for (const toolCall of assistantMessage.tool_calls) {
-        const toolName = toolCall.function.name;
-        logger.info(`Tool call from LLM: ${toolName} -> Converted to: ${toolName}`);
+      // Examine content for possible JSON pattern
+      const content = assistantMessage.content.trim();
+      const hasJsonPattern = (content.startsWith('{') && content.endsWith('}')) || 
+                            (content.includes('```json') && content.includes('```'));
+      
+      if (hasJsonPattern) {
+        logger.info("⚠️ Content field appears to contain JSON - may be incorrectly formatted tool call");
         
-        // Parse the function arguments
-        let parameters;
-        try {
-          // First clean up the arguments by removing any code block formatting
-          let cleanedArgs = toolCall.function.arguments;
-          
-          // Clean any markdown code blocks that might be present
-          if (cleanedArgs.includes("```")) {
-            // Extract just the JSON content between code block markers
-            const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g;
-            const match = codeBlockRegex.exec(cleanedArgs);
-            if (match && match[1]) {
-              cleanedArgs = match[1].trim();
-            } else {
-              // If regex didn't find code blocks but they exist, use a simpler approach
-              cleanedArgs = cleanedArgs.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-            }
-            logger.info("Removed code block formatting from arguments");
-          }
-          
-          // Preprocess JSON to handle literal newlines and common issues before parsing
-          cleanedArgs = preprocessLlmJson(cleanedArgs);
-          
-          // Log the preprocessed JSON for debugging
-          if (process.env.DEBUG_JSON === 'true') {
-            logger.info("Preprocessed JSON:", cleanedArgs);
-          }
-          
-          // Parse the cleaned JSON
-          parameters = JSON.parse(cleanedArgs);
-          logger.info("Successfully parsed tool parameters");
-        } catch (error) {
-          logger.warn(`Error parsing tool parameters: ${error.message}`);
-          
-          // Attempt to recover using button extraction or text extraction
-          logger.warn("Attempting to recover from JSON parsing error");
-          
-          // First, try to recover button information if this is a button message
-          const buttonInfo = extractButtonInfo(toolCall.function.arguments);
-          
-          // Get the text content using more advanced regex that handles escaped chars
-          const textMatch = toolCall.function.arguments.match(/"text"\s*:\s*"((?:\\.|[^"\\])*)"/);
-          
-          // Create a simple valid parameters object with what we can recover
-          parameters = { 
-            reasoning: "Recovered from JSON parsing error"
-          };
-          
-          // Add text if we extracted it
-          if (textMatch && textMatch[1]) {
-            // Properly handle escaped characters in the recovered text
-            // Convert Unicode and special escape sequences back to characters
-            let extractedText = textMatch[1];
-            
-            // Handle special case of double-escaped newlines (\\n should become \n)
-            extractedText = extractedText.replace(/\\\\n/g, '\\n');
-            
-            // Now evaluate the string with escape sequences
+        // Try to extract JSON code block
+        if (content.includes('```json')) {
+          const matches = content.match(/```json\s*([\s\S]*?)\s*```/);
+          if (matches && matches[1]) {
+            logger.info("Found code block with JSON - attempting to parse");
             try {
-              // Evaluate the string with proper JSON parsing to handle escapes
-              extractedText = JSON.parse(`"${extractedText.replace(/"/g, '\\"')}"`);
-            } catch (evalError) {
-              logger.warn(`Error evaluating extracted text: ${evalError.message}`);
-              // If evaluation fails, use the text as-is but still fix basic escapes
-              extractedText = extractedText
-                .replace(/\\n/g, '\n')
-                .replace(/\\t/g, '\t')
-                .replace(/\\"/g, '"')
-                .replace(/\\\\/g, '\\');
+              const parsed = JSON.parse(matches[1].trim());
+              logger.info(`Parsed JSON structure: ${JSON.stringify(Object.keys(parsed))}`);
+              if (parsed.tool) {
+                logger.info(`⚠️ Found embedded tool call: ${parsed.tool}`);
+              }
+            } catch (e) {
+              logger.info(`Failed to parse JSON in code block: ${e.message}`);
             }
-            
-            parameters.text = extractedText;
-            logger.info("Recovered text content from damaged JSON");
-          } else {
-            parameters.text = "I couldn't process that correctly. Please try again with a simpler request.";
-            logger.info("Could not recover text content, using fallback message");
-          }
-          
-          // Add buttons if we found them and this is a button message
-          if (buttonInfo.buttons.length > 0 && toolName === 'createButtonMessage') {
-            parameters.buttons = buttonInfo.buttons;
-            logger.info(`Added ${buttonInfo.buttons.length} recovered buttons to parameters`);
           }
         }
+      }
+    }
+    
+    // Inspect tool_calls in detail
+    if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+      logger.info(`🛠️ TOOL CALLS FOUND: ${assistantMessage.tool_calls.length}`);
+      
+      // Process all tool calls
+      assistantMessage.tool_calls.forEach((toolCall, index) => {
+        logger.info(`[${index}] Tool call ID: ${toolCall.id}`);
+        logger.info(`[${index}] Type: ${toolCall.type}`);
         
-        // Always ensure there's a reasoning parameter
+        if (toolCall.function) {
+          logger.info(`[${index}] Function name: ${toolCall.function.name}`);
+          logger.info(`[${index}] Arguments length: ${toolCall.function.arguments ? toolCall.function.arguments.length : 0} bytes`);
+          
+          // Try to parse the function arguments
+          try {
+            if (toolCall.function.arguments) {
+              const args = JSON.parse(toolCall.function.arguments);
+              logger.info(`[${index}] Arguments parsed successfully: ${JSON.stringify(Object.keys(args))}`);
+              
+              // Check for nested reasoning or parameters (common mistake)
+              if (args.parameters && args.parameters.reasoning) {
+                logger.info(`⚠️ ISSUE: Found nested reasoning inside parameters - will be moved to top level`);
+              }
+              if (args.parameters && args.parameters.parameters) {
+                logger.info(`⚠️ ISSUE: Found nested parameters inside parameters - improper nesting detected`);
+              }
+              
+              // Check if top-level reasoning exists
+              if (!args.reasoning) {
+                logger.info(`⚠️ ISSUE: No top-level reasoning found - may need to generate default`);
+              }
+            }
+          } catch (error) {
+            logger.info(`[${index}] Failed to parse arguments: ${error.message}`);
+            logger.info(`[${index}] Raw arguments: ${toolCall.function.arguments}`);
+          }
+        } else {
+          logger.info(`[${index}] No function data - malformed tool call`);
+        }
+      });
+    }
+
+    // Standard OpenAI format with tool_calls array
+    if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+      logger.info("Tool call format: Using native OpenAI tool_calls format");
+      
+      // Extract tool calls from the response
+      const toolCalls = [];
+      
+      // Process each tool call in the response
+      for (const toolCall of assistantMessage.tool_calls) {
+        // Only process function type tool calls (current OpenAI standard)
+        if (toolCall.type !== 'function' || !toolCall.function) {
+          logger.warn(`Skipping non-function tool call: ${toolCall.type}`);
+          continue;
+        }
+        
+        const toolName = toolCall.function.name;
+        
+        // Parse the function arguments
+        let parameters = {};
+        try {
+          parameters = JSON.parse(toolCall.function.arguments);
+          logger.info(`Successfully parsed arguments for tool: ${toolName}`);
+        } catch (error) {
+          logger.warn(`Failed to parse arguments for tool ${toolName}: ${error.message}`);
+          // Even if parsing fails, try to use it anyway
+          parameters = { text: toolCall.function.arguments, reasoning: "Argument parsing failed" };
+        }
+        
+        // Add default reasoning if not provided
         if (!parameters.reasoning) {
+          logger.info(`No reasoning found for ${toolName}, adding default reasoning`);
           parameters.reasoning = "Auto-generated reasoning for tool call";
         }
         
@@ -728,17 +880,20 @@ async function parseToolCallFromResponse(llmResponse) {
       return { toolCalls };
     } else {
       // Handle case where tool calls aren't present
-      logger.info("No tool_calls found in response. Checking for content to use as postMessage");
+      logger.info("⚠️ No tool_calls found in response. Checking for content to use as postMessage");
       
       // Default to a postMessage with the content
       if (assistantMessage.content) {
+        // Log the content transformation
+        logger.info(`Converting content to postMessage: ${assistantMessage.content.substring(0, 50)}${assistantMessage.content.length > 50 ? '...' : ''}`);
+        
         // Try to detect if the content is actually a JSON string representing a tool call
         const content = assistantMessage.content.trim();
         
         // Check if content looks like a JSON object that might be a tool call
         if ((content.startsWith('{') && content.endsWith('}')) || 
             (content.includes('```json') && content.includes('```'))) {
-          logger.info("Detected possible tool call in message content");
+          logger.info("Detected possible JSON tool call in content field");
           
           try {
             // Extract JSON if it's in a code block
@@ -747,6 +902,7 @@ async function parseToolCallFromResponse(llmResponse) {
               const matches = content.match(/```json\s*([\s\S]*?)\s*```/);
               if (matches && matches[1]) {
                 jsonContent = matches[1].trim();
+                logger.info("Extracted JSON from code block");
               }
             }
             
@@ -755,10 +911,11 @@ async function parseToolCallFromResponse(llmResponse) {
             
             // Try to parse as JSON
             const parsedContent = JSON.parse(jsonContent);
+            logger.info(`Successfully parsed content as JSON: ${JSON.stringify(Object.keys(parsedContent))}`);
             
             // Check if it has a tool field, which indicates it's trying to be a tool call
             if (parsedContent.tool) {
-              logger.info(`Detected tool call in content: ${parsedContent.tool}`);
+              logger.info(`✅ Detected embedded tool call in content: ${parsedContent.tool}`);
               
               // Format as a proper tool call
               return {
@@ -768,6 +925,8 @@ async function parseToolCallFromResponse(llmResponse) {
                   reasoning: parsedContent.reasoning || "Auto-extracted from message content"
                 }]
               };
+            } else {
+              logger.info("JSON doesn't contain a tool field - treating as regular content");
             }
           } catch (parseError) {
             logger.warn(`Failed to parse content as tool call JSON: ${parseError.message}`);
@@ -776,6 +935,7 @@ async function parseToolCallFromResponse(llmResponse) {
         
         // If we couldn't parse as a tool call or it wasn't a valid tool call JSON,
         // fall back to treating as regular message content
+        logger.info("No tool calls found in content - creating implicit postMessage");
         return {
           toolCalls: [{
             tool: 'postMessage',
@@ -787,6 +947,7 @@ async function parseToolCallFromResponse(llmResponse) {
           }]
         };
       } else {
+        logger.error("❌ No content or tool calls found in response - cannot create tool call");
         throw new Error('No content or tool calls found in response');
       }
     }
@@ -1111,7 +1272,9 @@ function logDetailedContext(threadState, messages) {
     if (toolHistory.length > 0) {
       logger.info("\nRecent tool executions:");
       toolHistory.forEach((exec, idx) => {
-        console.log(`[${idx + 1}] ${exec.toolName} - ${exec.error ? 'ERROR' : 'SUCCESS'}`);
+        // Fix for undefined tool names
+        const toolName = exec.toolName || 'unknown_tool';
+        console.log(`[${idx + 1}] ${toolName} - ${exec.error ? 'ERROR' : 'SUCCESS'}`);
       });
     }
   }
@@ -1159,6 +1322,39 @@ function preprocessLlmJson(json) {
     }
     
     return json;
+}
+
+/**
+ * Format thread history result in a more readable way
+ * @param {Object} result - Thread history result
+ * @returns {string} - Formatted result
+ */
+function formatThreadHistoryResult(result) {
+    if (!result) return "No result";
+    
+    // Special handling for loop detection
+    if (result.loopDetected) {
+        return `{
+  "WARNING": "${result.warning || 'Loop detected in getThreadHistory calls'}",
+  "previousCalls": ${result.previousCalls || 'multiple'},
+  "recommendation": "${result.recommendation || 'Use existing thread history or forceRefresh'}",
+  "loopDetected": true
+}`;
+    }
+    
+    return `{
+  "messagesRetrieved": ${result.messagesRetrieved || 0},
+  "threadStats": {
+    "totalMessages": ${result.threadStats?.totalMessagesInThread || 0},
+    "remainingMessages": ${result.threadStats?.remainingMessages || 0}
+  },
+  "indexInfo": {
+    "range": "${result.indexInfo?.indexRange || 'none'}",
+    "totalCount": ${result.indexInfo?.messageCount || 0},
+    "missing": ${result.indexInfo?.missingMessages || 0}
+  },
+  "fromCache": ${result.fromCache ? 'true' : 'false'}${result.cachedAt ? `,\n  "cachedAt": "${result.cachedAt}"` : ''}
+}`;
 }
 
 module.exports = {

@@ -188,10 +188,7 @@ async function executeTool(toolName, args, threadId) {
                 message.threadTs = threadId;
                 return contextBuilder.addMessage(message);
             },
-            addToHistory: (message) => {
-                message.threadTs = threadId;
-                return contextBuilder.addMessage(message);
-            }
+            getToolExecutionHistory: (limit = 10) => contextBuilder.getToolExecutionHistory(threadId, limit)
         };
 
         // Pass the thread context object to the tool
@@ -263,15 +260,18 @@ async function processThread(threadId) {
     
     logger.info("--- THREAD CONTEXT ---");
     if (context) {
-        logger.info(`User ID: ${context.userId}`);
-        logger.info(`Channel: ${context.channelId}`);
-        logger.info(`Thread TS: ${context.threadTs}`);
-        logger.info(`User's message: "${context.text}"`);
+        logger.info(`Context: user=${context.userId}, channel=${context.channelId}, thread=${context.threadTs}${context.isButtonClick ? ', type=button_click' : ''}`);
+        
         if (context.isButtonClick) {
-            logger.info(`Button click: ${context.buttonText} (value: ${context.actionValue})`);
+            logger.info(`Button: text="${context.buttonText}", value="${context.actionValue}"`);
+        } else {
+            // Only show the first 40 characters of text to avoid large logs
+            const textPreview = context.text && context.text.length > 40 ? 
+                             `${context.text.substring(0, 40)}...` : context.text;
+            logger.info(`Message: "${textPreview}"`);
         }
     } else {
-        logger.info(`No context in thread state`);
+        logger.info(`No context available`);
     }
     logger.info("-----------------------");
 
@@ -301,13 +301,37 @@ async function processThread(threadId) {
                     threadId: threadId,
                     threadTs: context.threadTs,
                     channelId: context.channelId,
-                    addToHistory: (message) => {
+                    addMessage: (message) => {
                         message.threadTs = threadId;
                         return contextBuilder.addMessage(message);
                     }
                 });
                 
-                logger.info(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history`);
+                // Log compact summary of the results
+                const threadMessages = contextBuilder.getThreadMessages(threadId);
+                logger.info(`Thread history: ${historyResult.messagesRetrieved || 0} retrieved, ${threadMessages ? threadMessages.length : 0} in context`);
+                
+                // Only log detailed message info in verbose mode
+                if (process.env.DEBUG === 'true' || process.env.VERBOSE_LOGS === 'true') {
+                    logger.info(`Thread message breakdown:`);
+                    if (threadMessages && threadMessages.length > 0) {
+                        const userCount = threadMessages.filter(m => m.source === 'user').length;
+                        const botCount = threadMessages.filter(m => m.source === 'assistant').length;
+                        const otherCount = threadMessages.filter(m => m.source !== 'user' && m.source !== 'assistant').length;
+                        logger.info(`  Sources: ${userCount} user, ${botCount} bot, ${otherCount} other`);
+                        
+                        // Show first few message previews
+                        const previewCount = Math.min(3, threadMessages.length);
+                        const previews = threadMessages.slice(0, previewCount).map((msg, idx) => {
+                            const text = msg.text || '[no text]';
+                            const preview = text.length > 30 ? text.substring(0, 30) + '...' : text;
+                            return `[${idx}] ${msg.source}: ${preview}`;
+                        });
+                        logger.info(`  Previews: ${previews.join(' | ')}`);
+                    } else {
+                        logger.info(`  No messages in thread context`);
+                    }
+                }
                 
                 // Record the tool execution so the LLM knows about it
                 contextBuilder.recordToolExecution(threadId, 'getThreadHistory', 
@@ -318,6 +342,46 @@ async function processThread(threadId) {
     } catch (historyError) {
         logger.warn(`Failed to get thread history: ${historyError.message}`);
         // Continue even if history fetch fails
+    }
+
+    // Right before calling getNextAction
+    // Add check for minimum context messages
+    if (context && context.threadTs) {
+        const threadMessages = contextBuilder.getThreadMessages(threadId);
+        
+        // If we have thread history but no messages, try one more time to enforce loading
+        if (context.threadTs && (!threadMessages || threadMessages.length <= 1)) {
+            logger.warn(`Thread context minimal (${threadMessages?.length || 0} messages), attempting emergency load`);
+            
+            // As a last resort, try loading directly with context builder
+            try {
+                // Force reload of thread history
+                const historyTool = getTool('getThreadHistory');
+                if (historyTool) {
+                    const historyResult = await historyTool({
+                        threadTs: context.threadTs,
+                        limit: 15, // Increase the limit to ensure we get enough history
+                        includeParent: true,
+                        reasoning: "Final attempt to load thread history"
+                    }, {
+                        threadId: threadId,
+                        threadTs: context.threadTs,
+                        channelId: context.channelId,
+                        addMessage: (message) => {
+                            message.threadTs = threadId;
+                            // Force add to context, bypassing any validations
+                            return contextBuilder.addMessage(message);
+                        }
+                    });
+                    
+                    // Log the result in a single line
+                    const updatedMessages = contextBuilder.getThreadMessages(threadId);
+                    logger.info(`Emergency thread load: ${historyResult.messagesRetrieved || 0} retrieved, now ${updatedMessages ? updatedMessages.length : 0} messages in context`);
+                }
+            } catch (emergencyError) {
+                logger.error(`Emergency thread load failed: ${emergencyError.message}`);
+            }
+        }
     }
 
     // Track if we've successfully processed the request
@@ -342,23 +406,52 @@ async function processThread(threadId) {
     function isSimilarToRecent(messageText) {
         if (!messageText) return false;
         
-        for (const prevMessage of recentMessages) {
-            // Simple similarity check - if the first 20 chars match, it's likely similar
-            if (prevMessage.substring(0, 20) === messageText.substring(0, 20)) {
-                logger.warn("⚠️ Detected similar message beginning, possible duplicate");
-                return true;
-            }
+        // Special handling for thread history displays - NEVER count these as duplicates
+        // This allows users to request thread history multiple times and get updated results
+        if (messageText.includes("Aqui está o histórico") || 
+            messageText.includes("Histórico da conversa") ||
+            messageText.includes("histórico da nossa conversa") ||
+            (messageText.includes("[USER]") && messageText.includes("[BOT]"))) {
             
-            // If messages are 80% the same length and have significant overlap, likely duplicate
+            logger.info("Thread history display detected - bypassing duplicate detection");
+            return false; // Never count thread history displays as duplicates
+        }
+        
+        for (const prevMessage of recentMessages) {
+            // Only consider the message as a duplicate if it's nearly identical
+            // The current check is too aggressive and blocks legitimate new responses
+            
+            // Previous check - too restrictive, blocks legitimate responses:
+            // if (prevMessage.substring(0, 20) === messageText.substring(0, 20)) {
+            //    logger.warn("⚠️ Detected similar message beginning, possible duplicate");
+            //    return true;
+            // }
+            
+            // More precise duplicate detection:
+            // 1. Check if messages are very similar in length (within 10%)
             const lengthRatio = Math.min(prevMessage.length, messageText.length) / 
                                Math.max(prevMessage.length, messageText.length);
+                               
+            // 2. Check for exact duplication (at least 90% match)
+            const exactMatchThreshold = 0.9;
+            let matchCount = 0;
+            const minLength = Math.min(prevMessage.length, messageText.length);
             
-            if (lengthRatio > 0.8 && 
-                (prevMessage.includes(messageText.substring(0, 30)) || 
-                 messageText.includes(prevMessage.substring(0, 30)))) {
-                logger.warn("⚠️ Detected significant message overlap, possible duplicate");
+            for (let i = 0; i < minLength; i++) {
+                if (prevMessage[i] === messageText[i]) {
+                    matchCount++;
+                }
+            }
+            
+            const matchRatio = matchCount / minLength;
+            
+            if (lengthRatio > 0.9 && matchRatio > exactMatchThreshold) {
+                logger.warn(`⚠️ Detected near-exact duplicate message (${Math.round(matchRatio * 100)}% match)`);
                 return true;
             }
+            
+            // 3. Allow similar topics but different content
+            // This ensures responses to follow-up questions aren't blocked
         }
         
         return false;
@@ -367,12 +460,17 @@ async function processThread(threadId) {
     while (iteration < MAX_ITERATIONS && !requestCompleted) {
         iteration++;
         logger.info(`🔄 Iteration ${iteration}/${MAX_ITERATIONS}`);
+        
+        // Store the current iteration number for context
+        contextBuilder.setMetadata(threadId, 'iterations', iteration);
 
         try {
             // If we've already sent a message, strongly encourage finishing the request
             if (messagePosted && messagesSent >= MAX_MESSAGES_PER_REQUEST) {
-                logger.info(`Already sent ${messagesSent} messages - auto-finishing request`);
+                logger.info(`Already sent ${messagesSent} messages, but allowing LLM to continue processing`);
                 
+                // Auto-finish disabled: Let the LLM decide when to end the conversation
+                /*
                 // Auto-finish the request to prevent message spam
                 const finishTool = getTool('finishRequest');
                 if (finishTool) {
@@ -383,7 +481,7 @@ async function processThread(threadId) {
                         threadId: threadId,
                         threadTs: context?.threadTs,
                         channelId: context?.channelId,
-                        addToHistory: (message) => {
+                        addMessage: (message) => {
                             message.threadTs = threadId;
                             return contextBuilder.addMessage(message);
                         }
@@ -393,6 +491,7 @@ async function processThread(threadId) {
                     logger.info("✅ Auto-completed request after message was sent");
                     break;
                 }
+                */
             }
 
             // Get next action from LLM
@@ -425,7 +524,7 @@ async function processThread(threadId) {
                             threadId: threadId,
                             threadTs: context?.threadTs,
                             channelId: context?.channelId,
-                            addToHistory: (message) => {
+                            addMessage: (message) => {
                                 message.threadTs = threadId;
                                 return contextBuilder.addMessage(message);
                             }
@@ -461,7 +560,7 @@ async function processThread(threadId) {
                             threadId: threadId,
                             threadTs: context.threadTs,
                             channelId: context.channelId,
-                            addToHistory: (message) => {
+                            addMessage: (message) => {
                                 message.threadTs = threadId;
                                 return contextBuilder.addMessage(message);
                             }
@@ -472,7 +571,7 @@ async function processThread(threadId) {
                 }
             }
             
-            // Add proper thread context with working addToHistory
+            // Add proper thread context with working addMessage
             const threadContext = {
                 threadId: threadId,
                 threadTs: context?.threadTs,
@@ -486,10 +585,7 @@ async function processThread(threadId) {
                     message.threadTs = threadId;
                     return contextBuilder.addMessage(message);
                 },
-                addToHistory: (message) => {
-                    message.threadTs = threadId;
-                    return contextBuilder.addMessage(message);
-                }
+                getToolExecutionHistory: (limit = 10) => contextBuilder.getToolExecutionHistory(threadId, limit)
             };
             
             // Execute the tool
@@ -530,8 +626,10 @@ async function processThread(threadId) {
                 // For regular messages (not button clicks), auto-finish after the message
                 // This is to prevent the problematic behavior of sending multiple messages
                 if (!isButtonSelection && messagesSent >= MAX_MESSAGES_PER_REQUEST) {
-                    logger.info("Auto-finishing request after sending the first message");
+                    logger.info("Multiple messages allowed - letting LLM continue processing");
                     
+                    // Auto-finish disabled: Let the LLM decide when to end the conversation
+                    /*
                     // Auto-finish the request
                     const finishTool = getTool('finishRequest');
                     if (finishTool) {
@@ -544,6 +642,7 @@ async function processThread(threadId) {
                         logger.info("✅ Auto-completed request after message was sent");
                         break;
                     }
+                    */
                 }
                 
                 // If this is a button selection, auto-complete after first message
@@ -645,14 +744,22 @@ async function processButtonInteraction(payload) {
     const threadTs = payload.message.thread_ts || payload.container.message_ts;
     const messageTs = payload.container.message_ts;
     
-    // Log button click event for debugging
-    logger.info(`BUTTON CLICK: ${buttonText} (${actionValue})`);
-    logger.detail(`Button click context:`, {
-      user: userId,
-      channel: channelId,
-      message_ts: messageTs,
-      thread_ts: threadTs
-    });
+    // Enhanced logging for button interactions
+    logger.info(`🔘 BUTTON PROCESSING: "${buttonText}" (${actionValue})`);
+    logger.info(`Thread context: channel=${channelId}, thread_ts=${threadTs}, user=${userId}`);
+    
+    // Log additional diagnostics for debugging
+    if (process.env.NODE_ENV !== 'production') {
+      logger.detail(`Full button payload:`, {
+        user: userId,
+        channel: channelId,
+        message_ts: messageTs,
+        thread_ts: threadTs,
+        action_id: actionId,
+        value: actionValue,
+        button_text: buttonText
+      });
+    }
     
     // Create thread ID (consistent with our other code)
     const threadId = threadTs || channelId;
@@ -687,18 +794,33 @@ async function processButtonInteraction(payload) {
     
     if (!updateResult.updated) {
       logger.error(`Button update failed: ${updateResult.error}`);
-      // Send a message indicating that the button was clicked (as a fallback)
-      const slackClient = getSlackClient();
-      await slackClient.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: `<@${userId}> selected: *${buttonText}* (button update failed, sending as new message)`
-      });
+      
+      // Instead of sending a hardcoded message, use the LLM to handle the response
+      // First, ensure the error is added to the context
+      const buttonUpdateError = new Error(`Button update failed: ${updateResult.error}`);
+      
+      const { handleErrorWithLLM } = require('./errors.js');
+      
+      // Create error context with button information
+      const errorContext = {
+        channelId,
+        threadTs,
+        userId,
+        isError: true,
+        isButtonClick: true,
+        buttonText,
+        actionValue,
+        errorSource: 'button_update_failure',
+        updateResult
+      };
+      
+      // Let the LLM handle the button update failure response
+      await handleErrorWithLLM(buttonUpdateError, errorContext);
+      
     } else if (!updateResult.actionsBlockFound) {
       logger.warn(`Button was clicked but no actions block was found to update`);
       
-      // This means the UI wasn't visually updated, so we need to inform the user
-      // ADDITIONAL DEBUG INFO: Log the payload message to see what message was actually clicked
+      // This means the UI wasn't visually updated, so the LLM should inform the user
       if (payload.message) {
         logger.detail(`Payload message info:`, {
           ts: payload.message.ts,
@@ -707,11 +829,21 @@ async function processButtonInteraction(payload) {
         });
       }
       
-      const slackClient = getSlackClient();
-      await slackClient.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: `<@${userId}> selected: *${buttonText}* (selection processed)`
+      // Instead of a hardcoded message, add system message to context and let the LLM decide
+      contextBuilder.addMessage({
+        source: 'system',
+        id: `button_update_note_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        threadTs: threadId,
+        text: `Button with text "${buttonText}" (value: "${actionValue}") was clicked by user <@${userId}>, but no actions block was found to update. The UI was not visually updated. The LLM should acknowledge this selection.`,
+        type: 'system_note',
+        metadata: {
+          isButtonClick: true,
+          buttonText,
+          actionValue,
+          uiUpdated: false,
+          type: 'button_selection_ui_status'
+        }
       });
     }
     
@@ -744,16 +876,28 @@ async function processButtonInteraction(payload) {
   } catch (error) {
     logger.error(`Error handling button interaction:`, error);
     
-    // Enhanced error handling
+    // Enhanced error handling using LLM
     try {
-      const slackClient = getSlackClient();
-      await slackClient.chat.postMessage({
-        channel: payload.channel.id,
-        thread_ts: payload.message.thread_ts || payload.container.message_ts,
-        text: `I'm sorry, I encountered an error processing your button click: ${error.message}. Please try again or contact support.`
-      });
+      // Import the error handler instead of sending a hardcoded message
+      const { handleErrorWithLLM } = require('./errors.js');
+      
+      // Create error context
+      const errorContext = {
+        channelId: payload.channel?.id,
+        threadTs: payload.message?.thread_ts || payload.container?.message_ts,
+        userId: payload.user?.id,
+        isError: true,
+        isButtonClick: true,
+        buttonText: payload.actions?.[0]?.text?.text || payload.actions?.[0]?.value || 'unknown button',
+        actionValue: payload.actions?.[0]?.value,
+        errorSource: 'button_interaction_processing'
+      };
+      
+      // Handle error through the LLM
+      await handleErrorWithLLM(error, errorContext);
+      
     } catch (sendError) {
-      logger.error(`Failed to send error message:`, sendError);
+      logger.error(`Failed to send error message: ${sendError.message}`);
     }
   }
 }

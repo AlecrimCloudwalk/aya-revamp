@@ -115,7 +115,11 @@ async function initializeContextIfNeeded(threadId) {
             }, {
                 threadId: threadId,
                 threadTs: threadTs,
-                channelId: channelId
+                channelId: channelId,
+                addMessage: (message) => {
+                    message.threadTs = threadId;
+                    return contextBuilder.addMessage(message);
+                }
             });
             
             logger.info(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history for initialization`);

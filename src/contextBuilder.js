@@ -153,53 +153,168 @@ function formatBlocks(blocks) {
  */
 class ContextBuilder {
   constructor() {
-    this.messages = new Map(); // Message ID -> ContextMessage
-    this.threadMessages = new Map(); // ThreadTS -> Array of Message IDs
-    this.threadMetadata = new Map(); // ThreadTS -> Map of metadata
-    this.toolResults = new Map(); // ThreadTS -> Map of tool results
+    // Message store - maps message IDs to message objects
+    this.messages = new Map();
+    
+    // Thread message mapping - maps thread IDs to arrays of message IDs
+    this.threadMessages = new Map();
+    
+    // Thread metadata - maps thread IDs to metadata objects
+    this.threadMetadata = new Map();
+    
+    // Tool execution history - maps thread IDs to arrays of tool execution details
+    this.toolExecutions = new Map();
+    
+    // Timeline sequence counter - maps thread IDs to current sequence number
+    this.sequenceCounters = new Map();
+    
+    // Timeline grouping - maps message IDs to their sequence numbers
+    this.messageSequences = new Map();
+    
+    // Tool to message mapping - maps tool execution IDs to message IDs
+    this.toolToMessageMap = new Map();
+    
     this.buttonStates = new Map(); // ThreadTS -> Map of button states 
     this.debug = process.env.DEBUG_CONTEXT === 'true';
+    
+    logger.info('ContextBuilder initialized');
+  }
+  
+  /**
+   * Get the next sequence number for a thread
+   * @param {string} threadTs - Thread timestamp
+   * @returns {number} - Next sequence number
+   */
+  getNextSequence(threadTs) {
+    // Initialize counter for thread if not exists
+    if (!this.sequenceCounters.has(threadTs)) {
+      this.sequenceCounters.set(threadTs, 0);
+    }
+    
+    // Get current counter and increment
+    const counter = this.sequenceCounters.get(threadTs);
+    this.sequenceCounters.set(threadTs, counter + 1);
+    
+    return counter;
+  }
+
+  /**
+   * Records a tool execution in the context
+   * @param {string} threadId - Thread ID
+   * @param {string} toolName - Name of the tool
+   * @param {Object} args - Tool arguments
+   * @param {Object} result - Tool execution result
+   * @param {Error} [error] - Error object if the tool execution failed
+   * @returns {string} - Generated tool execution ID
+   */
+  recordToolExecution(threadId, toolName, args, result, error = null) {
+    try {
+      // Check if thread exists
+      if (!this.toolExecutions.has(threadId)) {
+        this.toolExecutions.set(threadId, []);
+      }
+      
+      // Generate execution ID
+      const executionId = `tool_${toolName}_${Date.now()}`;
+      
+      // Assign a sequence number to this tool execution
+      const sequence = this.getNextSequence(threadId);
+      
+      // Create execution record
+      const executionRecord = {
+        id: executionId,
+        toolName,
+        threadId,
+        timestamp: new Date().toISOString(),
+        args: { ...args },  // Clone to avoid reference issues
+        result: result ? { ...result } : null,  // Clone if exists
+        error: error ? error.message : null,
+        sequence: sequence, // Store the sequence number
+        reasoning: args.reasoning || null, // Capture the reasoning
+      };
+      
+      // Add to list
+      this.toolExecutions.get(threadId).unshift(executionRecord);
+      
+      // For postMessage tool, associate it with the message sequence
+      if (toolName === 'postMessage' && result && result.ts) {
+        const messageId = `bot_${result.ts}`;
+        this.messageSequences.set(messageId, sequence);
+        this.toolToMessageMap.set(executionId, messageId);
+      }
+      
+      // Trim if too many
+      if (this.toolExecutions.get(threadId).length > 100) {
+        this.toolExecutions.get(threadId).pop();
+      }
+      
+      return executionId;
+    } catch (error) {
+      logger.error(`Error recording tool execution: ${error.message}`);
+      return null;
+    }
   }
   
   /**
    * Add a message to the context
-   * @param {Object} message - Message data
-   * @returns {string} - ID of the added message
+   * @param {Object} message - Message object
+   * @returns {boolean} - Whether the message was added successfully
    */
   addMessage(message) {
     try {
-      // Process into standardized format
-      const contextMessage = this._processMessage(message);
-      
-      // Skip if no valid ID
-      if (!contextMessage || !contextMessage.id) {
-        logger.warn('Skipping message with no valid ID:', message);
-        return null;
+      // Validate message has required fields
+      if (!message || !message.threadTs) {
+        logger.warn('Attempted to add invalid message to context');
+        return false;
       }
       
-      // Store in messages map
-      this.messages.set(contextMessage.id, contextMessage);
+      // Generate ID if none provided
+      const messageId = message.id || `msg_${Date.now()}`;
       
-      // Add to thread index
-      if (contextMessage.threadTs) {
-        if (!this.threadMessages.has(contextMessage.threadTs)) {
-          this.threadMessages.set(contextMessage.threadTs, []);
-        }
-        
-        const threadMsgs = this.threadMessages.get(contextMessage.threadTs);
-        if (!threadMsgs.includes(contextMessage.id)) {
-          threadMsgs.push(contextMessage.id);
-        }
+      // Get thread timestamp
+      const threadTs = message.threadTs;
+      
+      // Initialize thread if not exists
+      if (!this.threadMessages.has(threadTs)) {
+        this.threadMessages.set(threadTs, []);
       }
       
-      if (this.debug) {
-        logger.info(`Added message to context: ${contextMessage.id} (${contextMessage.type})`);
+      // Assign a sequence number to this message if not from a tool call
+      let sequence;
+      if (message.source === 'user') {
+        // User messages get their own sequence
+        sequence = this.getNextSequence(threadTs);
+      } else if (message.fromToolExecution) {
+        // If message came from a tool execution, use that sequence
+        sequence = message.sequence;
+      } else {
+        // All other messages get their own sequence if not specified
+        sequence = message.sequence || this.getNextSequence(threadTs);
       }
       
-      return contextMessage.id;
+      // Store the sequence with this message
+      this.messageSequences.set(messageId, sequence);
+      
+      // Store message with ID
+      const fullMessage = {
+        ...message,
+        id: messageId,
+        timestamp: message.timestamp || new Date().toISOString(),
+        sequence: sequence
+      };
+      
+      this.messages.set(messageId, fullMessage);
+      
+      // Add to thread
+      const threadMessages = this.threadMessages.get(threadTs);
+      if (!threadMessages.includes(messageId)) {
+        threadMessages.push(messageId);
+      }
+      
+      return true;
     } catch (error) {
-      logError('Error adding message to context', error, { message });
-      return null;
+      logger.error(`Error adding message to context: ${error.message}`);
+      return false;
     }
   }
   
@@ -395,151 +510,6 @@ class ContextBuilder {
       type: message.type || MessageTypes.SYSTEM_NOTE,
       metadata: message.metadata || {}
     };
-  }
-  
-  /**
-   * Records the execution of a tool
-   * @param {string} threadTs - Thread timestamp
-   * @param {string} toolName - Name of the tool
-   * @param {Object} args - Arguments used
-   * @param {Object} result - Result of the execution
-   * @param {Error} error - Error if execution failed
-   */
-  recordToolExecution(threadTs, toolName, args, result, error = null) {
-    try {
-      // Create a unique key for this execution
-      const executionKey = `${toolName}-${JSON.stringify(args)}`;
-      
-      // Get or create the tool results map for this thread
-      if (!this.toolResults.has(threadTs)) {
-        this.toolResults.set(threadTs, new Map());
-      }
-      
-      const threadToolResults = this.toolResults.get(threadTs);
-      
-      // Record the execution
-      const executionRecord = {
-        result,
-        timestamp: new Date().toISOString(),
-        error: error ? {
-          message: error.message,
-          stack: error.stack,
-          name: error.name
-        } : null
-      };
-      
-      threadToolResults.set(executionKey, executionRecord);
-      
-      // If this was a message post, add timestamp to messages
-      if (toolName === 'postMessage' && result?.ts) {
-        // Add a special note in metadata about this timestamp
-        this.setMetadata(threadTs, 'sentMessages', 
-          [...(this.getMetadata(threadTs, 'sentMessages') || []), result.ts]
-        );
-      }
-      
-      // If this was a button creation, track it
-      if (toolName === 'createButtonMessage' && result?.actionId) {
-        this.setButtonState(threadTs, result.actionId, 'active', result.metadata);
-      }
-      
-      logger.info(`Recorded tool execution: ${toolName} in thread ${threadTs}`);
-      return true;
-    } catch (error) {
-      logger.error(`Error recording tool execution: ${error.message}`);
-      return false;
-    }
-  }
-  
-  /**
-   * Check if a tool has been executed with specific args
-   * @param {string} threadTs - Thread timestamp
-   * @param {string} toolName - Name of the tool
-   * @param {Object} args - Arguments to check
-   * @returns {boolean} - Whether tool has been executed
-   */
-  hasExecuted(threadTs, toolName, args) {
-    try {
-      if (!this.toolResults.has(threadTs)) return false;
-      
-      const executionKey = `${toolName}-${JSON.stringify(args)}`;
-      return this.toolResults.get(threadTs).has(executionKey);
-    } catch (error) {
-      logger.error(`Error checking if tool was executed: ${error.message}`);
-      return false;
-    }
-  }
-  
-  /**
-   * Get the result of a tool execution
-   * @param {string} threadTs - Thread timestamp
-   * @param {string} toolName - Name of the tool
-   * @param {Object} args - Arguments used
-   * @returns {Object} - Result of the execution
-   */
-  getToolResult(threadTs, toolName, args) {
-    try {
-      if (!this.toolResults.has(threadTs)) return null;
-      
-      const executionKey = `${toolName}-${JSON.stringify(args)}`;
-      const executionRecord = this.toolResults.get(threadTs).get(executionKey);
-      
-      if (!executionRecord) return null;
-      
-      return executionRecord.result;
-    } catch (error) {
-      logger.error(`Error getting tool result: ${error.message}`);
-      return null;
-    }
-  }
-  
-  /**
-   * Gets history of tool executions for a thread
-   * @param {string} threadTs - Thread timestamp
-   * @param {number} limit - Maximum number of executions to return
-   * @returns {Array} - Array of execution records
-   */
-  getToolExecutionHistory(threadTs, limit = 10) {
-    try {
-      if (!this.toolResults.has(threadTs)) return [];
-      
-      const threadToolResults = this.toolResults.get(threadTs);
-      
-      // Convert the Map entries to an array and sort by timestamp (newest first)
-      const executionEntries = Array.from(threadToolResults.entries())
-        .map(([key, record]) => {
-          // Parse the key to get toolName and args
-          const keyParts = key.split('-');
-          const toolName = keyParts[0];
-          let args = {};
-          
-          try {
-            // Try to parse the args part of the key
-            const argsJson = key.substring(toolName.length + 1);
-            args = JSON.parse(argsJson);
-          } catch (e) {
-            // If parsing fails, just use the raw string
-            args = { raw: key.substring(toolName.length + 1) };
-          }
-          
-          return {
-            toolName,
-            args,
-            ...record,
-            key
-          };
-        })
-        .sort((a, b) => {
-          // Sort by timestamp, newest first
-          return new Date(b.timestamp) - new Date(a.timestamp);
-        })
-        .slice(0, limit); // Limit the number of entries
-        
-      return executionEntries;
-    } catch (error) {
-      logger.error(`Error getting tool execution history: ${error.message}`);
-      return [];
-    }
   }
   
   /**
@@ -809,7 +779,7 @@ class ContextBuilder {
    */
   buildLLMContext(threadTs, options = {}) {
     try {
-      const { limit = 25, includeBotMessages = true } = options;
+      const { limit = 25, includeBotMessages = true, includeToolCalls = true } = options;
       
       // Log what we're doing
       logger.info(`Building LLM context for thread ${threadTs} with options:`, options);
@@ -823,105 +793,191 @@ class ContextBuilder {
       // Get messages for this thread
       const threadMsgs = this.threadMessages.get(threadTs) || [];
       
+      // Get tool executions for this thread
+      const toolExecs = this.toolExecutions.get(threadTs) || [];
+      
       // Debug log
-      logger.info(`Found ${threadMsgs.length} messages for thread ${threadTs}`);
+      logger.info(`Found ${threadMsgs.length} messages and ${toolExecs.length} tool executions for thread ${threadTs}`);
       
-      // Get the most recent messages (up to limit)
-      const latestFirst = [...threadMsgs].reverse();
-      const limitedMsgIds = latestFirst.slice(0, limit);
+      // Create an array of all items (messages and tool executions) with their sequence numbers
+      const allItems = [];
       
-      // Track button clicks to avoid duplicates
-      const buttonClicks = new Set();
+      // Add messages
+      for (const msgId of threadMsgs) {
+        if (!this.messages.has(msgId)) continue;
+        
+        const message = this.messages.get(msgId);
+        const sequence = this.messageSequences.get(msgId) || 0;
+        
+        allItems.push({
+          type: 'message',
+          item: message,
+          sequence: sequence,
+          timestamp: message.timestamp
+        });
+      }
       
-      // Transform into LLM-compatible message format
+      // Add tool executions if enabled
+      if (includeToolCalls) {
+        for (const tool of toolExecs) {
+          allItems.push({
+            type: 'tool',
+            item: tool,
+            sequence: tool.sequence || 0,
+            timestamp: tool.timestamp
+          });
+        }
+      }
+      
+      // Sort by sequence first, then by timestamp
+      allItems.sort((a, b) => {
+        if (a.sequence !== b.sequence) {
+          return b.sequence - a.sequence; // Descending sequence
+        }
+        // If same sequence, sort by timestamp
+        return new Date(b.timestamp) - new Date(a.timestamp);
+      });
+      
+      // Limit to most recent items
+      const limitedItems = allItems.slice(0, limit * 2); // Double limit to include tool calls
+      
+      // Group by sequence number
+      const groupedBySequence = {};
+      for (const item of limitedItems) {
+        if (!groupedBySequence[item.sequence]) {
+          groupedBySequence[item.sequence] = [];
+        }
+        groupedBySequence[item.sequence].push(item);
+      }
+      
+      // Create LLM-compatible format messages
       const messages = [];
       
-      // Track user/assistant message order for proper threading
-      let lastRole = null;
-      let lastTime = null;
+      // Process sequence groups in reverse order (newest first)
+      const sequences = Object.keys(groupedBySequence)
+        .map(Number)
+        .sort((a, b) => b - a);
       
-      // Process each message
-      for (const msgId of limitedMsgIds) {
-        const msg = this.messages.get(msgId);
-        if (!msg) continue;
+      // Take only a limited number of sequence groups
+      const limitedSequences = sequences.slice(0, limit);
+      
+      for (const sequence of limitedSequences) {
+        const items = groupedBySequence[sequence];
         
-        // Skip bot messages if specified
-        if (!includeBotMessages && msg.source === MessageSources.ASSISTANT) {
-          continue;
-        }
+        // Skip empty sequences
+        if (!items || items.length === 0) continue;
         
-        // Determine message role
-        let role = 'user';
-        if (msg.source === MessageSources.ASSISTANT) {
-          role = 'assistant';
-        } else if (msg.source === MessageSources.SYSTEM) {
-          role = 'system';
-        }
+        // Find the message in this sequence group
+        const messageItems = items.filter(item => item.type === 'message');
         
-        // Button click handling - deduplicate and convert to system message
-        if (msg.type === MessageTypes.BUTTON_CLICK || msg.source === 'button_click' || 
-            (msg.type === 'button_selection' || msg.metadata?.type === 'button_selection')) {
-          // Get key information
-          const buttonText = msg.metadata?.buttonText || 'Unknown button';
-          const buttonValue = msg.metadata?.buttonValue || 'unknown';
-          const buttonKey = `${buttonText}:${buttonValue}`;
+        // Skip if no message and not including tool calls
+        if (messageItems.length === 0 && !includeToolCalls) continue;
+        
+        // Find the tools in this sequence group
+        const toolItems = items.filter(item => item.type === 'tool');
+        
+        // Process messages
+        for (const msgItem of messageItems) {
+          const message = msgItem.item;
           
-          // Skip if we've already processed this button
-          if (buttonClicks.has(buttonKey)) {
-            logger.info(`Skipping duplicate button click: ${buttonKey}`);
+          // Skip bot messages if not including them
+          if ((message.source === 'assistant' || message.source === 'llm') && !includeBotMessages) {
             continue;
           }
           
-          // Mark as processed
-          buttonClicks.add(buttonKey);
+          let content = '';
           
-          // Add a clear system message
+          // Add sequence prefix
+          content += `[${sequence}] `;
+          
+          // Add tools if available for this sequence
+          if (toolItems.length > 0 && includeToolCalls) {
+            // Only include tools for assistant messages
+            if (message.source === 'assistant' || message.source === 'llm') {
+              for (const toolItem of toolItems) {
+                const tool = toolItem.item;
+                content += `tool: ${tool.toolName} (`;
+                
+                // Add simplified args
+                const args = tool.args || {};
+                const argsList = [];
+                for (const [key, value] of Object.entries(args)) {
+                  if (key !== 'reasoning' && key !== 'threadContext') {
+                    if (typeof value === 'string' && value.length > 30) {
+                      argsList.push(`${key}: "${value.substring(0, 30)}..."`);
+                    } else {
+                      argsList.push(`${key}: ${JSON.stringify(value)}`);
+                    }
+                  }
+                }
+                content += argsList.join(', ');
+                content += ')\n';
+              }
+            }
+          }
+          
+          // Add message content with source prefix
+          if (message.source === 'user') {
+            content += `user: ${message.text || ''}`;
+          } else if (message.source === 'assistant' || message.source === 'llm') {
+            content += `assistant: ${message.text || ''}`;
+          } else if (message.source === 'system') {
+            content += `system: ${message.text || ''}`;
+          }
+          
+          // Add reasoning if available
+          for (const toolItem of toolItems) {
+            const tool = toolItem.item;
+            if (tool.reasoning) {
+              content += `\n[${sequence}] reasoning: ${tool.reasoning}`;
+              break; // Only add reasoning once
+            }
+          }
+          
+          // Add to messages array
+          if (message.source === 'user') {
+            messages.push({
+              role: 'user',
+              content: content,
+              name: `user_${Date.now().toString()}`
+            });
+          } else if (message.source === 'assistant' || message.source === 'llm') {
+            messages.push({
+              role: 'assistant',
+              content: content,
+              name: `assistant_${Date.now().toString()}`
+            });
+          } else if (message.source === 'system') {
+            messages.push({
+              role: 'system',
+              content: content,
+              name: `system_${Date.now().toString()}`
+            });
+          }
+        }
+        
+        // If no messages but there are tools, add as system message
+        if (messageItems.length === 0 && toolItems.length > 0 && includeToolCalls) {
+          let content = `[${sequence}] `;
+          
+          for (const toolItem of toolItems) {
+            const tool = toolItem.item;
+            content += `Tool executed: ${tool.toolName}\n`;
+            content += `Args: ${JSON.stringify(tool.args || {}, null, 2)}\n`;
+            if (tool.reasoning) {
+              content += `Reasoning: ${tool.reasoning}\n`;
+            }
+            if (tool.error) {
+              content += `Error: ${tool.error}\n`;
+            }
+          }
+          
           messages.push({
             role: 'system',
-            content: `The user clicked the "${buttonText}" button with value "${buttonValue}". The original message has already been updated to show this selection. Respond with the next logical step based on this selection.`,
-            name: 'button_click_info'
+            content: content,
+            name: `system_tool_${Date.now().toString()}`
           });
-          
-          continue; // Skip further processing for button clicks
         }
-        
-        // Skip empty or obviously corrupted messages
-        if (!msg.text || typeof msg.text !== 'string' || msg.text.trim() === '') {
-          logger.info(`Skipping empty message: ${msgId}`);
-          continue;
-        }
-        
-        // Get content
-        const content = msg.text || '';
-        
-        // Check if this message continues the previous one (same role)
-        if (lastRole === role && role !== 'system') {
-          // If timestamps are close (within 5 seconds), combine the messages
-          const lastTimeMs = lastTime ? new Date(lastTime).getTime() : 0;
-          const currentTimeMs = new Date(msg.timestamp).getTime();
-          
-          if (Math.abs(currentTimeMs - lastTimeMs) < 5000 && messages.length > 0) {
-            // Append to previous message
-            const lastMsg = messages[messages.length - 1];
-            lastMsg.content = `${lastMsg.content}\n\n${content}`;
-            logger.info(`Combined with previous message (${role})`);
-            continue;
-          }
-        }
-        
-        // Standard case - add as new message
-        const message = { role, content };
-        
-        // Add name for system messages, helps with identification
-        if (role === 'system' && msg.metadata?.type) {
-          message.name = msg.metadata.type;
-        }
-        
-        messages.push(message);
-        
-        // Update tracking
-        lastRole = role;
-        lastTime = msg.timestamp;
       }
       
       // Add a warning if we have no messages
@@ -941,6 +997,28 @@ class ContextBuilder {
       return messages.reverse();
     } catch (error) {
       logger.error('Error building LLM context:', error);
+      return [];
+    }
+  }
+  
+  /**
+   * Gets tool execution history for a thread
+   * @param {string} threadId - Thread ID
+   * @param {number} limit - Maximum number of executions to return
+   * @returns {Array} - Array of tool execution records
+   */
+  getToolExecutionHistory(threadId, limit = 10) {
+    try {
+      // Check if thread exists in tool executions
+      if (!this.toolExecutions.has(threadId)) {
+        return [];
+      }
+      
+      // Get and limit the executions
+      return this.toolExecutions.get(threadId)
+        .slice(0, limit);
+    } catch (error) {
+      logger.error(`Error getting tool execution history: ${error.message}`);
       return [];
     }
   }
@@ -970,6 +1048,85 @@ class ContextBuilder {
     } catch (error) {
       logger.error(`Error getting thread messages: ${error.message}`);
       return [];
+    }
+  }
+  
+  /**
+   * Check if a tool has been executed with specific args
+   * @param {string} threadId - Thread ID
+   * @param {string} toolName - Name of the tool
+   * @param {Object} args - Arguments to check
+   * @returns {boolean} - Whether tool has been executed
+   */
+  hasExecuted(threadId, toolName, args = {}) {
+    try {
+      // Check if thread exists in tool executions
+      if (!this.toolExecutions.has(threadId)) {
+        return false;
+      }
+      
+      // Get tool executions for this thread
+      const executions = this.toolExecutions.get(threadId);
+      
+      // Look for a matching execution
+      return executions.some(exec => {
+        // Must match the tool name
+        if (exec.toolName !== toolName) return false;
+        
+        // Check if args match approximately (simplified check)
+        if (!args || Object.keys(args).length === 0) {
+          return true; // No args to check, just match on tool name
+        }
+        
+        // Simple key matching (not perfect but workable for compatibility)
+        return Object.keys(args).every(key => {
+          return exec.args && exec.args[key] !== undefined;
+        });
+      });
+    } catch (error) {
+      logger.error(`Error checking if tool was executed: ${error.message}`);
+      return false;
+    }
+  }
+  
+  /**
+   * Get the result of a tool execution
+   * @param {string} threadId - Thread ID
+   * @param {string} toolName - Name of the tool
+   * @param {Object} args - Arguments used
+   * @returns {Object} - Result of the execution
+   */
+  getToolResult(threadId, toolName, args = {}) {
+    try {
+      // Check if thread exists in tool executions
+      if (!this.toolExecutions.has(threadId)) {
+        return null;
+      }
+      
+      // Get tool executions for this thread
+      const executions = this.toolExecutions.get(threadId);
+      
+      // Find a matching execution
+      const matchingExec = executions.find(exec => {
+        // Must match the tool name
+        if (exec.toolName !== toolName) return false;
+        
+        // Check if args match approximately
+        if (!args || Object.keys(args).length === 0) {
+          return true; // No args to check, just match on tool name
+        }
+        
+        // Simple key matching
+        return Object.keys(args).every(key => {
+          return exec.args && exec.args[key] !== undefined;
+        });
+      });
+      
+      // Return the result if found
+      return matchingExec ? matchingExec.result : null;
+    } catch (error) {
+      logger.error(`Error getting tool result: ${error.message}`);
+      return null;
     }
   }
 }
