@@ -9,6 +9,8 @@
 
 const { logError } = require('./errors.js');
 const logger = require('./toolUtils/logger.js');
+const { formatTimestamp, formatRelativeTime, formatContextTimestamp } = require('./toolUtils/dateUtils.js');
+const { calculateTextSimilarity } = require('./toolUtils/messageFormatUtils');
 
 
 // Message types - extensible enum of supported message types
@@ -205,9 +207,10 @@ class ContextBuilder {
    * @param {Object} args - Tool arguments
    * @param {Object} result - Tool execution result
    * @param {Error} [error] - Error object if the tool execution failed
+   * @param {boolean} [skipped] - Whether the tool execution was skipped
    * @returns {string} - Generated tool execution ID
    */
-  recordToolExecution(threadId, toolName, args, result, error = null) {
+  recordToolExecution(threadId, toolName, args, result, error = null, skipped = false) {
     try {
       // Check if thread exists
       if (!this.toolExecutions.has(threadId)) {
@@ -220,15 +223,48 @@ class ContextBuilder {
       // Assign a sequence number to this tool execution
       const sequence = this.getNextSequence(threadId);
       
+      // Get current date and time for logging
+      const timestamp = new Date();
+      const isoTimestamp = timestamp.toISOString();
+      
+      // Format timestamps with error handling
+      let formattedTime = 'unknown time';
+      let relativeTime = 'just now';
+      
+      try {
+        formattedTime = formatTimestamp(timestamp);
+        relativeTime = 'just now'; // New executions are always "just now"
+      } catch (timeError) {
+        logger.warn(`Error formatting timestamp in recordToolExecution: ${timeError.message}`);
+      }
+      
+      // Determine the turn ID based on the sequence counter
+      const turnId = Math.floor(sequence / 2) + 1;
+      
+      // Format status - prioritize skipped over error
+      let status;
+      if (skipped) {
+        status = "SKIPPED";
+      } else if (error) {
+        status = "ERROR";
+      } else {
+        status = "SUCCESS";
+      }
+      
       // Create execution record
       const executionRecord = {
         id: executionId,
         toolName,
         threadId,
-        timestamp: new Date().toISOString(),
+        timestamp: isoTimestamp,
+        formattedTime,
+        relativeTime,
+        turnId,
         args: { ...args },  // Clone to avoid reference issues
         result: result ? { ...result } : null,  // Clone if exists
         error: error ? error.message : null,
+        skipped: skipped,
+        status,
         sequence: sequence, // Store the sequence number
         reasoning: args.reasoning || null, // Capture the reasoning
       };
@@ -236,11 +272,38 @@ class ContextBuilder {
       // Add to list
       this.toolExecutions.get(threadId).unshift(executionRecord);
       
-      // For postMessage tool, associate it with the message sequence
+      // Log standardized execution record for LLM context
+      try {
+        const logEntry = `[${turnId}] tool ${toolName} called, ${status.toLowerCase()} at ${formattedTime}`;
+        logger.info(logEntry);
+      } catch (logError) {
+        logger.warn(`Error logging tool execution: ${logError.message}`);
+      }
+      
+      // For postMessage tool, associate it with the message sequence and log the message
       if (toolName === 'postMessage' && result && result.ts) {
         const messageId = `bot_${result.ts}`;
         this.messageSequences.set(messageId, sequence);
         this.toolToMessageMap.set(executionId, messageId);
+        
+        // Log message content preview (truncated if long) with error handling
+        try {
+          const messageText = args.text || '';
+          const previewText = messageText.length > 50 ? 
+            `${messageText.substring(0, 50)}...` : 
+            messageText;
+          logger.info(`[${turnId}] assistant: ${previewText}`);
+          
+          // Log reasoning if available
+          if (args.reasoning) {
+            logger.info(`[${turnId}] reasoning: "${args.reasoning}"`);
+          }
+          
+          // Add system guidance for the LLM about next steps
+          logger.info(`[system] Message was successfully posted at ${formattedTime}. Decide if you want to call finishRequest to complete this user interaction.`);
+        } catch (msgLogError) {
+          logger.warn(`Error logging message preview: ${msgLogError.message}`);
+        }
       }
       
       // Trim if too many
@@ -772,17 +835,123 @@ class ContextBuilder {
   }
   
   /**
-   * Builds context for the LLM for a specific thread
+   * Extract user ID from a message
+   * @param {Object} message - Message object
+   * @returns {string} - User ID
+   */
+  _extractUserId(message) {
+    // First try to get from sourceId
+    if (message.sourceId && message.sourceId.startsWith('U')) {
+      return message.sourceId;
+    }
+    
+    // Then try to extract from text if it contains a mention
+    if (message.text) {
+      const userIdMatch = message.text.match(/<@([A-Z0-9]+)>/);
+      if (userIdMatch && userIdMatch[1]) {
+        return userIdMatch[1];
+      }
+    }
+    
+    // If metadata exists, check there
+    if (message.metadata && message.metadata.userId) {
+      return message.metadata.userId;
+    }
+    
+    // If thread metadata exists, check for user info
+    if (message.threadTs && this.threadMetadata.has(message.threadTs)) {
+      const metadata = this.threadMetadata.get(message.threadTs);
+      if (metadata.context && metadata.context.user && metadata.context.user.id) {
+        return metadata.context.user.id;
+      }
+    }
+    
+    // Use default USER ID as fallback
+    return 'USER';
+  }
+  
+  /**
+   * Format a message for LLM consumption
+   * @param {Object} message - Message to format
+   * @param {number} index - Index in the context sequence
+   * @returns {Object|null} - Formatted message object or null if invalid
+   */
+  _formatMessageForLLM(message, index) {
+    if (!message) return null;
+    
+    const formattedTime = formatContextTimestamp(message.timestamp);
+    let formattedString = '';
+    let role = 'system';
+    let source = message.source;
+    
+    if (message.source === 'user') {
+      // Format: [1] DD/MM/YYYY HH:mm - USER <@userID>: message
+      const userId = this._extractUserId(message);
+      formattedString = `[${index}] ${formattedTime} - USER <@${userId}>: ${message.text || ''}`;
+      role = 'user';
+    } else if (message.source === 'assistant' || message.source === 'llm') {
+      // Format: [2] DD/MM/YYYY HH:mm - BOT MESSAGE: message
+      formattedString = `[${index}] ${formattedTime} - BOT MESSAGE: ${message.text || ''}`;
+      role = 'assistant';
+    } else if (message.source === 'system') {
+      // Format: [3] DD/MM/YYYY HH:mm - BOT SYSTEM: message
+      formattedString = `[${index}] ${formattedTime} - BOT SYSTEM: ${message.text || ''}`;
+      role = 'system';
+    } else {
+      // Unknown source, skip
+      return null;
+    }
+    
+    return {
+      role,
+      source,
+      formattedString,
+      raw: message.text || ''
+    };
+  }
+  
+  /**
+   * Format a tool execution for LLM consumption
+   * @param {Object} tool - Tool execution to format
+   * @param {number} index - Index in the context sequence
+   * @returns {Object|null} - Formatted tool execution object or null if invalid
+   */
+  _formatToolExecutionForLLM(tool, index) {
+    if (!tool) return null;
+    
+    const formattedTime = formatContextTimestamp(tool.timestamp);
+    
+    // Format: [4] DD/MM/YYYY HH:mm - BOT TOOL CALL: toolName, reasoning: "explanation", STATUS
+    const reasoning = tool.reasoning || 'No reasoning provided';
+    const status = tool.skipped ? 'SKIPPED' : (tool.error ? 'ERROR' : 'SUCCESS');
+    
+    // Add skipped info
+    const skippedInfo = tool.skipped ? ' (Tool call skipped - identical parameters to previous call)' : '';
+    
+    const formattedString = `[${index}] ${formattedTime} - BOT TOOL CALL: ${tool.toolName}, reasoning: "${reasoning}", ${status}${skippedInfo}`;
+    
+    return {
+      role: 'system',
+      source: 'tool',
+      formattedString,
+      raw: `Tool ${tool.toolName} called: ${status}${skippedInfo}`
+    };
+  }
+  
+  /**
+   * Builds context for the LLM using the new standardized format specified in docs/llm_context_format.md
    * @param {string} threadTs - Thread timestamp
    * @param {Object} options - Build options
-   * @returns {Array} - Messages array for LLM
+   * @returns {Array} - Messages array for LLM in the new format
    */
-  buildLLMContext(threadTs, options = {}) {
+  buildFormattedLLMContext(threadTs, options = {}) {
     try {
-      const { limit = 25, includeBotMessages = true, includeToolCalls = true } = options;
+      const { limit = 25, includeBotMessages = true, includeToolCalls = true, skipLogging = false } = options;
       
-      // Log what we're doing
-      logger.info(`Building LLM context for thread ${threadTs} with options:`, options);
+      // Only log if not explicitly skipped (helps prevent duplicate logs)
+      if (!skipLogging) {
+        logger.info(`Building formatted LLM context for thread ${threadTs}`);
+      }
       
       // Make sure threadTs exists
       if (!threadTs || !this.threadMessages.has(threadTs)) {
@@ -796,8 +965,23 @@ class ContextBuilder {
       // Get tool executions for this thread
       const toolExecs = this.toolExecutions.get(threadTs) || [];
       
-      // Debug log
-      logger.info(`Found ${threadMsgs.length} messages and ${toolExecs.length} tool executions for thread ${threadTs}`);
+      // Get thread metadata for user info
+      const metadata = this.getMetadata(threadTs) || {};
+      const context = metadata.context || {};
+      const iterations = metadata.iterations || 0;
+      
+      // Extract user information
+      const userInfo = context.user || {};
+      const userName = userInfo.name || 'Unknown User';
+      const userId = this._extractUserId(this.messages.get(threadMsgs[0]));
+      const userTimezone = userInfo.timezone || 'America/Sao_Paulo';
+      const isDirectMessage = context.isDirectMessage || false;
+      const channel = context.channelName || (isDirectMessage ? 'Direct Message' : 'Unknown Channel');
+      
+      // Debug log - only if not skipped
+      if (!skipLogging) {
+        logger.info(`Found ${threadMsgs.length} messages and ${toolExecs.length} tool executions for thread ${threadTs}`);
+      }
       
       // Create an array of all items (messages and tool executions) with their sequence numbers
       const allItems = [];
@@ -829,176 +1013,308 @@ class ContextBuilder {
         }
       }
       
-      // Sort by sequence first, then by timestamp
+      // Sort by timestamp in chronological order (oldest first)
       allItems.sort((a, b) => {
-        if (a.sequence !== b.sequence) {
-          return b.sequence - a.sequence; // Descending sequence
-        }
-        // If same sequence, sort by timestamp
-        return new Date(b.timestamp) - new Date(a.timestamp);
+        return new Date(a.timestamp) - new Date(b.timestamp);
       });
       
-      // Limit to most recent items
-      const limitedItems = allItems.slice(0, limit * 2); // Double limit to include tool calls
+      // Create an array to hold the JSON context entries
+      const jsonContext = [];
+
+      // Count different message types for conversation stats
+      const userMessages = allItems.filter(item => 
+        item.type === 'message' && item.item.source === 'user'
+      );
+      const botMessages = allItems.filter(item => 
+        item.type === 'message' && 
+        (item.item.source === 'assistant' || item.item.source === 'llm')
+      );
+      const totalMessages = threadMsgs.length;
+      const toolCallsCount = toolExecs.length;
+      const inThread = context.isThread || false;
+      const threadHistoryCalls = toolExecs.filter(tool => tool.toolName === 'getThreadHistory').length;
+      const isInitialMessage = totalMessages === 1;
+      const mentionedUsers = context.mentionedUsers || [];
+      const hasMentions = mentionedUsers.length > 0;
       
-      // Group by sequence number
-      const groupedBySequence = {};
-      for (const item of limitedItems) {
-        if (!groupedBySequence[item.sequence]) {
-          groupedBySequence[item.sequence] = [];
+      // Create conversation stats object (added before the system prompt)
+      const conversationStats = {
+        index: 0,
+        turn: 0,
+        timestamp: new Date().toISOString(),
+        role: "system",
+        content: {
+          type: "conversation_stats",
+          stats: {
+            channel_info: {
+              channel: channel,
+              is_dm: isDirectMessage,
+              is_thread: inThread,
+              is_initial_message: isInitialMessage,
+              has_mentions: hasMentions,
+              mentioned_users_count: mentionedUsers.length
+            },
+            message_counts: {
+              total_messages: totalMessages,
+              user_messages: userMessages.length,
+              bot_messages: botMessages.length,
+              available_messages: Math.min(totalMessages, limit)
+            },
+            tool_usage: {
+              total_tool_calls: toolCallsCount,
+              thread_history_calls: threadHistoryCalls
+            }
+          },
+          guidance: "Use this information to decide whether to call getThreadHistory. In DMs or threads with only 1 message, extra context retrieval isn't needed."
         }
-        groupedBySequence[item.sequence].push(item);
-      }
+      };
       
-      // Create LLM-compatible format messages
-      const messages = [];
+      // Add conversation stats as the very first item
+      jsonContext.push(conversationStats);
+
+      // Add system message as the next entry with enhanced user info
+      const systemPrompt = `You're a helpful AI assistant named Aya. You help users with information and tasks. 
+You are chatting with ${userName} <@${userId}> in ${channel}. 
+The current iteration of this conversation is ${iterations}.
+When responding to users, be conversational and helpful.
+IMPORTANT: After responding to a user request with postMessage, always call finishRequest to complete the interaction.
+Never call getThreadHistory more than once for the same request.`;
+
+      // Add system message to our JSON context array
+      jsonContext.push({
+        index: 1,
+        turn: 0,
+        timestamp: new Date().toISOString(),
+        role: "system",
+        content: systemPrompt
+      });
       
-      // Process sequence groups in reverse order (newest first)
-      const sequences = Object.keys(groupedBySequence)
-        .map(Number)
-        .sort((a, b) => b - a);
+      // Group items by conversation turn for proper numbering
+      // Initialize with turn 0 for the initial system message
+      let currentTurn = 0;
+      let lastUserMessageTime = null;
+      let currentIndex = 2; // Start from 2 since we have stats and system message
       
-      // Take only a limited number of sequence groups
-      const limitedSequences = sequences.slice(0, limit);
-      
-      for (const sequence of limitedSequences) {
-        const items = groupedBySequence[sequence];
-        
-        // Skip empty sequences
-        if (!items || items.length === 0) continue;
-        
-        // Find the message in this sequence group
-        const messageItems = items.filter(item => item.type === 'message');
-        
-        // Skip if no message and not including tool calls
-        if (messageItems.length === 0 && !includeToolCalls) continue;
-        
-        // Find the tools in this sequence group
-        const toolItems = items.filter(item => item.type === 'tool');
-        
-        // Process messages
-        for (const msgItem of messageItems) {
-          const message = msgItem.item;
+      // Process all items according to turn-based numbering
+      for (const item of allItems) {
+        // Check if this is a user message starting a new turn
+        if (item.type === 'message' && item.item.source === 'user') {
+          // User messages always start a new turn (1, 2, 3, etc.)
+          currentTurn++;
+          lastUserMessageTime = new Date(item.timestamp);
           
-          // Skip bot messages if not including them
-          if ((message.source === 'assistant' || message.source === 'llm') && !includeBotMessages) {
+          // Format user message with the turn number
+          const message = item.item;
+          const userId = this._extractUserId(message);
+          
+          jsonContext.push({
+            index: currentIndex++,
+            turn: currentTurn,
+            timestamp: new Date(message.timestamp).toISOString(),
+            role: "user",
+            content: {
+              userid: `<@${userId}>`,
+              text: message.text || ''
+            }
+          });
+        } 
+        // Check if this is a bot message responding to the last user message
+        else if (item.type === 'message' && 
+                (item.item.source === 'assistant' || item.item.source === 'llm')) {
+          // Bot responses use the current turn number
+          const message = item.item;
+          
+          // Attempt to associate this message with a tool call
+          const associatedToolCall = this._findAssociatedToolCall(message, toolExecs);
+          
+          if (associatedToolCall && associatedToolCall.toolName === 'postMessage') {
+            jsonContext.push({
+              index: currentIndex++,
+              turn: currentTurn,
+              timestamp: new Date(message.timestamp).toISOString(),
+              role: "assistant",
+              content: {
+                toolCall: "postMessage",
+                text: message.text || '',
+                reasoning: associatedToolCall.reasoning || 'No reasoning provided'
+              }
+            });
+          } else {
+            // If no associated tool call found, just add as a regular message
+            jsonContext.push({
+              index: currentIndex++,
+              turn: currentTurn,
+              timestamp: new Date(message.timestamp).toISOString(),
+              role: "assistant",
+              content: {
+                toolCall: "postMessage",
+                text: message.text || '',
+                reasoning: 'No reasoning provided'
+              }
+            });
+          }
+        }
+        // Check if this is a tool execution
+        else if (item.type === 'tool') {
+          // Only add tool executions that aren't already associated with a message
+          const tool = item.item;
+          const isPostMessageTool = tool.toolName === 'postMessage';
+          
+          // Skip postMessage tools as they're handled with the actual messages
+          if (isPostMessageTool) {
             continue;
           }
           
-          let content = '';
-          
-          // Add sequence prefix
-          content += `[${sequence}] `;
-          
-          // Add tools if available for this sequence
-          if (toolItems.length > 0 && includeToolCalls) {
-            // Only include tools for assistant messages
-            if (message.source === 'assistant' || message.source === 'llm') {
-              for (const toolItem of toolItems) {
-                const tool = toolItem.item;
-                content += `tool: ${tool.toolName} (`;
-                
-                // Add simplified args
-                const args = tool.args || {};
-                const argsList = [];
-                for (const [key, value] of Object.entries(args)) {
-                  if (key !== 'reasoning' && key !== 'threadContext') {
-                    if (typeof value === 'string' && value.length > 30) {
-                      argsList.push(`${key}: "${value.substring(0, 30)}..."`);
-                    } else {
-                      argsList.push(`${key}: ${JSON.stringify(value)}`);
-                    }
-                  }
-                }
-                content += argsList.join(', ');
-                content += ')\n';
-              }
+          // Add non-postMessage tool calls
+          jsonContext.push({
+            index: currentIndex++,
+            turn: currentTurn,
+            timestamp: new Date(tool.timestamp).toISOString(),
+            role: "assistant",
+            content: {
+              toolCall: tool.toolName,
+              reasoning: tool.reasoning || 'No reasoning provided',
+              ...this._extractToolParameters(tool)
             }
-          }
-          
-          // Add message content with source prefix
-          if (message.source === 'user') {
-            content += `user: ${message.text || ''}`;
-          } else if (message.source === 'assistant' || message.source === 'llm') {
-            content += `assistant: ${message.text || ''}`;
-          } else if (message.source === 'system') {
-            content += `system: ${message.text || ''}`;
-          }
-          
-          // Add reasoning if available
-          for (const toolItem of toolItems) {
-            const tool = toolItem.item;
-            if (tool.reasoning) {
-              content += `\n[${sequence}] reasoning: ${tool.reasoning}`;
-              break; // Only add reasoning once
-            }
-          }
-          
-          // Add to messages array
-          if (message.source === 'user') {
-            messages.push({
-              role: 'user',
-              content: content,
-              name: `user_${Date.now().toString()}`
-            });
-          } else if (message.source === 'assistant' || message.source === 'llm') {
-            messages.push({
-              role: 'assistant',
-              content: content,
-              name: `assistant_${Date.now().toString()}`
-            });
-          } else if (message.source === 'system') {
-            messages.push({
-              role: 'system',
-              content: content,
-              name: `system_${Date.now().toString()}`
-            });
-          }
-        }
-        
-        // If no messages but there are tools, add as system message
-        if (messageItems.length === 0 && toolItems.length > 0 && includeToolCalls) {
-          let content = `[${sequence}] `;
-          
-          for (const toolItem of toolItems) {
-            const tool = toolItem.item;
-            content += `Tool executed: ${tool.toolName}\n`;
-            content += `Args: ${JSON.stringify(tool.args || {}, null, 2)}\n`;
-            if (tool.reasoning) {
-              content += `Reasoning: ${tool.reasoning}\n`;
-            }
-            if (tool.error) {
-              content += `Error: ${tool.error}\n`;
-            }
-          }
-          
-          messages.push({
-            role: 'system',
-            content: content,
-            name: `system_tool_${Date.now().toString()}`
           });
+        }
+        // Handle system messages (we will skip these in the new format as they aren't needed)
+        // We could add them with role: "system" if needed
+      }
+      
+      // Add hints and suggestions at the end of the context
+      // Track repeated tool calls
+      const toolCalls = {};
+      toolExecs.forEach(tool => {
+        if (!toolCalls[tool.toolName]) {
+          toolCalls[tool.toolName] = { count: 0, success: 0, errors: 0, skipped: 0 };
+        }
+        toolCalls[tool.toolName].count += 1;
+        
+        if (tool.error) {
+          toolCalls[tool.toolName].errors += 1;
+        } else if (tool.skipped) {
+          toolCalls[tool.toolName].skipped += 1;
+        } else {
+          toolCalls[tool.toolName].success += 1;
+        }
+      });
+      
+      // Generate warnings for repeated tools
+      const toolWarnings = [];
+      for (const [toolName, stats] of Object.entries(toolCalls)) {
+        if (stats.count > 2) {
+          toolWarnings.push(`${toolName} was called ${stats.count} times (${stats.success} success, ${stats.skipped} skipped, ${stats.errors} errors)`);
+        }
+        if (stats.skipped > 0) {
+          toolWarnings.push(`${toolName} was skipped ${stats.skipped} times - avoid calling the same tool with identical parameters`);
         }
       }
       
-      // Add a warning if we have no messages
-      if (messages.length === 0) {
-        logger.warn(`No valid messages found for thread ${threadTs}`);
-        messages.push({
-          role: 'system',
-          content: 'No message history found. This appears to be a new conversation.',
-          name: 'no_history_warning'
+      // Check if assistant has already responded in this interaction
+      let hasAlreadyResponded = false;
+      // Look for postMessage calls that succeeded
+      if (toolCalls['postMessage'] && toolCalls['postMessage'].success > 0) {
+        hasAlreadyResponded = true;
+      }
+      
+      // Generate next action suggestions
+      let nextActionSuggestion = "Respond to the user's request.";
+      
+      if (hasAlreadyResponded) {
+        // The assistant has already sent a message in this interaction
+        nextActionSuggestion = "You've already responded to the user. Call finishRequest to complete the interaction.";
+      } else if (isInitialMessage && isDirectMessage) {
+        nextActionSuggestion = "This is the first message in a DM. No need to call getThreadHistory.";
+      } else if (threadHistoryCalls > 2) {
+        nextActionSuggestion = "You've called getThreadHistory multiple times. You already have all context. Respond directly.";
+      } else if (toolWarnings.length > 0) {
+        nextActionSuggestion = "Note repeated tool calls above. Focus on solving the user's request.";
+      }
+      
+      // Add the hints and suggestions block
+      if (toolWarnings.length > 0 || nextActionSuggestion) {
+        jsonContext.push({
+          index: currentIndex++,
+          turn: currentTurn,
+          timestamp: new Date().toISOString(),
+          role: "system",
+          content: {
+            type: "hints_and_suggestions",
+            warnings: toolWarnings,
+            next_action: nextActionSuggestion,
+            whose_turn: hasAlreadyResponded ? "user" : "assistant"
+          }
         });
       }
       
-      // Log what we're returning
-      logger.info(`Returning ${messages.length} messages for LLM context`);
+      // We'll skip logging here since llmInterface will handle it with the formatter
       
-      // Return in earliest-first order (required for LLM)
-      return messages.reverse();
+      return jsonContext;
     } catch (error) {
-      logger.error('Error building LLM context:', error);
+      logger.error(`Error building formatted LLM context for thread ${threadTs}:`, error);
       return [];
     }
+  }
+  
+  /**
+   * Finds a tool call that is associated with a message
+   * @param {Object} message - The message to find a tool call for
+   * @param {Array} toolExecutions - Array of tool executions
+   * @returns {Object|null} - The associated tool call or null
+   * @private
+   */
+  _findAssociatedToolCall(message, toolExecutions) {
+    if (!message || !toolExecutions || !Array.isArray(toolExecutions)) {
+      return null;
+    }
+    
+    // Look for a postMessage tool call that occurred just before this message
+    const messageTime = new Date(message.timestamp);
+    
+    // Filter to only postMessage tools that happened within 5 seconds before the message
+    const possibleMatches = toolExecutions.filter(tool => {
+      if (tool.toolName !== 'postMessage') return false;
+      
+      const toolTime = new Date(tool.timestamp);
+      const timeDiff = messageTime - toolTime; // Positive if message is after tool
+      
+      // Tool call should be at most 5 seconds before the message
+      return timeDiff >= 0 && timeDiff < 5000;
+    });
+    
+    // Sort by timestamp descending and take the closest one
+    if (possibleMatches.length > 0) {
+      return possibleMatches.sort((a, b) => 
+        new Date(b.timestamp) - new Date(a.timestamp)
+      )[0];
+    }
+    
+    return null;
+  }
+  
+  /**
+   * Extracts parameters from a tool execution object
+   * @param {Object} tool - The tool execution object
+   * @returns {Object} - The extracted parameters
+   * @private
+   */
+  _extractToolParameters(tool) {
+    if (!tool || !tool.args) {
+      return {};
+    }
+    
+    // Exclude certain fields that shouldn't be in the parameters
+    const excludedFields = ['toolName', 'reasoning', 'timestamp', 'sequence', 'error'];
+    const parameters = {};
+    
+    Object.entries(tool.args).forEach(([key, value]) => {
+      if (!excludedFields.includes(key)) {
+        parameters[key] = value;
+      }
+    });
+    
+    return parameters;
   }
   
   /**
@@ -1068,19 +1384,43 @@ class ContextBuilder {
       // Get tool executions for this thread
       const executions = this.toolExecutions.get(threadId);
       
-      // Look for a matching execution
+      // Special handling for postMessage to avoid treating different messages as duplicates
+      if (toolName === 'postMessage' && args.text) {
+        return executions.some(exec => {
+          // Must match the tool name
+          if (exec.toolName !== toolName) return false;
+          
+          // If no args in previous execution, it can't be a match
+          if (!exec.args || !exec.args.text) return false;
+          
+          // For postMessage, compare text content with similarity detection
+          const similarity = calculateTextSimilarity(args.text, exec.args.text);
+          
+          // Only consider it a match if similarity is very high (95% or more)
+          // This allows for minor formatting differences but catches duplicates
+          return similarity > 0.95;
+        });
+      }
+      
+      // For other tools, do a more precise comparison of args
       return executions.some(exec => {
         // Must match the tool name
         if (exec.toolName !== toolName) return false;
         
-        // Check if args match approximately (simplified check)
+        // Check if args match (more detailed check)
         if (!args || Object.keys(args).length === 0) {
           return true; // No args to check, just match on tool name
         }
         
-        // Simple key matching (not perfect but workable for compatibility)
+        // Compare all keys and values
         return Object.keys(args).every(key => {
-          return exec.args && exec.args[key] !== undefined;
+          // Skip reasoning check - reasoning can be different
+          if (key === 'reasoning') return true;
+          
+          // Compare the values
+          return exec.args && 
+                 exec.args[key] !== undefined && 
+                 JSON.stringify(exec.args[key]) === JSON.stringify(args[key]);
         });
       });
     } catch (error) {
@@ -1127,6 +1467,23 @@ class ContextBuilder {
     } catch (error) {
       logger.error(`Error getting tool result: ${error.message}`);
       return null;
+    }
+  }
+  
+  /**
+   * Builds context for the LLM for a specific thread
+   * @param {string} threadTs - Thread timestamp
+   * @param {Object} options - Build options
+   * @returns {Array} - Messages array for LLM
+   */
+  buildLLMContext(threadTs, options = {}) {
+    try {
+      // Simply delegate to the new formatted context builder
+      logger.info(`buildLLMContext: Delegating to new buildFormattedLLMContext for thread ${threadTs}`);
+      return this.buildFormattedLLMContext(threadTs, options);
+    } catch (error) {
+      logger.error('Error in buildLLMContext:', error);
+      return [];
     }
   }
 }

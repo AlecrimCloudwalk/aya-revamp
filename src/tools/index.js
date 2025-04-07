@@ -3,7 +3,7 @@
 // Import all tools
 const { postMessage } = require('./postMessage.js');
 const { finishRequest } = require('./finishRequest.js');
-const { getThreadHistory } = require('./getThreadHistory.js');
+const getThreadHistoryTool = require('./getThreadHistory.js');
 const { updateMessage } = require('./updateMessage.js');
 const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
 const getUserAvatar = require('./getUserAvatar.js');
@@ -55,7 +55,7 @@ const toolRegistry = {
           },
           color: {
             type: 'string',
-            description: 'Color for the message sidebar (optional, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)'
+            description: 'Color for the message sidebar (optional, use hex code like #842BFF or named colors: good=green, warning=yellow, danger=red)'
           },
           reasoning: {
             type: 'string',
@@ -131,7 +131,7 @@ const toolRegistry = {
       },
       strict: true
     },
-    implementation: getThreadHistory
+    implementation: getThreadHistoryTool
   },
   updateMessage: {
     type: "function",
@@ -151,7 +151,7 @@ const toolRegistry = {
           },
           color: {
             type: 'string',
-            description: 'Color for the message sidebar (optional, use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)'
+            description: 'Color for the message sidebar (optional, use hex code like #842BFF or named colors: good=green, warning=yellow, danger=red)'
           },
           removeButtons: {
             type: 'boolean',
@@ -195,7 +195,7 @@ const toolRegistry = {
           },
           color: {
             type: 'string',
-            description: 'Color of the message sidebar (use hex code like #36C5F0 or named colors: good=green, warning=yellow, danger=red)'
+            description: 'Color of the message sidebar (use hex code like #842BFF or named colors: good=green, warning=yellow, danger=red)'
           },
           threadTs: {
             type: 'string',
@@ -405,7 +405,7 @@ module.exports = {
   // Individual tool exports
   postMessage,
   finishRequest,
-  getThreadHistory,
+  getThreadHistoryTool,
   updateMessage,
   createEmojiVote,
   getVoteResults,

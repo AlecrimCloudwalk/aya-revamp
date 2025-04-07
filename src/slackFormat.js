@@ -258,8 +258,18 @@ function formatSlackMessage(options = {}) {
   
   // Ensure all attachments have color if not specified
   formattedAttachments.forEach(attachment => {
-    if (!attachment.color && color) {
-      attachment.color = color;
+    // Check if we need to apply the specified color
+    const defaultColor = "#842BFF"; // The default Slack blue 
+    const isDefaultColor = attachment.color === defaultColor;
+    
+    // Apply color if not specified or if it's the default color
+    if (!attachment.color || isDefaultColor) {
+      if (color) {
+        logger.info(`Applying color ${color} to attachment (replacing ${attachment.color || 'none'})`);
+        attachment.color = color;
+      }
+    } else {
+      logger.info(`Keeping existing color ${attachment.color} (not default)`);
     }
   });
   

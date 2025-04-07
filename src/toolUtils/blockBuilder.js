@@ -21,7 +21,7 @@ function debugLog(message, data) {
 }
 
 // Default color for attachments
-const defaultAttachmentColor = '#36C5F0'; // Slack blue
+const defaultAttachmentColor = '#842BFF'; // Slack blue
 
 /**
  * Get a user's display name or real name from their Slack ID
@@ -754,15 +754,31 @@ const blockRegistry = Object.keys(blockDefinitions).reduce((registry, blockType)
 }, {});
 
 /**
- * Parse parameters for a specific block type from content string
- * @param {string} blockType - The type of block
- * @param {string} content - The content string with parameters
+ * Parse parameters from block content
+ * @param {string} blockType - The type of block being parsed
+ * @param {string} content - The content for the block
  * @returns {Object} - Parsed parameters
  */
 function parseParams(blockType, content) {
   // Add debug logging
   debugLog(`🔍 Parsing ${blockType} parameters from: "${content.substring(0, 50)}${content.length > 50 ? '...' : ''}"`);
 
+  // Common parameters extraction - check for color parameter in all blocks
+  let params = {};
+  
+  // Check for color parameter (format: |color:value)
+  if (content.includes('|color:')) {
+    const colorMatch = content.match(/\|color:([^|]+)/i);
+    if (colorMatch && colorMatch[1]) {
+      const colorValue = colorMatch[1].trim();
+      debugLog(`🎨 Found color parameter: ${colorValue}`);
+      params.color = colorValue;
+      
+      // Remove the color parameter from content to avoid confusion in further parsing
+      content = content.replace(/\|color:[^|]+/i, '');
+    }
+  }
+  
   // For context with images, handle special syntax
   if (blockType === 'contextWithImages') {
     debugLog(`🖼️ Special handling for contextWithImages`);
@@ -841,7 +857,7 @@ function parseParams(blockType, content) {
       }
     }
     
-    return { text, images };
+    return { ...params, text, images };
   } 
   // For image blocks, handle URL and alt text
   else if (blockType === 'image') {
@@ -870,7 +886,7 @@ function parseParams(blockType, content) {
       debugLog(`🖼️ Image URL (alt format): "${url}", Alt Text: "${altText}"`);
     }
     
-    return { url, altText };
+    return { ...params, url, altText };
   }
   // For section blocks, check if they have an image
   else if (blockType === 'section') {
@@ -921,7 +937,7 @@ function parseParams(blockType, content) {
     }
     
     // Return standard section params
-    return { text };
+    return { ...params, text };
   }
   // Check for usercontext format which should be converted to proper blocks
   else if (blockType === 'context' && content.match(/\(usercontext\)(.*?)(?:\|.*?)?(?:\(!usercontext\))/)) {
@@ -1095,8 +1111,8 @@ function parseParams(blockType, content) {
     return { buttons: [] };
   }
   
-  // Default case, just return the content as text parameter
-  return { text: content };
+  // Default case, just return the content as text parameter plus any common parameters
+  return { ...params, text: content };
 }
 
 /**
@@ -1384,7 +1400,8 @@ async function parseMessage(message) {
   }
   
   // Extract block declarations using regex
-  const blockRegex = /#([a-zA-Z]+):\s*([^#]+?)(?=#[a-zA-Z]+:|$)/g;
+  // Updated regex that's more flexible with newlines and whitespace
+  const blockRegex = /#([a-zA-Z]+):\s*([\s\S]*?)(?=\s*#[a-zA-Z]+:|$)/g;
   const matches = Array.from(message.matchAll(blockRegex));
   
   // If no blocks found, treat as plain text but put in an attachment with colored bar

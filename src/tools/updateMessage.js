@@ -11,7 +11,8 @@ const {
   cleanAndProcessMessage, 
   getChannelId,
   getThreadTs, 
-  logMessageStructure
+  logMessageStructure,
+  mergeAttachmentsByColor
 } = require('../toolUtils/messageFormatUtils');
 
 /**
@@ -268,6 +269,32 @@ async function updateMessage(args, threadState) {
         blocks: formattedMessage.blocks,
         fallback: text || "Updated message"
       }];
+    }
+    
+    // Apply color from args to attachments
+    if (color && updateOptions.attachments && updateOptions.attachments.length > 0) {
+      logger.info(`Applying color ${formattedColor} from args to attachments`);
+      
+      updateOptions.attachments.forEach(attachment => {
+        // Always override the attachment color with the specified color
+        const defaultColor = "#842BFF"; // The default Slack blue
+        const isDefaultColor = attachment.color === defaultColor;
+        
+        // Apply the color if attachment has default color or no color
+        if (isDefaultColor || !attachment.color) {
+          logger.info(`Replacing color ${attachment.color || 'none'} with ${formattedColor}`);
+          attachment.color = formattedColor;
+        } else {
+          logger.info(`Keeping existing color ${attachment.color} (not default)`);
+        }
+      });
+    }
+    
+    // Merge attachments with same color to reduce number of visual bars
+    if (updateOptions.attachments && updateOptions.attachments.length > 1) {
+      logger.info(`Before merging: ${updateOptions.attachments.length} attachments`);
+      updateOptions.attachments = mergeAttachmentsByColor(updateOptions.attachments);
+      logger.info(`After merging: ${updateOptions.attachments.length} attachments`);
     }
     
     // Clean and process all blocks and attachments for Slack API

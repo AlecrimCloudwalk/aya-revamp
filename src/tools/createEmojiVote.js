@@ -52,7 +52,7 @@ async function createEmojiVote(args, threadState) {
     }).join('\n');
     
     // Create the full message text with instructions
-    const fullText = `${text}\n\n**Options:**\n${optionsText}\n\n_React with the emoji next to your preferred option to vote._`;
+    const fullText = `${text}\n\n*Options:*\n${optionsText}\n\n_React with the emoji next to your preferred option to vote._`;
     
     // Format the message
     const message = formatSlackMessage({

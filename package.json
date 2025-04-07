@@ -6,6 +6,11 @@
   "scripts": {
     "start": "node src/main.js",
     "dev": "nodemon src/main.js",
+    "debug": "node src/scripts/debugLlm.js",
+    "debug:verbose": "node src/scripts/debugLlm.js --verbose",
+    "debug:file": "node src/scripts/debugLlm.js --log-to-file",
+    "debug:all": "node src/scripts/debugLlm.js --verbose --log-to-file --show-raw",
+    "debug:ascii": "node src/scripts/debugLlm.js --ascii",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

@@ -2,10 +2,14 @@
 const { getSlackClient } = require('../slackClient.js');
 const { logError } = require('../errors.js');
 const logger = require('../toolUtils/logger.js');
+const { formatTimestamp, formatRelativeTime } = require('../toolUtils/dateUtils.js');
 
 // Add a simple in-memory cache to prevent redundant calls
 const threadHistoryCache = new Map();
 const CACHE_TTL_MS = 30000; // 30 seconds cache lifetime
+
+// Add a tool call counter at the top of the file, after requires
+const callCounter = new Map(); // threadId -> count
 
 /**
  * Tool to retrieve the history of a thread for context rebuilding
@@ -68,6 +72,40 @@ async function getThreadHistory(args = {}, threadContext) {
     
     // Get thread ID for context
     const threadId = threadContext.threadId;
+    
+    // Track call count for this thread
+    if (!callCounter.has(threadId)) {
+      callCounter.set(threadId, 1);
+    } else {
+      const currentCount = callCounter.get(threadId);
+      callCounter.set(threadId, currentCount + 1);
+      
+      // Hard limit at 3 calls to any thread in a session
+      if (currentCount >= 2) {
+        logger.warn(`⚠️ HARD LIMIT: getThreadHistory called ${currentCount + 1} times for thread ${threadId}`);
+        
+        // Add a direct system message to prevent further calls
+        if (threadContext.addMessage) {
+          threadContext.addMessage({
+            source: 'system',
+            text: `⚠️ CRITICAL: getThreadHistory has been called too many times (${currentCount + 1}). DO NOT call it again. The thread history is already in your context. Please respond to the user with postMessage and call finishRequest immediately.`,
+            timestamp: new Date().toISOString(),
+            threadTs: threadId,
+            type: 'error_notice'
+          });
+        }
+        
+        return {
+          error: true,
+          errorMessage: `getThreadHistory called too many times (${currentCount + 1})`,
+          loopDetected: true,
+          callCount: currentCount + 1,
+          messagesRetrieved: 0,
+          critical: true,
+          directive: "DO NOT call getThreadHistory again. Use postMessage to respond to the user directly, then call finishRequest."
+        };
+      }
+    }
     
     // Check for repeated calls - get tool execution history if available
     if (threadContext.getToolExecutionHistory) {
@@ -180,98 +218,139 @@ async function getThreadHistory(args = {}, threadContext) {
     // Get thread statistics
     totalMessagesInThread = threadInfo.messages?.[0]?.reply_count || 0;
     
-    // Now fetch the actual messages we want
+    // GET THE MESSAGES FROM SLACK
     const result = await slackClient.conversations.replies({
       channel: channelId,
       ts: threadTs,
-      limit: limit,
-      inclusive: true // Always include the parent message
+      inclusive: true,
+      limit: limit
     });
     
-    // Format the messages
-    const formattedMessages = [];
+    if (!result || !result.ok) {
+      throw new Error(`Error retrieving thread history: ${result ? result.error : 'Unknown error'}`);
+    }
+    
+    // Get the raw messages
+    const rawMessages = result.messages || [];
+    
+    // Log detailed information about message attribution for troubleshooting
+    logger.info(`Retrieved ${rawMessages.length} raw messages from thread`);
+    if (rawMessages.length > 0) {
+      logger.detail(`First message: ts=${rawMessages[0].ts}, user=${rawMessages[0].user || 'unknown'}, bot_id=${rawMessages[0].bot_id || 'none'}`);
+    }
+    
+    // Get bot user ID for proper identification
     const botUserId = await getBotUserId(slackClient);
     
-    // Initialize message counters outside the conditional block
+    // Initialize message counters
     let messagesWithContent = 0;
     let messagesWithoutContent = 0;
     
-    // Process the messages
-    if (result.messages && result.messages.length > 0) {
-      // Add detailed logging of retrieved messages
-      logger.info(`Retrieved ${result.messages.length} raw messages from thread`);
+    // Format the messages with proper attribution
+    const formattedMessages = [];
+    
+    // Find the parent message (first message in thread)
+    const parentMessage = rawMessages.find(msg => !msg.thread_ts || msg.thread_ts === msg.ts);
+    const parentTs = parentMessage ? parentMessage.ts : null;
+    
+    // Process and format each message
+    for (const [index, message] of rawMessages.entries()) {
+      // Skip messages without text or attachments
+      if (!message.text && !message.attachments?.length) {
+        messagesWithoutContent++;
+        continue;
+      }
       
-      // Replace verbose logging with a compact summary
-      // Process the messages first to get counts
-      result.messages.forEach((message) => {
-        if (message.text || message.attachments?.length) {
-          messagesWithContent++;
+      messagesWithContent++;
+      
+      // Determine if this is a bot message - CRITICAL FIX
+      const isBot = message.bot_id || message.user === botUserId;
+      
+      // Log detailed attribution for debugging
+      logger.detail(`Message ${index}: ts=${message.ts}, user=${message.user || 'unknown'}, bot_id=${message.bot_id || 'none'}, isBot=${isBot}, text="${message.text?.substring(0, 30) || 'no text'}..."`);
+      
+      // Determine if this is the parent message
+      const isParent = message.ts === parentTs;
+      
+      // Format text content
+      let formattedText = message.text || '';
+      
+      // Filter out dev prefix '!@#' from the text
+      if (formattedText.startsWith('!@#')) {
+        formattedText = formattedText.substring(3).trim();
+      }
+      
+      // Process attachments
+      if (message.attachments?.length) {
+        formattedText += formatAttachments(message.attachments);
+      }
+      
+      // Calculate human-readable timestamps
+      let timestamp, formattedTime, relativeTime;
+      
+      try {
+        const tsNum = parseFloat(message.ts);
+        const date = new Date(tsNum * 1000);
+        
+        if (!isNaN(date.getTime())) {
+          timestamp = date.toISOString();
+          formattedTime = formatTimestamp(date);
+          relativeTime = formatRelativeTime(date);
         } else {
-          messagesWithoutContent++;
+          timestamp = new Date().toISOString();
+          formattedTime = 'unknown time';
+          relativeTime = 'recently';
         }
+      } catch (error) {
+        timestamp = new Date().toISOString();
+        formattedTime = 'unknown time';
+        relativeTime = 'recently';
+      }
+      
+      // Add the formatted message to our list
+      formattedMessages.push({
+        index,
+        messageIndex: index,
+        messageIndexStr: `[${index}]`,
+        ts: message.ts,
+        timestamp: parseFloat(message.ts),
+        isoTimestamp: timestamp,
+        formattedTime,
+        relativeTime,
+        text: formattedText,
+        userId: message.user || (isBot ? 'BOT' : 'UNKNOWN'),
+        isBot,
+        isParent,
+        isUser: !isBot,
+        threadTs: message.thread_ts || message.ts,
+        hasAttachments: !!message.attachments?.length
       });
-      
-      // Log a compact summary instead of each message
-      logger.info(`Thread stats: ${messagesWithContent} with content, ${messagesWithoutContent} without content, ${result.messages.length} total`);
-      
-      // Add compact preview of first few messages (only in verbose mode)
-      if (process.env.VERBOSE_LOGGING === 'true') {
-        const previewCount = Math.min(3, result.messages.length);
-        const previews = result.messages.slice(0, previewCount).map((msg, idx) => {
-          const preview = msg.text ? 
-            (msg.text.length > 40 ? msg.text.substring(0, 40) + '...' : msg.text) : 
-            '[No text]';
-          return `[${idx}] ${preview}${msg.attachments?.length ? ` (+${msg.attachments.length} attachments)` : ''}`;
-        });
-        
-        logger.info(`Message previews: ${previews.join(' | ')}`);
-      }
-      
-      for (const message of result.messages) {
-        // Skip messages without text or attachments
-        if (!message.text && !message.attachments?.length) continue;
-        
-        // Determine if this is a bot message
-        const isBot = message.bot_id || message.user === botUserId;
-        const isParent = message.ts === threadTs;
-        
-        // Format text content
-        let formattedText = message.text || '';
-        
-        // Filter out dev prefix '!@#' from the text
-        if (formattedText.startsWith('!@#')) {
-          formattedText = formattedText.substring(3).trim();
-        }
-        
-        // Always process attachments
-        if (message.attachments?.length) {
-          formattedText += formatAttachments(message.attachments);
-        }
-        
-        // Skip empty messages after processing
-        if (!formattedText.trim()) continue;
-        
-        // Create the formatted message
-        formattedMessages.push({
-          isUser: !isBot,
-          userId: message.user,
-          text: formattedText,
-          timestamp: message.ts,
-          isParent,
-          threadTs: threadTs // Add explicit thread timestamp for each message
-        });
-      }
+    }
+    
+    // Log a compact summary
+    logger.info(`Thread stats: ${messagesWithContent} with content, ${messagesWithoutContent} without content, ${rawMessages.length} total`);
+    
+    // Add compact preview of first few messages (only in verbose mode)
+    if (process.env.VERBOSE_LOGGING === 'true') {
+      const previewCount = Math.min(3, formattedMessages.length);
+      const previews = formattedMessages.slice(0, previewCount).map((msg, idx) => {
+        const preview = msg.text ? 
+          (msg.text.length > 40 ? msg.text.substring(0, 40) + '...' : msg.text) : 
+          '[No text]';
+        return `${idx}: ${preview}`;
+      });
+      logger.detail(`Message previews: ${previews.join(' | ')}`);
     }
     
     // Sort messages by timestamp according to specified order
     if (order === 'reverse_chronological') {
       // Newest first
       logger.info('Sorting messages in reverse chronological order (newest first)');
-      formattedMessages.sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp));
+      formattedMessages.sort((a, b) => b.timestamp - a.timestamp);
     } else {
       // Default: oldest first
       logger.info('Sorting messages in chronological order (oldest first)');
-      formattedMessages.sort((a, b) => parseFloat(a.timestamp) - parseFloat(b.timestamp));
+      formattedMessages.sort((a, b) => a.timestamp - b.timestamp);
     }
     
     // Add message indices - parent is always [0] regardless of sort order
@@ -354,7 +433,7 @@ async function getThreadHistory(args = {}, threadContext) {
         const messageObj = {
           source: msg.isUser ? 'user' : 'assistant',
           id: `${msg.isUser ? 'user' : 'bot'}_${msg.timestamp}`,
-          timestamp: new Date(msg.timestamp * 1000).toISOString(),
+          timestamp: msg.timestamp, // Already in ISO format, don't multiply again
           threadTs: msg.threadTs || threadId, // Ensure threadTs is set correctly
           text: msg.text,
           sourceId: msg.userId,
@@ -395,6 +474,18 @@ async function getThreadHistory(args = {}, threadContext) {
       // This way the LLM can still use them to display thread history
       // This respects the LLM-first principle by giving the LLM the data to make decisions
     }
+    
+    // Format the history for display and LLM context
+    let formattedHistoryText = '';
+    
+    // First pass: Convert messages to our standard format with timestamps
+    formattedMessages.forEach((msg, idx) => {
+      const prefix = msg.isParent ? '[PARENT]' : `[${idx}]`;
+      const userLabel = msg.isBot ? 'Assistant' : 'User';
+      const timestamp = msg.formattedTime;
+      
+      formattedHistoryText += `${prefix} ${timestamp} - ${userLabel}: ${msg.text}\n\n`;
+    });
     
     // Return a summary of what we did along with thread statistics
     const summary = {
@@ -440,11 +531,7 @@ async function getThreadHistory(args = {}, threadContext) {
         formattedDisplay: `${msg.isUser ? '[USER]' : '[BOT]'} ${msg.text}`
       })),
       // Add a ready-to-use formatted history text to make displaying thread history easier
-      formattedHistoryText: formattedMessages.length > 0 ? 
-        formattedMessages.map(msg => 
-          `${msg.isUser ? '[USER]' : '[BOT]'} ${msg.text}`
-        ).join('\n\n') : 
-        "No messages found in thread history."
+      formattedHistoryText: formattedHistoryText
     };
     
     // Cache the result
@@ -467,7 +554,23 @@ async function getThreadHistory(args = {}, threadContext) {
     return summary;
   } catch (error) {
     logError('Error retrieving thread history', error);
-    throw error;
+    
+    // Return a more helpful error result that lets the LLM proceed instead of retrying
+    return {
+      error: true,
+      errorMessage: error.message,
+      messagesRetrieved: 0,
+      errorHandlingAdvice: "There was an error retrieving thread history. Instead of retrying, please proceed with responding to the user directly using the postMessage tool.",
+      suggestion: "Continue with postMessage to respond to the user's request directly.",
+      formattedHistoryText: "No thread history available due to error. Please respond directly to the user's message.",
+      formattedMessagesPreview: [],
+      contextRebuilt: false,
+      threadStats: {
+        totalMessagesInThread: 0,
+        messagesWithContent: 0,
+        messagesWithoutContent: 0
+      }
+    };
   }
 }
 
@@ -648,7 +751,7 @@ function getColorName(color) {
     'good': 'green',
     'warning': 'yellow',
     'danger': 'red',
-    '#36c5f0': 'blue',
+    '#842BFF': 'blue',
     '#2eb67d': 'green',
     '#e01e5a': 'red',
     '#ecb22e': 'yellow'
@@ -658,41 +761,43 @@ function getColorName(color) {
 }
 
 /**
- * Clears the thread history cache for a specific thread or all threads
- * @param {string} [threadId] - Optional thread ID to clear. If not provided, clears all cache.
- * @returns {number} - Number of cache entries cleared
+ * Internal function to load thread history
+ * This function has the same implementation as getThreadHistory but can be called directly
+ * without recording it as a tool execution in the LLM's context
+ * @param {Object} args - Arguments
+ * @param {Object} threadContext - Thread context object
+ * @returns {Promise<Object>} - Formatted thread history
  */
-function clearThreadCache(threadId) {
-  if (!threadId) {
-    // Clear all cache
-    const count = threadHistoryCache.size;
-    threadHistoryCache.clear();
-    logger.info(`Cleared entire thread history cache (${count} entries)`);
-    return count;
-  }
-  
-  // Clear only cache entries for this thread
-  let count = 0;
-  
-  // Find all cache keys for this thread
-  const keysToDelete = [];
-  for (const key of threadHistoryCache.keys()) {
-    if (key.startsWith(threadId + '_')) {
-      keysToDelete.push(key);
-    }
-  }
-  
-  // Delete the entries
-  for (const key of keysToDelete) {
-    threadHistoryCache.delete(key);
-    count++;
-  }
-  
-  logger.info(`Cleared ${count} thread history cache entries for thread ${threadId}`);
-  return count;
+async function loadThreadHistory(args = {}, threadContext) {
+  // Call the main tool function but don't record it as a tool execution
+  return getThreadHistory(args, threadContext);
 }
 
-module.exports = {
-  getThreadHistory,
-  clearThreadCache
-}; 
+// Clear thread cache
+function clearThreadCache(threadId) {
+  if (!threadId) return;
+  
+  // Find all keys related to this thread
+  const keysToDelete = [];
+  
+  threadHistoryCache.forEach((value, key) => {
+    if (key.startsWith(threadId)) {
+      keysToDelete.push(key);
+    }
+  });
+  
+  // Delete all found keys
+  keysToDelete.forEach(key => {
+    threadHistoryCache.delete(key);
+  });
+  
+  logger.info(`Cleared ${keysToDelete.length} cached thread history entries for thread ${threadId}`);
+}
+
+// Export the main function
+module.exports = getThreadHistory;
+
+// Also export the internal function and cache clearing function
+module.exports.loadThreadHistory = loadThreadHistory;
+module.exports.clearThreadCache = clearThreadCache;
+module.exports.callCounter = callCounter; 

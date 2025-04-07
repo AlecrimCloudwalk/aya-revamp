@@ -159,7 +159,7 @@ function parseMessage(text) {
         if (blockDefinitions[blockType].attachmentWrapped) {
           blocks.push({
             type: 'attachment',
-            color: '#36C5F0', // Default color
+            color: '#842BFF', // Default color
             blocks: [block]
           });
         } else {

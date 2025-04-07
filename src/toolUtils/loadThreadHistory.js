@@ -8,6 +8,7 @@ const { logError } = require('../errors.js');
 const { getContextBuilder } = require('../contextBuilder.js');
 const { getTool } = require('../tools/index.js');
 const logger = require('./logger');
+const { loadThreadHistory } = require('../tools/getThreadHistory');
 
 /**
  * Extracts the thread timestamp and channel ID from a context object
@@ -101,34 +102,28 @@ async function initializeContextIfNeeded(threadId) {
             return;
         }
         
-        // Get thread history using the getThreadHistory tool
-        const historyTool = getTool('getThreadHistory');
-        if (historyTool) {
-            logger.info(`Initializing context with thread history for ${threadTs}`);
-            
-            const historyResult = await historyTool({
-                threadTs: threadTs,
-                channelId: channelId,
-                limit: 10, // Get up to 10 messages 
-                includeParent: true,
-                reasoning: "Initializing context with thread history"
-            }, {
-                threadId: threadId,
-                threadTs: threadTs,
-                channelId: channelId,
-                addMessage: (message) => {
-                    message.threadTs = threadId;
-                    return contextBuilder.addMessage(message);
-                }
-            });
-            
-            logger.info(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history for initialization`);
-            
-            // Record the tool execution
-            contextBuilder.recordToolExecution(threadId, 'getThreadHistory', 
-                { threadTs: threadTs, limit: 10 }, 
-                historyResult);
-        }
+        // Use the internal loadThreadHistory function directly instead of through the tool system
+        logger.info(`Initializing context with thread history for ${threadTs}`);
+        
+        const historyResult = await loadThreadHistory({
+            threadTs: threadTs,
+            channelId: channelId,
+            limit: 10, // Get up to 10 messages 
+            includeParent: true,
+            reasoning: "Initializing context with thread history"
+        }, {
+            threadId: threadId,
+            threadTs: threadTs,
+            channelId: channelId,
+            addMessage: (message) => {
+                message.threadTs = threadId;
+                return contextBuilder.addMessage(message);
+            }
+        });
+        
+        logger.info(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history for initialization`);
+        
+        // We specifically do NOT record this as a tool execution since we don't want it to appear in the LLM context
     } catch (error) {
         logger.error('Error initializing context:', error);
         logError('Error initializing context', error, { threadId });

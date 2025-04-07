@@ -6,6 +6,7 @@ const { LLM_API_KEY, LLM_API_URL, LLM_MODEL } = require('./config.js');
 const { logError } = require('./errors.js');
 const fetch = require('node-fetch');
 const logger = require('./toolUtils/logger.js');
+const llmDebugLogger = require('./toolUtils/llmDebugLogger.js');
 
 
 /**
@@ -29,6 +30,9 @@ async function callOpenAI(params) {
             messages: params.messages,
             temperature: params.temperature || 0.7,
         };
+        
+        // Extract threadId for logging
+        const threadId = extractThreadId(params);
         
         // Handle tools and tool_choice according to OpenAI's latest API
         if (params.tools && params.tools.length > 0) {
@@ -61,37 +65,8 @@ async function callOpenAI(params) {
         // Log request details
         logger.info(`Using model: ${model}`);
         logger.info(`API URL: ${LLM_API_URL || 'https://api.openai.com/v1/chat/completions'}`);
-        logger.info(`Tools provided: ${params.tools ? params.tools.length : 0}`);
-
-        // Log detailed message information
-        logger.info(`🔍 MESSAGE DETAILS:`);
-        params.messages.forEach((msg, idx) => {
-            // For system messages, just log that they exist without showing content in chunks
-            if (msg.role === 'system') {
-                logger.info(`[${idx}] ${msg.role}: ${msg.content ? 
-                    (msg.name ? `[${msg.name}] ` : '') + 
-                    (msg.content.length > 50 ? 
-                        msg.content.substring(0, 50) + '... ' : 
-                        msg.content) + 
-                    `(${msg.content.length} chars)` : 
-                    '[No content]'}`);
-            } else {
-                // For non-system messages, log as normal
-                logger.info(`[${idx}] ${msg.role}: ${msg.content ? 
-                    (msg.content.length > 50 ? 
-                        msg.content.substring(0, 50) + '...' : 
-                        msg.content) : 
-                    '[No content]'}`);
-            }
-        });
-        
-        // // Log tool names if available
-        // if (params.tools && params.tools.length) {
-        //     logger.info(`🧰 AVAILABLE TOOLS (${params.tools.length}):`);
-        //     params.tools.forEach((tool, idx) => {
-        //         logger.info(`[${idx}] ${tool.function.name}: ${tool.function.description?.substring(0, 100)}${tool.function.description?.length > 100 ? '...' : ''}`);
-        //     });
-        // }
+        // Use the new llmDebugLogger for comprehensive request logging
+        llmDebugLogger.logRequest(threadId, params.messages, params.tools || []);
         
         // Make request to OpenAI API
         const response = await fetch(
@@ -109,70 +84,9 @@ async function callOpenAI(params) {
         // Parse response
         const data = await response.json();
         
-        // Enhanced console logging of response
-        logger.info(`📄 LLM RESPONSE SUMMARY:`);
-        if (data.choices && data.choices.length > 0) {
-            const choice = data.choices[0];
-            if (choice.message) {
-                // Log content if present
-                if (choice.message.content) {
-                    logger.info(`Content: ${choice.message.content.substring(0, 100)}${choice.message.content.length > 100 ? '...' : ''}`);
-                    
-                    // For longer content, just log the length and first chunk
-                    if (choice.message.content.length > 200) {
-                        logger.info(`Full content omitted (${choice.message.content.length} chars, ${Math.ceil(choice.message.content.length / 200)} chunks)`);
-                        
-                        // Only show first chunk as preview if in verbose mode
-                        if (process.env.VERBOSE_LOGGING === 'true') {
-                            logger.info(`[Preview] ${choice.message.content.substring(0, 200)}...`);
-                        }
-                    }
-                }
-                
-                // Log tool calls if present
-                if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
-                    logger.info(`Tool calls: ${choice.message.tool_calls.length}`);
-                    choice.message.tool_calls.forEach((tc, idx) => {
-                        if (tc.function) {
-                            logger.info(`[${idx}] Tool: ${tc.function.name}`);
-                            logger.info(`    Arguments (${tc.function.arguments ? tc.function.arguments.length + ' bytes' : 'none'})`);
-                            
-                            // Try to parse and log a preview of the arguments
-                            try {
-                                const args = JSON.parse(tc.function.arguments);
-                                // Extract and show reasoning separately as it's most important
-                                const reasoning = args.reasoning ? `reasoning: "${args.reasoning}"` : "no reasoning";
-                                // Show a compact version of the remaining arguments
-                                const otherArgs = Object.keys(args)
-                                  .filter(key => key !== 'reasoning')
-                                  .map(key => `${key}: ${typeof args[key] === 'object' ? 
-                                    `{${Object.keys(args[key]).length} keys}` : 
-                                    JSON.stringify(args[key]).substring(0, 30) + 
-                                    (JSON.stringify(args[key]).length > 30 ? '...' : '')}`);
-                                
-                                logger.info(`    Args: ${reasoning}, ${otherArgs.join(', ')}`);
-                                
-                                // Only show full arguments in verbose mode
-                                if (process.env.VERBOSE_LOGGING === 'true') {
-                                    logger.info(`    Full args: ${JSON.stringify(args, null, 2)}`);
-                                }
-                            } catch (e) {
-                                // If parsing fails, just show a preview of the raw arguments
-                                const preview = tc.function.arguments.substring(0, 150);
-                                logger.info(`    Args (unparseable, ${tc.function.arguments.length} chars): ${preview}${tc.function.arguments.length > 150 ? '...' : ''}`);
-                            }
-                        }
-                    });
-                } else {
-                    logger.info(`No tool calls found in response`);
-                }
-            } else {
-                logger.info(`No message in response`);
-            }
-        } else {
-            logger.info(`No choices in response`);
-        }
-        
+        // Use the new llmDebugLogger for comprehensive response logging
+        llmDebugLogger.logResponse(threadId, data);
+       
         // Check for errors
         if (!response.ok) {
             logger.error('OpenAI API error:', data);
@@ -190,6 +104,34 @@ async function callOpenAI(params) {
         logError('Error calling OpenAI', error);
         throw error;
     }
+}
+
+/**
+ * Extract thread ID from the request parameters for logging purposes
+ * @param {Object} params - Request parameters
+ * @returns {string} - Thread ID or "unknown-thread"
+ */
+function extractThreadId(params) {
+    // Try to extract from messages
+    if (params.messages && params.messages.length > 0) {
+        // Check if any message contains thread_ts in its metadata
+        for (const msg of params.messages) {
+            // Check for common thread identifiers in various formats
+            if (msg.metadata?.threadTs) return msg.metadata.threadTs;
+            if (msg.metadata?.thread_ts) return msg.metadata.thread_ts;
+            if (msg.threadTs) return msg.threadTs;
+            if (msg.thread_ts) return msg.thread_ts;
+            
+            // Try to extract from content if it's a string with patterns like "thread: 123456.789"
+            if (typeof msg.content === 'string') {
+                const threadMatch = msg.content.match(/thread(?:Ts|_ts|Id|_id|):\s*([0-9]+\.[0-9]+)/i);
+                if (threadMatch && threadMatch[1]) return threadMatch[1];
+            }
+        }
+    }
+    
+    // If thread ID not found, return default
+    return `unknown-thread-${Date.now()}`;
 }
 
 module.exports = {

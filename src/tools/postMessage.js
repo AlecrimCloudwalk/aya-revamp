@@ -16,7 +16,8 @@ const {
   getChannelId, 
   getThreadTs, 
   logMessageStructure,
-  processBlocks 
+  processBlocks,
+  mergeAttachmentsByColor
 } = require('../toolUtils/messageFormatUtils');
 const { getContextBuilder } = require('../contextBuilder.js');
 const logger = require('../toolUtils/logger');
@@ -191,6 +192,37 @@ async function getUserProfilePicture(userId) {
   }
 }
 
+// Add utility for comparing message similarity
+/**
+ * Calculate text similarity based on string similarity
+ * @param {string} text1 First text to compare
+ * @param {string} text2 Second text to compare
+ * @returns {number} Similarity score between 0-1
+ */
+function calculateTextSimilarity(text1, text2) {
+  // Simple implementation for now
+  if (!text1 || !text2) return 0;
+  if (text1 === text2) return 1;
+  
+  // Normalize and clean texts
+  const normalize = text => text.toLowerCase().trim().replace(/\s+/g, ' ');
+  const normalizedText1 = normalize(text1);
+  const normalizedText2 = normalize(text2);
+  
+  // Very simple overlap ratio
+  const minLength = Math.min(normalizedText1.length, normalizedText2.length);
+  const maxLength = Math.max(normalizedText1.length, normalizedText2.length);
+  
+  let sameChars = 0;
+  for (let i = 0; i < minLength; i++) {
+    if (normalizedText1[i] === normalizedText2[i]) {
+      sameChars++;
+    }
+  }
+  
+  return minLength > 0 ? sameChars / maxLength : 0;
+}
+
 /**
  * Posts a message to Slack
  * @param {Object} args - The arguments for the message
@@ -213,6 +245,55 @@ async function postMessage(args, threadState) {
       // The parameters are one level too deep - fix it
       logger.info('Detected nested parameters structure, extracting inner parameters');
       args = { ...args.parameters, reasoning: args.reasoning };
+    }
+
+    // Check for duplicate messages if we have recent messages to compare against
+    if (args.text && threadState.recentMessages && threadState.recentMessages.length > 0) {
+      // Get the most recent messages (up to 5)
+      const recentMessages = threadState.recentMessages.slice(0, 5);
+      
+      // Check for close similarity with any recent message
+      for (const recentMsg of recentMessages) {
+        const similarity = calculateTextSimilarity(args.text, recentMsg.text);
+        
+        // If very similar (over 80% threshold)
+        if (similarity > 0.8) {
+          const { formatTimestamp } = require('../toolUtils/dateUtils');
+          let similarMsgTime = 'recently';
+          
+          try {
+            similarMsgTime = formatTimestamp(recentMsg.timestamp);
+          } catch (timeError) {
+            logger.warn(`Error formatting timestamp for duplicate message: ${timeError.message}`);
+          }
+          
+          logger.warn(`Duplicate message detected (${Math.round(similarity * 100)}% similarity)`);
+          
+          // Add a system message to guide the LLM
+          try {
+            if (threadState.addMessage) {
+              threadState.addMessage({
+                source: 'system',
+                text: `[system] Warning: This appears to be a duplicate message. You've already posted very similar content at ${similarMsgTime}. Consider calling finishRequest instead of posting again.`,
+                timestamp: new Date().toISOString(),
+                threadTs: threadState.threadTs || threadState.channelId
+              });
+            }
+          } catch (systemMsgError) {
+            logger.warn(`Error adding system message for duplicate warning: ${systemMsgError.message}`);
+          }
+          
+          // Return an error so the LLM can handle it
+          return {
+            status: 'error',
+            error: 'DUPLICATE_MESSAGE',
+            message: `This appears to be a duplicate of a message you posted at ${similarMsgTime}. Similarity: ${Math.round(similarity * 100)}%`,
+            originalTimestamp: recentMsg.timestamp,
+            similarity: similarity,
+            suggestion: "Call finishRequest to complete the interaction or provide substantially different content"
+          };
+        }
+      }
     }
     
     // Check if the text appears to be a JSON string representing a tool call
@@ -289,6 +370,33 @@ async function postMessage(args, threadState) {
     // ALWAYS use a single space to avoid duplicating content visibly outside of blocks/attachments
     messageParams.text = " ";
     
+    // Apply color from args to attachments
+    if (args.color && messageParams.attachments && messageParams.attachments.length > 0) {
+      const normalizedColor = normalizeColor(args.color);
+      logger.info(`Applying color ${normalizedColor} from args to attachments`);
+      
+      messageParams.attachments.forEach(attachment => {
+        // Always override the attachment color with the specified color
+        const defaultColor = "#842BFF"; // The default Slack blue
+        const isDefaultColor = attachment.color === defaultColor;
+        
+        // Apply the color if attachment has default color or no color
+        if (isDefaultColor || !attachment.color) {
+          logger.info(`Replacing color ${attachment.color || 'none'} with ${normalizedColor}`);
+          attachment.color = normalizedColor;
+        } else {
+          logger.info(`Keeping existing color ${attachment.color} (not default)`);
+        }
+      });
+    }
+    
+    // Merge attachments with same color to reduce number of visual bars
+    if (messageParams.attachments && messageParams.attachments.length > 1) {
+      logger.info(`Before merging: ${messageParams.attachments.length} attachments`);
+      messageParams.attachments = mergeAttachmentsByColor(messageParams.attachments);
+      logger.info(`After merging: ${messageParams.attachments.length} attachments`);
+    }
+    
     // Clean and process the message using our shared utility
     const cleanedMessage = cleanAndProcessMessage(messageParams);
     
@@ -337,7 +445,7 @@ async function postMessage(args, threadState) {
     // Add to the context builder
     try {
       // Record the tool execution first
-      const toolExecutionId = contextBuilder.recordToolExecution(
+      const toolExecutionId = getContextBuilder().recordToolExecution(
         threadTs,
         'postMessage', 
         args, 
@@ -345,8 +453,8 @@ async function postMessage(args, threadState) {
       );
       
       // Now add the message, associating it with the tool execution
-      contextBuilder.addMessage({
-        source: 'llm',
+      getContextBuilder().addMessage({
+        source: 'assistant', // Changed from 'llm' to 'assistant' for consistency
         id: `bot_${result.ts || Date.now()}`,
         timestamp: new Date().toISOString(),
         threadTs: threadTs,
@@ -365,33 +473,8 @@ async function postMessage(args, threadState) {
           threadTs: threadTs
         }
       });
-      
-      logger.info('Added message to context builder');
     } catch (err) {
       logger.warn(`Error adding message to context builder: ${err.message}`);
-    }
-    
-    // Legacy: Add the message to thread history using addMessage for consistency
-    try {
-      if (threadState && typeof threadState.addMessage === 'function') {
-        threadState.addMessage({
-          source: 'assistant',
-          id: `message_${result.ts}`,
-          timestamp: new Date().toISOString(),
-          threadTs: threadTs || result.ts,
-          text: args.text || '',
-          metadata: {
-            slackTs: result.ts,
-            color: args.color,
-            channelId: channelId
-          }
-        });
-        logger.info('Added postMessage result to thread history for future context');
-      } else {
-        logger.warn('Unable to add to thread history: threadState.addMessage not available');
-      }
-    } catch (historyError) {
-      console.error('Error adding message to thread history:', historyError);
     }
     
     // Return a summary of what was posted

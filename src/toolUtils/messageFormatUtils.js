@@ -7,8 +7,8 @@ const { formatSlackMessage } = require('../slackFormat.js');
 const logger = require('./logger');
 
 /**
- * Convert named colors to proper hex values
- * @param {string} color - The color name or hex value
+ * Convert color values to properly formatted hex values
+ * @param {string} color - The color hex value
  * @returns {string} - A properly formatted color value
  */
 function normalizeColor(color) {
@@ -23,33 +23,8 @@ function normalizeColor(color) {
     return `#${color}`;
   }
   
-  // Map of named colors to hex values
-  const colorMap = {
-    // Slack's standard colors
-    'good': '#2EB67D',     // Green
-    'warning': '#ECB22E',  // Yellow
-    'danger': '#E01E5A',   // Red
-    
-    // Additional standard colors
-    'blue': '#0078D7',
-    'green': '#2EB67D',
-    'red': '#E01E5A',
-    'orange': '#F2952F', 
-    'purple': '#6B46C1',
-    'cyan': '#00BCD4',
-    'teal': '#008080',
-    'magenta': '#E91E63',
-    'yellow': '#FFEB3B',
-    'pink': '#FF69B4',
-    'brown': '#795548',
-    'black': '#000000',
-    'white': '#FFFFFF',
-    'gray': '#9E9E9E',
-    'grey': '#9E9E9E'
-  };
-  
-  // Return the mapped color or default to blue
-  return colorMap[color.toLowerCase()] || '#0078D7';
+  // If it's not a valid hex color, return default
+  return '#0078D7';
 }
 
 /**
@@ -423,6 +398,130 @@ function logMessageStructure(messageParams, label = 'MESSAGE') {
   return messageParams;
 }
 
+/**
+ * Merges attachments with the same color into single attachments
+ * This reduces the number of vertical colored bars displayed in Slack
+ * @param {Array} attachments - Array of Slack message attachments
+ * @returns {Array} - New array with merged attachments
+ */
+function mergeAttachmentsByColor(attachments) {
+  if (!attachments || !Array.isArray(attachments) || attachments.length <= 1) {
+    return attachments; // Return as is if no merging needed
+  }
+  
+  logger.info(`Merging ${attachments.length} attachments by color`);
+  
+  // Group attachments by color
+  const colorGroups = {};
+  
+  attachments.forEach(attachment => {
+    const color = attachment.color || 'default';
+    
+    if (!colorGroups[color]) {
+      colorGroups[color] = [];
+    }
+    
+    colorGroups[color].push(attachment);
+  });
+  
+  // Create new merged attachments array
+  const mergedAttachments = [];
+  
+  Object.keys(colorGroups).forEach(color => {
+    const attachmentsWithSameColor = colorGroups[color];
+    
+    // If only one attachment with this color, keep as is
+    if (attachmentsWithSameColor.length === 1) {
+      mergedAttachments.push(attachmentsWithSameColor[0]);
+      return;
+    }
+    
+    // Create a single merged attachment for this color
+    const mergedAttachment = {
+      color: color === 'default' ? null : color,
+      blocks: [],
+      fallback: attachmentsWithSameColor[0].fallback || 'Message from bot'
+    };
+    
+    // Merge blocks from all attachments with this color
+    attachmentsWithSameColor.forEach(attachment => {
+      if (attachment.blocks && Array.isArray(attachment.blocks)) {
+        mergedAttachment.blocks.push(...attachment.blocks);
+      }
+    });
+    
+    mergedAttachments.push(mergedAttachment);
+    logger.info(`Merged ${attachmentsWithSameColor.length} attachments with color ${color}`);
+  });
+  
+  logger.info(`After merging: ${mergedAttachments.length} attachments`);
+  return mergedAttachments;
+}
+
+/**
+ * Calculate text similarity ratio between two strings
+ * @param {string} str1 - First string to compare
+ * @param {string} str2 - Second string to compare
+ * @returns {number} Similarity ratio between 0 and 1
+ */
+function calculateTextSimilarity(str1, str2) {
+    if (!str1 && !str2) return 1; // Both empty means identical
+    if (!str1 || !str2) return 0; // One empty means completely different
+    
+    // Normalize strings
+    const normalizedStr1 = str1.replace(/\s+/g, ' ').trim().toLowerCase();
+    const normalizedStr2 = str2.replace(/\s+/g, ' ').trim().toLowerCase();
+    
+    if (normalizedStr1 === normalizedStr2) return 1; // Exact match after normalization
+    
+    // For longer texts, use a more sophisticated comparison
+    // Levenshtein distance calculation
+    const longer = normalizedStr1.length > normalizedStr2.length ? normalizedStr1 : normalizedStr2;
+    const shorter = normalizedStr1.length > normalizedStr2.length ? normalizedStr2 : normalizedStr1;
+    
+    // If the longer string is empty, similarity is 0
+    if (longer.length === 0) return 1.0;
+    
+    // Calculate edit distance using levenshtein
+    const editDistance = levenshteinDistance(longer, shorter);
+    
+    // Convert edit distance to similarity
+    return (longer.length - editDistance) / parseFloat(longer.length);
+}
+
+/**
+ * Calculate Levenshtein distance between two strings
+ * @param {string} str1 - First string 
+ * @param {string} str2 - Second string
+ * @returns {number} Edit distance
+ */
+function levenshteinDistance(str1, str2) {
+    const s1 = str1.toLowerCase();
+    const s2 = str2.toLowerCase();
+    
+    const costs = new Array();
+    for (let i = 0; i <= s1.length; i++) {
+        let lastValue = i;
+        for (let j = 0; j <= s2.length; j++) {
+            if (i === 0) {
+                costs[j] = j;
+            } else if (j > 0) {
+                let newValue = costs[j - 1];
+                if (s1.charAt(i - 1) !== s2.charAt(j - 1)) {
+                    newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
+                }
+                costs[j - 1] = lastValue;
+                lastValue = newValue;
+            }
+        }
+        if (i > 0) {
+            costs[s2.length] = lastValue;
+        }
+    }
+    
+    return costs[s2.length];
+}
+
 module.exports = {
   normalizeColor,
   processBlocks,
@@ -434,5 +533,8 @@ module.exports = {
   getChannelId,
   getThreadTs,
   logMessageStructure,
-  unescapeNewlines
+  unescapeNewlines,
+  mergeAttachmentsByColor,
+  calculateTextSimilarity,
+  levenshteinDistance
 }; 

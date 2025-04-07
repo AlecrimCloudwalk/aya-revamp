@@ -8,7 +8,18 @@ const { readFileSync } = require('fs');
 const path = require('path');
 const { callOpenAI } = require('./openai.js');
 const logger = require('./toolUtils/logger.js');
+const llmDebugLogger = require('./toolUtils/llmDebugLogger.js');
 
+// Turn on debug context logging in non-production environments
+if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_CONTEXT !== 'false') {
+  process.env.DEBUG_CONTEXT = 'true';
+  console.log("Context debugging enabled by default in non-production environments");
+}
+
+// Also enable LLM debug logging in non-production environments
+if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_LLM !== 'false') {
+  process.env.DEBUG_LLM = 'true';
+}
 
 // Shared constants for message formatting to avoid duplication
 const COMMUNICATION_STYLE = `- Be enthusiastic, cheerful, and energetic in your responses! 🎉
@@ -69,16 +80,16 @@ const BBCODE_FORMATTING = `### Markdown (for basic formatting):
   * IMPORTANT: Do NOT use Markdown format [text](URL) for links or images
 
 ### Image Display Options (THREE METHODS):
-1. **Standalone Image Block** - Use either:
+1. *Standalone Image Block* - Use either:
    * Markdown image syntax: ![Alt text](https://example.com/image.jpg)
    * BBCode format: (image:https://example.com/image.jpg:Alt text)
    This displays a full-width image in Slack.
 
-2. **Section with Image** - Use:
+2. *Section with Image* - Use:
    * (section:https://example.com/image.jpg:Alt text)Content with image accessory(!section)
    This shows text content with a small image thumbnail on the right.
 
-3. **Image Hyperlink** - Use:
+3. *Image Hyperlink* - Use:
    * <https://example.com/image.jpg|View image>
    This shows a clickable link but doesn't embed the image.`;
 
@@ -183,7 +194,7 @@ const REMEMBER_CRITICAL = `- YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH
 - After sending a postMessage, always send a finishRequest to complete the interaction`;
 
 // Load the system prompt
-const systemPromptPath = path.join(__dirname, 'prompts', 'system_prompt.md');
+const systemPromptPath = path.join(__dirname, 'prompts', 'system_prompt_updated.md');
 const systemPrompt = readFileSync(systemPromptPath, 'utf8');
 
 /**
@@ -237,7 +248,27 @@ async function getNextAction(threadId) {
     const contextBuilder = getContextBuilder();
     
     // Build the prompt with thread-specific information
-    const messages = buildPrompt(threadId);
+    const jsonContext = buildPrompt(threadId);
+    
+    // Format the JSON context for OpenAI's message format
+    const messages = [
+        {
+            role: "system",
+            content: systemPrompt
+        },
+        {
+            role: "user",
+            content: JSON.stringify(jsonContext)
+        }
+    ];
+    
+    // Log the formatted context for debugging using the dedicated formatter
+    try {
+        const contextFormatter = require('./toolUtils/contextFormatter.js');
+        contextFormatter.logFormattedContext(jsonContext, 'SENDING TO LLM');
+    } catch (error) {
+        logger.error('Error formatting context for debug output:', error);
+    }
     
     // Get tools directly from the tools module - they are already in the correct format
     const availableTools = getToolsForLLM();
@@ -389,241 +420,73 @@ async function getNextAction(threadId) {
 }
 
 /**
- * Builds the prompt for the LLM
- * @param {string} threadId - Thread ID
- * @returns {Array} - Messages array for the LLM
+ * Build the prompt for the LLM
+ * @param {string} threadId - Thread ID to build the prompt for
+ * @returns {Array<Object>} - JSON context array for the LLM
  */
 function buildPrompt(threadId) {
     // Get context builder
     const contextBuilder = getContextBuilder();
     
-    // Get the context information for this thread
-    const context = contextBuilder.getMetadata(threadId, 'context');
+    // Get thread context
+    const context = contextBuilder.getMetadata(threadId, 'context') || {};
     
-    // Start with the system prompt
-    const messages = [{
-        role: "system",
-        content: getSystemMessage(context)
-    }];
+    // Use the new JSON context format builder with skipLogging to avoid duplication
+    const jsonContext = contextBuilder.buildFormattedLLMContext(threadId, {
+        limit: 25,
+        includeBotMessages: true,
+        includeToolCalls: true,
+        skipLogging: true // Skip logging in context builder since we'll do it here
+    });
     
-    // Get thread state representation for the LLM
-    const contextMessages = contextBuilder.getThreadMessages(threadId);
+    // Always log a summary of the messages being sent
+    logger.info(`Sending ${jsonContext.length} JSON context items to LLM`);
     
-    // Add messages to prompt
-    if (contextMessages && contextMessages.length > 0) {
-        logger.info(`Adding ${contextMessages.length} messages to the prompt`);
-        
-        // Map internal message format to LLM message format
-        const mappedMessages = contextMessages.map(msg => {
-            if (msg.source === 'user') {
-                // User message
-                return {
-                    role: 'user',
-                    content: msg.text || '',
-                    name: `user_${Date.now().toString()}`
-                };
-            } else if (msg.source === 'llm' || msg.source === 'assistant') {
-                // Assistant message - include reasoning if available
-                let content = msg.text || '';
-                if (msg.reasoning) {
-                    content += `\n\n[Reasoning: ${msg.reasoning}]`;
-                }
-                return {
-                    role: 'assistant',
-                    content: content,
-                    name: `assistant_${Date.now().toString()}`
-                };
-            } else if (msg.source === 'system') {
-                // System message
-                return {
-                    role: 'system',
-                    content: msg.text || '',
-                    name: `system_${Date.now().toString()}`
-                };
-            } else {
-                logger.warn(`Unknown message source: ${msg.source}`);
-                return null;
-            }
-        }).filter(Boolean);
-        
-        messages.push(...mappedMessages);
-    }
-    
-    // Get the latest user message for thread history detection
-    let latestUserMessage = '';
-    // Look through contextMessages in reverse to find the most recent user message
-    for (let i = contextMessages.length - 1; i >= 0; i--) {
-        const msg = contextMessages[i];
-        if (msg.source === 'user') {
-            latestUserMessage = msg.text || '';
-            break;
-        }
-    }
-    
-    // Get tool execution history
-    const toolExecutions = contextBuilder.getToolExecutionHistory(threadId);
-    
-    // Add tool executions to the prompt
-    if (toolExecutions && toolExecutions.length > 0) {
-        logger.info(`Adding ${toolExecutions.length} tool executions to the prompt`);
-        
-        // Process tool executions to be added to the prompt
-        const toolMessages = [];
-        
-        // Find all getThreadHistory calls
-        const threadHistoryTools = toolExecutions.filter(exec => exec.toolName === 'getThreadHistory');
-        
-        // Check for loop detection in any of the thread history calls
-        const loopDetected = threadHistoryTools.some(exec => 
-            exec.result && exec.result.loopDetected === true);
-            
-        // If loop detection was triggered, add a very clear warning
-        if (loopDetected) {
-            messages.push({
-                role: "system",
-                content: `⚠️ CRITICAL WARNING: THREAD HISTORY LOOP DETECTED ⚠️
-
-You have called getThreadHistory multiple times in succession, which has triggered loop detection.
-This is usually caused by:
-1. Repeatedly calling getThreadHistory when you already have the thread history
-2. Not using the thread history information you already have
-3. Trying to get thread history again without using forceRefresh:true
-
-WHAT TO DO NOW:
-- Work with the thread history you already have in your context
-- The messages are already prefixed with indices like [0], [1], etc.
-- If you absolutely need fresh data, use { forceRefresh: true } when calling getThreadHistory
-- AVOID calling getThreadHistory again unless absolutely necessary
-
-This warning is triggered to prevent infinite loops.`,
-                name: "loop_detection_warning"
-            });
-        }
-        
-        // Add a special message when thread history has been requested multiple times
-        if (threadHistoryTools.length > 1) {
-            messages.push({
-                role: "system",
-                content: `IMPORTANT: You have already called getThreadHistory ${threadHistoryTools.length} times. 
-You already have the thread history. Do not request it again unless you need different parameters.
-The most recent thread history call ${threadHistoryTools[0].error ? 'failed' : 'succeeded'} and ${threadHistoryTools[0].result?.fromCache ? 'returned cached data' : 'retrieved fresh data'}.`
-            });
-        }
-    }
-    
-    // Build the full set of messages for the LLM
-    return messages;
+    // Return the JSON context
+    return jsonContext;
 }
 
 /**
- * Format messages for the LLM in a standardized way - using ONLY the contextBuilder
- * @param {Object} threadState - Thread state with context
- * @returns {Array} - Messages array for LLM
+ * Format messages from context builder into LLM format
+ * @param {Array} messages - Messages from context builder
+ * @returns {Array} - Formatted messages for LLM
  */
-function formatMessagesForLLM(threadState) {
-  try {
-    // Start with empty messages array
-    let messages = [];
-    
-    // Get the thread timestamp
-    const threadTs = threadState.getThreadTs ? threadState.getThreadTs() : 
-                   threadState.getMetadata ? threadState.getMetadata('context')?.threadTs : 
-                   null;
-    
-    if (!threadTs) {
-      logger.warn("No thread timestamp found for context building");
-      
-      // Add at least the system message
-      const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
-      messages.push({
-        role: 'system',
-        content: getSystemMessage(context)
-      });
-      
-      return messages;
+function formatMessagesForLLM(messages) {
+    if (!messages || !Array.isArray(messages)) {
+        return [];
     }
     
-    // Get context builder
-    const contextBuilder = getContextBuilder();
-    if (!contextBuilder) {
-      logger.error("No context builder available - cannot build context");
-      
-      // Add at least the system message
-      const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
-      messages.push({
-        role: 'system',
-        content: getSystemMessage(context)
-      });
-      
-      return messages;
-    }
-    
-    logger.info(`Building context for thread ${threadTs} using ContextBuilder...`);
-    
-    // Add system message first
-    const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
-    messages.push({
-      role: 'system',
-      content: getSystemMessage(context)
-    });
-    
-    // Use the contextBuilder to get thread messages
-    const contextMessages = contextBuilder.buildLLMContext(threadTs, {
-      limit: 25, // Reasonable context limit
-      includeBotMessages: true
-    });
-    
-    if (!contextMessages || contextMessages.length === 0) {
-      logger.warn(`No messages found for thread ${threadTs} in contextBuilder`);
-      return messages;
-    }
-    
-    // Check for assistant messages to detect potential duplication
-    const assistantMessages = contextMessages.filter(msg => msg.role === 'assistant');
-    if (assistantMessages.length > 0) {
-      // Add a critical reminder to prevent duplication
-      messages.push({
-        role: 'system',
-        content: `IMPORTANT: You have already sent ${assistantMessages.length} message(s) in this conversation. DO NOT repeat similar information. If you've already answered this query or sent buttons, call finishRequest immediately. ONE response per user message is the rule - never send multiple similar responses.`,
-        name: 'duplication_prevention'
-      });
-    }
-    
-    // Check if this is a button click context
-    const isButtonClick = context && context.isButtonClick === true;
-    if (isButtonClick) {
-      const buttonInfo = {
-        text: context.buttonText || 'unknown button',
-        value: context.actionValue || 'unknown value'
-      };
-      
-      // Add a clear system message about the button click
-      messages.push({
-        role: 'system',
-        content: `The user clicked the "${buttonInfo.text}" button with value "${buttonInfo.value}". The interface has ALREADY been updated to show this selection. DO NOT try to update it again or acknowledge the click more than once. Respond with the next appropriate step based on this selection.`,
-        name: 'button_click_info'
-      });
-    }
-    
-    // Debug: Log the context being sent to the LLM
-    logger.info(`Generated ${contextMessages.length} context messages for LLM using ContextBuilder`);
-    contextMessages.forEach((msg, i) => {
-      const preview = msg.content.length > 50 ? msg.content.substring(0, 50) + '...' : msg.content;
-      logger.info(`[${i+1}] ${msg.role.toUpperCase()}: ${preview}`);
-    });
-    
-    // Combine with system message
-    return [...messages, ...contextMessages];
-  } catch (error) {
-    logger.error(`Error formatting messages for LLM: ${error.message}`);
-    
-    // Add at least the system message
-    const context = threadState.getMetadata ? threadState.getMetadata('context') : null;
-    return [{
-      role: 'system',
-      content: getSystemMessage(context)
-    }];
-  }
+    return messages.map(msg => {
+        if (msg.source === 'user') {
+            // User message
+            return {
+                role: 'user',
+                content: msg.text || '',
+                name: `user_${Date.now().toString()}`
+            };
+        } else if (msg.source === 'llm' || msg.source === 'assistant') {
+            // Assistant message - include reasoning if available
+            let content = msg.text || '';
+            if (msg.reasoning) {
+                content += `\n\n[Reasoning: ${msg.reasoning}]`;
+            }
+            return {
+                role: 'assistant',
+                content: content,
+                name: `assistant_${Date.now().toString()}`
+            };
+        } else if (msg.source === 'system') {
+            // System message
+            return {
+                role: 'system',
+                content: msg.text || '',
+                name: `system_${Date.now().toString()}`
+            };
+        } else {
+            logger.warn(`Unknown message source: ${msg.source}`);
+            return null;
+        }
+    }).filter(Boolean);
 }
 
 /**
