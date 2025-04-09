@@ -1,60 +1,50 @@
-# LLM Context Format Specification
+# LLM Context Format
 
 ## Overview
 
-This document specifies the exact format for the conversation context that should be provided to the LLM on each prompt. Following this format consistently is critical for optimal LLM performance and reasoning.
+This document specifies the format for conversation context provided to the LLM. Following this format consistently is critical for optimal LLM performance.
 
-## JSON Data Structure
+## Data Structure
 
-Each conversation is represented as a JSON array of message objects. Each message object has the following structure:
+Each conversation is represented as a JSON array of message objects with the following structure:
 
 ```json
 {
   "index": 0,
   "turn": 0,
-  "timestamp": "2025-04-04T12:33:00Z",
+  "timestamp": "2023-04-04T12:33:00Z",
   "role": "system|user|assistant",
   "content": string|object
 }
 ```
 
-Where:
-- `index`: Sequential number, starting from 0
-- `turn`: Conversation turn number
-- `timestamp`: ISO 8601 format timestamp
-- `role`: One of "system", "user", or "assistant"
-- `content`: Either a string (for system messages) or an object (for user and assistant messages)
+### Role-specific Content Format
 
-## Role-specific Content Format
-
-### System Message Content
-Plain string containing instructions or guidance:
+#### System Message
 ```json
-"content": "You're a helpful AI assistant named Aya. You help users with content..."
+"content": "You're a helpful AI assistant named Aya..."
 ```
 
-### User Message Content
-Object with user ID and message text:
+#### User Message
 ```json
 "content": {
-  "userid": "<@1234546>",
-  "text": "Oi, me dê uma sugestão de almoço por favor."
+  "userid": "<@U1234546>",
+  "text": "Can you suggest lunch options?"
 }
 ```
 
-### Assistant Message Content
-Object containing tool call information:
+#### Assistant Message
 ```json
 "content": {
   "toolCall": "postMessage",
-  "text": "Message content here",
-  "reasoning": "Reason for the tool call"
+  "text": "Here are some lunch suggestions...",
+  "reasoning": "Providing lunch options as requested"
 }
 ```
 
-## Console Logging Format
+## Console Display Format
 
-For debugging and visualization, the JSON data should be formatted in console logs as follows:
+For debugging, the message flow is displayed as:
 
 ```
 🧠 System: [system message content]
@@ -67,22 +57,10 @@ For debugging and visualization, the JSON data should be formatted in console lo
 🕐 [timestamp]
 🔧 [toolCall] (parameter: value)
    └─ Reason: [reasoning]
-
-🤖 Assistant [Turn X]
-🕐 [timestamp]
-💬 postMessage:
-   "[message text]"
-   └─ Reason: [reasoning]
-
-🤖 Assistant [Turn X]
-🕐 [timestamp]
-✅ finishRequest
-   └─ Reason: [reasoning]
 ```
 
 ## Tool Call Emojis
 
-Different tool calls use specific emojis in console logs:
 - 🔧 `getThreadHistory` and general tools
 - 💬 `postMessage` 
 - ✅ `finishRequest`
@@ -94,79 +72,72 @@ Different tool calls use specific emojis in console logs:
 [
   {
     "index": 0,
-    "turn": "0",
-    "timestamp": "2025-04-04T12:33:00Z",
+    "turn": 0,
+    "timestamp": "2023-04-04T12:33:00Z",
     "role": "system",
     "content": "You're a helpful AI assistant named Aya. You help users with content..."
   },
   {
     "index": 1,
     "turn": 0,
-    "timestamp": "2025-04-04T12:33:00Z",
+    "timestamp": "2023-04-04T12:33:10Z",
     "role": "user",
     "content": {
-      "userid": "<@1234546>",
-      "text": "Oi, me dê uma sugestão de almoço por favor."
+      "userid": "<@U1234546>",
+      "text": "Suggest lunch options please."
     }
   },
   {
     "index": 2,
     "turn": 1,
-    "timestamp": "2025-04-04T12:34:00Z",
+    "timestamp": "2023-04-04T12:33:20Z",
     "role": "assistant",
     "content": {
       "toolCall": "getThreadHistory",
       "ascending": false,
-      "reasoning": "Checking the thread history for more context"
+      "reasoning": "Checking for context about dietary preferences"
     }
   },
   {
     "index": 3,
     "turn": 1,
-    "timestamp": "2025-04-04T12:35:00Z",
+    "timestamp": "2023-04-04T12:33:30Z",
     "role": "assistant",
     "content": {
       "toolCall": "postMessage",
-      "text": "Claro, vou te ajudar com isso! Que tal um delicioso risoto de cogumelos?",
-      "reasoning": "Suggesting a lunch option to the user"
+      "text": "Here are some lunch suggestions: 1) Mushroom risotto, 2) Caesar salad, 3) Vegetable curry",
+      "reasoning": "Providing diverse lunch options"
     }
   }
 ]
 ```
 
-### Console Log Visualization
+### Console Display
 ```
-🧠 System: You're a helpful AI assistant named Aya. You help users with content...
+🧠 System: You're a helpful AI assistant named Aya...
 
-👤 User <@1234546> [Turn 0]
-🕐 2025-04-04T12:33:00Z
-> Oi, me dê uma sugestão de almoço por favor.
+👤 User <@U1234546> [Turn 0]
+🕐 2023-04-04T12:33:10Z
+> Suggest lunch options please.
 
 🤖 Assistant [Turn 1]
-🕐 2025-04-04T12:34:00Z
+🕐 2023-04-04T12:33:20Z
 🔧 getThreadHistory (ascending: false)
-   └─ Reason: Checking the thread history for more context
+   └─ Reason: Checking for context about dietary preferences
 
 🤖 Assistant [Turn 1]
-🕐 2025-04-04T12:35:00Z
+🕐 2023-04-04T12:33:30Z
 💬 postMessage:
-   "Claro, vou te ajudar com isso! Que tal um delicioso risoto de cogumelos?"
-   └─ Reason: Suggesting a lunch option to the user
+   "Here are some lunch suggestions: 1) Mushroom risotto, 2) Caesar salad, 3) Vegetable curry"
+   └─ Reason: Providing diverse lunch options
 ```
 
 ## Implementation Requirements
 
-1. All messages must be presented in strict chronological order by index
-2. Each entry must include all required fields (index, turn, timestamp, role, content)
+1. Messages must be in chronological order by index
+2. Each entry must include all required fields
 3. The `turn` field must correctly track conversation turns
-4. System messages should appear at strategic points (beginning, after significant interactions)
-5. Only use the specified roles: "system", "user", "assistant"
-6. Object structures must follow the exact format shown above
-7. ISO 8601 timestamps must be used throughout
-
-## Important Notes
-
-- Ensure all tool calls include the reasoning component when possible
-- System messages should be concise and directive
-- This format replaces any previous context formatting approach
-- The LLM should receive this exact JSON structure with each prompt 
+4. System messages should appear at strategic points
+5. Only use roles: "system", "user", "assistant"
+6. Use ISO 8601 timestamps throughout
+7. All tool calls must include reasoning when possible 

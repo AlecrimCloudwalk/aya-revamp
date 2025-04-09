@@ -1,26 +1,22 @@
 # Tool Development Guide
 
-This guide explains how to create and implement new tools for the Slack bot while maintaining consistent logging, tracking, and thread state management.
+This guide explains how to create and implement new tools for the Slack bot while maintaining the LLM-driven architecture principles.
 
-## Overview of the Tool System
+## Core Principles
 
-The bot uses a modular tool system with consistent patterns for:
-- Tool registration and discovery
-- Logging and error handling
-- Thread state tracking
-- Content recording in conversation history
-- Duplicate detection
+1. **LLM Agency**: Tools must not make decisions about user intent or message flow - all decisions are made by the LLM
+2. **Consistent Interface**: All tools follow the same parameter format and state tracking mechanisms
+3. **No Duplication**: Always check `function_index.md` to ensure similar functionality doesn't already exist
+4. **State Management**: Always use ThreadState for tracking tool execution and state
 
-## Step 1: Create Your Tool Module
+## Tool Implementation Pattern
 
-Create a new file in `src/tools/` for your tool. Follow this template:
+All tools follow this standard pattern:
 
 ```javascript
 // src/tools/yourToolName.js
 
-// Import necessary dependencies
 const { logError } = require('../errors.js');
-// Import any other dependencies needed
 
 /**
  * Tool description - what it does and when to use it
@@ -33,7 +29,7 @@ const { logError } = require('../errors.js');
  */
 async function yourToolName(args, threadState) {
   try {
-    // Validate arguments
+    // Validate required arguments
     if (!args.param1) {
       throw new Error('param1 is required');
     }
@@ -44,14 +40,13 @@ async function yourToolName(args, threadState) {
       throw new Error('Channel ID not found in thread context');
     }
     
-    // Implement tool logic here
+    // Implement tool logic
     // ...
     
     // Return standardized result
     return {
       ok: true,
-      // Add any tool-specific data to return
-      // This data will be available to the LLM
+      // Add any tool-specific data to return to the LLM
     };
   } catch (error) {
     logError('Error executing yourToolName', error, { args });
@@ -64,9 +59,11 @@ module.exports = {
 };
 ```
 
-## Step 2: Register Your Tool
+## Tool Registration
 
-Add your tool to the tool registry in `src/tools/index.js`:
+After creating your tool, register it in the tool registry:
+
+1. Add your tool to `src/tools/index.js`:
 
 ```javascript
 // Import your tool
@@ -89,9 +86,38 @@ const toolRegistry = {
 };
 ```
 
-## Step 3: Update Content Tracking (Optional)
+2. Update `function_index.md` with a description of your tool and its functions.
 
-If your tool produces content that should be tracked in the thread history, update the `trackToolContentInThread` function in `src/orchestrator.js`:
+## ThreadState Integration
+
+The ThreadState class is central to tool execution. It provides:
+
+- Tool execution tracking and deduplication
+- Button state management 
+- Metadata storage for thread context
+
+Always use ThreadState methods when implementing tools:
+
+```javascript
+// Record a tool execution
+threadState.recordToolExecution(toolName, args, result);
+
+// Check if a tool has been executed
+if (threadState.hasExecuted(toolName, args)) {
+  // Get previous result
+  const prevResult = threadState.getToolResult(toolName, args);
+}
+
+// Store metadata
+threadState.setMetadata('key', value);
+
+// Retrieve metadata
+const value = threadState.getMetadata('key');
+```
+
+## Content Tracking (Optional)
+
+If your tool produces content that should be tracked in thread history, update the `trackToolContentInThread` function in `src/orchestrator.js`:
 
 ```javascript
 function trackToolContentInThread(toolName, toolArgs, threadState, requestId) {
@@ -117,58 +143,46 @@ function trackToolContentInThread(toolName, toolArgs, threadState, requestId) {
 }
 ```
 
-## Step 4: Using Your Tool
+## Testing Your Tool
 
-There are two ways to use your tool:
-
-### Option 1: Via LLM (Primary Method)
-
-The LLM will select and call your tool through the orchestrator's processThread function.
-
-### Option 2: Directly Via processTools Module
-
-For cases where you need to call the tool programmatically:
+Create unit tests for your tool in the `tests/tools/` directory:
 
 ```javascript
-const { processTool } = require('../processThread');
-const { getThreadState } = require('../orchestrator');
+// tests/tools/yourToolName.test.js
+const { yourToolName } = require('../../src/tools/yourToolName');
 
-async function useYourTool(context) {
-  // Get thread state
-  const threadState = getThreadState(context);
+describe('yourToolName', () => {
+  test('should handle valid parameters', async () => {
+    const args = { param1: 'value1', param2: 'value2' };
+    const threadState = {
+      context: { channelId: 'C12345' },
+      recordToolExecution: jest.fn()
+    };
+    
+    const result = await yourToolName(args, threadState);
+    expect(result.ok).toBe(true);
+    // Add more assertions as needed
+  });
   
-  // Define tool parameters
-  const toolArgs = {
-    param1: 'value1',
-    param2: 'value2'
-  };
-  
-  // Process the tool with consistent logging and tracking
-  const result = await processTool('yourToolName', toolArgs, threadState);
-  
-  // Handle the result
-  if (result.error) {
-    console.error('Tool execution failed:', result.response.message);
-  } else {
-    console.log('Tool executed successfully:', result.response);
-  }
-  
-  return result;
-}
+  test('should throw error when missing required parameters', async () => {
+    const args = { param2: 'value2' }; // Missing param1
+    const threadState = {
+      context: { channelId: 'C12345' }
+    };
+    
+    await expect(yourToolName(args, threadState)).rejects.toThrow('param1 is required');
+  });
+});
 ```
 
 ## Best Practices
 
 1. **Error Handling**: Always include try/catch with proper error logging
-2. **Validation**: Validate all required arguments
+2. **Validation**: Validate all required arguments at the beginning of your function
 3. **Idempotency**: When possible, make tools idempotent (safe to run multiple times)
-4. **Logging**: Let the orchestrator handle logging - don't add extensive custom logging
-5. **State Updates**: Always update thread state through the provided methods
-6. **Testing**: Create unit tests for your tool in `tests/tools/`
-
-## Example Implementation
-
-See `src/examples/toolUsage.js` for examples of how to use the modular tool processing system.
+4. **State Updates**: Always update thread state through the provided methods
+5. **No Decision Making**: Your tool should not make decisions about what to do next - all decisions must be made by the LLM
+6. **Return Format**: Always return a structured object with at least an `ok` property indicating success/failure
 
 ## Common Issues and Solutions
 
@@ -182,4 +196,13 @@ See `src/examples/toolUsage.js` for examples of how to use the modular tool proc
 
 ### Duplicated Messages
 - The system will automatically detect and prevent duplicate messages
-- If you need to override this, provide a unique parameter like timestamp 
+- If you need to override this, provide a unique parameter like timestamp
+
+## Reference: Core Tools
+
+Here are some of the core tools that your new tool might need to interact with:
+
+- **postMessage**: Posts formatted messages to Slack
+- **updateMessage**: Updates existing Slack messages
+- **getThreadHistory**: Retrieves thread history from Slack
+- **finishRequest**: Signals the end of processing for a user request 

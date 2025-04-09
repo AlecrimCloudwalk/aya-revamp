@@ -1,12 +1,27 @@
-# ⚠️ LLM-Driven Architecture: Critical Guidelines ⚠️
+# ⚠️ LLM-Driven Architecture: Core Principles ⚠️
 
-## Core Principles
+## Fundamental Principles
 
-### 1. The LLM as Central Decision-Maker
+### The LLM as Central Decision-Maker
 
 The most important principle in our architecture is that the LLM is the central decision-maker with **full agency** over all aspects of user interaction. This is not just a design preference—it's a fundamental requirement for the system to function as intended.
 
-### 2. ⚠️ CRITICAL: NO HARDCODED RESPONSES TO SLACK ⚠️
+All user-intent decisions must be made by the LLM, not by code:
+- No code should interpret user intent
+- No code should route requests based on keywords
+- No code should decide which tool to call
+
+### STRICTLY FORBIDDEN Patterns
+
+- Pattern matching, regex filters, or hard-coded logic paths that decide:
+  - Which tools to use
+  - When to respond to a user
+  - How to interpret user requests
+  - Whether to chain multiple tools
+  - What clarification questions to ask
+  - Any form of content filtering or routing based on keywords
+
+### ⚠️ CRITICAL: NO HARDCODED RESPONSES TO SLACK ⚠️
 
 **NEVER ADD HARDCODED RESPONSES DIRECTLY TO SLACK.** All responses must be generated dynamically by the LLM based on context. Hardcoding responses undermines the entire architecture and creates inconsistent user experiences.
 
@@ -29,9 +44,11 @@ if (error) {
 }
 ```
 
-### 3. ⚠️ MESSAGE PROCESSING RULES ⚠️
+## Implementation Guidelines
 
-The bot should follow these specific rules for when to process and respond to messages:
+### Message Processing Rules
+
+The bot follows these specific rules for when to process and respond to messages:
 
 1. **Development Mode**:
    - When in development mode, ONLY respond to messages containing the special key `!@#`
@@ -46,15 +63,6 @@ The bot should follow these specific rules for when to process and respond to me
    - ONLY respond when specifically mentioned (@bot-name)
    - All other channel messages should be skipped
    - Log skipped messages with the reason "Channel message - no app mention"
-
-4. **Skip Logging**:
-   - All skipped messages should be logged normally with appropriate reason
-   - Do not throw errors for skipped messages
-   - Include channel type in the log entry
-
-These rules must be implemented at the application level, not in the LLM's decision-making process.
-
-## Implementation Guidelines
 
 ### Error Handling
 
@@ -79,6 +87,34 @@ These rules must be implemented at the application level, not in the LLM's decis
    - No blocking or modifying LLM outputs in code
    - No forced message templates
    - No bot personality changes based on keywords
+
+## Key Requirements
+
+### Tool Management
+- Simple tool registration system
+- Easy to add new tools without modifying core code
+- Consistent interface for tool definitions
+
+### Error Handling
+- LLM should be responsible for error recovery decisions
+- Pass error context and retry counts to the LLM
+- Let the LLM decide retry strategy based on context
+
+### Asynchronous Processing
+- Support for long-running operations
+- Ability to handle slow external APIs
+- Simple pattern for async operations without overcomplicating
+
+### Interactive Features
+- Support for interactive buttons in messages
+- Context preservation when handling button clicks
+- Clean integration with LLM decision-making
+
+### Rich Message Formatting
+- Simple, intuitive methods for the LLM to build Slack Block Kit messages
+- Functions should be as simple as `addDivider()`, `addHeader()`, etc.
+- ALL messages MUST have a vertical colored Slack Block Kit bar (non-negotiable)
+- LLM can select the color from predefined options
 
 ## Maintaining This Approach
 
