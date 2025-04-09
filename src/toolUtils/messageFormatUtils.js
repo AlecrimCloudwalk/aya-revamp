@@ -468,11 +468,51 @@ function calculateTextSimilarity(str1, str2) {
     if (!str1 && !str2) return 1; // Both empty means identical
     if (!str1 || !str2) return 0; // One empty means completely different
     
-    // Normalize strings
-    const normalizedStr1 = str1.replace(/\s+/g, ' ').trim().toLowerCase();
-    const normalizedStr2 = str2.replace(/\s+/g, ' ').trim().toLowerCase();
+    // Quick comparison for exact match cases
+    if (str1 === str2) return 1; // Exact match
+    
+    // If the length difference is significant, they are likely different messages
+    const lengthDiff = Math.abs(str1.length - str2.length);
+    const longerLength = Math.max(str1.length, str2.length);
+    
+    // If length difference is more than 30% of the longer string, consider them different
+    if (lengthDiff > (longerLength * 0.3)) {
+        return 0.5; // Return moderate similarity to allow for some difference
+    }
+    
+    // Normalize strings - only remove excess whitespace, preserve case for better differentiation
+    const normalizedStr1 = str1.replace(/\s+/g, ' ').trim();
+    const normalizedStr2 = str2.replace(/\s+/g, ' ').trim();
     
     if (normalizedStr1 === normalizedStr2) return 1; // Exact match after normalization
+    
+    // Check for significant semantic differences by looking for unique keywords
+    // Examples: different URLs, code blocks, numbers, or key identifiers
+    const uniquePatterns = [
+        /https?:\/\/\S+/g,     // URLs
+        /```[\s\S]*?```/g,     // Code blocks
+        /`[^`]+`/g,            // Inline code
+        /\d{3,}/g,             // Numbers with 3+ digits
+        /#[a-zA-Z0-9_-]+/g,    // Hashtags or HTML IDs
+        /@[a-zA-Z0-9_-]+/g     // Mentions
+    ];
+    
+    for (const pattern of uniquePatterns) {
+        const matches1 = normalizedStr1.match(pattern) || [];
+        const matches2 = normalizedStr2.match(pattern) || [];
+        
+        // If the count of these elements differs significantly, they're different messages
+        if (Math.abs(matches1.length - matches2.length) > 1) {
+            return 0.5; // Consider them moderately similar
+        }
+        
+        // Check if specific elements are different
+        for (const match of matches1) {
+            if (!matches2.includes(match)) {
+                return 0.5; // Different specific elements means different message
+            }
+        }
+    }
     
     // For longer texts, use a more sophisticated comparison
     // Levenshtein distance calculation

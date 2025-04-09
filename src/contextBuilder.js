@@ -251,6 +251,25 @@ class ContextBuilder {
         status = "SUCCESS";
       }
       
+      // For getThreadHistory results, create a simplified version to prevent bloating logs
+      let processedResult = result;
+      if (toolName === 'getThreadHistory' && result) {
+        // Only keep summary information, not full message content
+        processedResult = {
+          messagesRetrieved: result.messagesRetrieved,
+          threadTs: result.threadTs,
+          channelId: result.channelId,
+          threadStats: result.threadStats,
+          indexInfo: result.indexInfo,
+          contextRebuilt: result.contextRebuilt,
+          // Remove the large sections that bloat logs
+          messagesCount: result.messages ? result.messages.length : 0
+        };
+      } else {
+        // Make a safe clone of the result to avoid reference issues
+        processedResult = result ? JSON.parse(JSON.stringify(result)) : null;
+      }
+      
       // Create execution record
       const executionRecord = {
         id: executionId,
@@ -261,7 +280,7 @@ class ContextBuilder {
         relativeTime,
         turnId,
         args: { ...args },  // Clone to avoid reference issues
-        result: result ? { ...result } : null,  // Clone if exists
+        result: processedResult,
         error: error ? error.message : null,
         skipped: skipped,
         status,
@@ -972,7 +991,6 @@ class ContextBuilder {
       
       // Extract user information
       const userInfo = context.user || {};
-      const userName = userInfo.name || 'Unknown User';
       const userId = this._extractUserId(this.messages.get(threadMsgs[0]));
       const userTimezone = userInfo.timezone || 'America/Sao_Paulo';
       const isDirectMessage = context.isDirectMessage || false;
@@ -1073,12 +1091,8 @@ class ContextBuilder {
       jsonContext.push(conversationStats);
 
       // Add system message as the next entry with enhanced user info
-      const systemPrompt = `You're a helpful AI assistant named Aya. You help users with information and tasks. 
-You are chatting with ${userName} <@${userId}> in ${channel}. 
-The current iteration of this conversation is ${iterations}.
-When responding to users, be conversational and helpful.
-IMPORTANT: After responding to a user request with postMessage, always call finishRequest to complete the interaction.
-Never call getThreadHistory more than once for the same request.`;
+      const ayaPrompts = require('./prompts/aya.js');
+      const systemPrompt = ayaPrompts.generatePersonalityPrompt(userId, channel, iterations);
 
       // Add system message to our JSON context array
       jsonContext.push({
@@ -1097,162 +1111,126 @@ Never call getThreadHistory more than once for the same request.`;
       
       // Process all items according to turn-based numbering
       for (const item of allItems) {
-        // Check if this is a user message starting a new turn
-        if (item.type === 'message' && item.item.source === 'user') {
-          // User messages always start a new turn (1, 2, 3, etc.)
+        // Determine if this starts a new turn
+        // A turn starts when a user message follows a bot message or tool call
+        if (item.type === 'message' && 
+          item.item.source === 'user' &&
+          lastUserMessageTime !== null && 
+          new Date(item.timestamp) - new Date(lastUserMessageTime) > 100) {
           currentTurn++;
-          lastUserMessageTime = new Date(item.timestamp);
-          
-          // Format user message with the turn number
-          const message = item.item;
-          const userId = this._extractUserId(message);
-          
-          jsonContext.push({
-            index: currentIndex++,
-            turn: currentTurn,
-            timestamp: new Date(message.timestamp).toISOString(),
-            role: "user",
-            content: {
-              userid: `<@${userId}>`,
-              text: message.text || ''
-            }
-          });
-        } 
-        // Check if this is a bot message responding to the last user message
-        else if (item.type === 'message' && 
-                (item.item.source === 'assistant' || item.item.source === 'llm')) {
-          // Bot responses use the current turn number
-          const message = item.item;
-          
-          // Attempt to associate this message with a tool call
-          const associatedToolCall = this._findAssociatedToolCall(message, toolExecs);
-          
-          if (associatedToolCall && associatedToolCall.toolName === 'postMessage') {
-            jsonContext.push({
-              index: currentIndex++,
-              turn: currentTurn,
-              timestamp: new Date(message.timestamp).toISOString(),
-              role: "assistant",
-              content: {
-                toolCall: "postMessage",
-                text: message.text || '',
-                reasoning: associatedToolCall.reasoning || 'No reasoning provided'
-              }
-            });
-          } else {
-            // If no associated tool call found, just add as a regular message
-            jsonContext.push({
-              index: currentIndex++,
-              turn: currentTurn,
-              timestamp: new Date(message.timestamp).toISOString(),
-              role: "assistant",
-              content: {
-                toolCall: "postMessage",
-                text: message.text || '',
-                reasoning: 'No reasoning provided'
-              }
-            });
-          }
         }
-        // Check if this is a tool execution
-        else if (item.type === 'tool') {
-          // Only add tool executions that aren't already associated with a message
-          const tool = item.item;
-          const isPostMessageTool = tool.toolName === 'postMessage';
-          
-          // Skip postMessage tools as they're handled with the actual messages
-          if (isPostMessageTool) {
-            continue;
-          }
-          
-          // Add non-postMessage tool calls
-          jsonContext.push({
-            index: currentIndex++,
-            turn: currentTurn,
-            timestamp: new Date(tool.timestamp).toISOString(),
-            role: "assistant",
-            content: {
-              toolCall: tool.toolName,
-              reasoning: tool.reasoning || 'No reasoning provided',
-              ...this._extractToolParameters(tool)
-            }
-          });
-        }
-        // Handle system messages (we will skip these in the new format as they aren't needed)
-        // We could add them with role: "system" if needed
-      }
-      
-      // Add hints and suggestions at the end of the context
-      // Track repeated tool calls
-      const toolCalls = {};
-      toolExecs.forEach(tool => {
-        if (!toolCalls[tool.toolName]) {
-          toolCalls[tool.toolName] = { count: 0, success: 0, errors: 0, skipped: 0 };
-        }
-        toolCalls[tool.toolName].count += 1;
         
-        if (tool.error) {
-          toolCalls[tool.toolName].errors += 1;
-        } else if (tool.skipped) {
-          toolCalls[tool.toolName].skipped += 1;
-        } else {
-          toolCalls[tool.toolName].success += 1;
+        // Remember last user message time
+        if (item.type === 'message' && item.item.source === 'user') {
+          lastUserMessageTime = item.timestamp;
         }
-      });
-      
-      // Generate warnings for repeated tools
-      const toolWarnings = [];
-      for (const [toolName, stats] of Object.entries(toolCalls)) {
-        if (stats.count > 2) {
-          toolWarnings.push(`${toolName} was called ${stats.count} times (${stats.success} success, ${stats.skipped} skipped, ${stats.errors} errors)`);
-        }
-        if (stats.skipped > 0) {
-          toolWarnings.push(`${toolName} was skipped ${stats.skipped} times - avoid calling the same tool with identical parameters`);
-        }
-      }
-      
-      // Check if assistant has already responded in this interaction
-      let hasAlreadyResponded = false;
-      // Look for postMessage calls that succeeded
-      if (toolCalls['postMessage'] && toolCalls['postMessage'].success > 0) {
-        hasAlreadyResponded = true;
-      }
-      
-      // Generate next action suggestions
-      let nextActionSuggestion = "Respond to the user's request.";
-      
-      if (hasAlreadyResponded) {
-        // The assistant has already sent a message in this interaction
-        nextActionSuggestion = "You've already responded to the user. Call finishRequest to complete the interaction.";
-      } else if (isInitialMessage && isDirectMessage) {
-        nextActionSuggestion = "This is the first message in a DM. No need to call getThreadHistory.";
-      } else if (threadHistoryCalls > 2) {
-        nextActionSuggestion = "You've called getThreadHistory multiple times. You already have all context. Respond directly.";
-      } else if (toolWarnings.length > 0) {
-        nextActionSuggestion = "Note repeated tool calls above. Focus on solving the user's request.";
-      }
-      
-      // Add the hints and suggestions block
-      if (toolWarnings.length > 0 || nextActionSuggestion) {
-        jsonContext.push({
-          index: currentIndex++,
-          turn: currentTurn,
-          timestamp: new Date().toISOString(),
-          role: "system",
-          content: {
-            type: "hints_and_suggestions",
-            warnings: toolWarnings,
-            next_action: nextActionSuggestion,
-            whose_turn: hasAlreadyResponded ? "user" : "assistant"
+        
+        // Format this item based on its type
+        if (item.type === 'message') {
+          // Format user or assistant messages
+          const formattedMessage = this._formatMessageForLLM(item.item, currentIndex);
+          
+          if (formattedMessage) {
+            // Generate content object with additional metadata
+            const contentObj = {};
+            
+            // Add relevant message metadata
+            if (item.item.text) {
+              contentObj.text = item.item.text;
+            }
+            
+            // Extract and add message identifiers for use in reactions
+            const messageId = item.item.id || null;
+            const messageTs = item.item.ts || (item.item.originalContent?.ts || null);
+            
+            // Add message identifiers to allow targeting for emoji reactions
+            contentObj.message_id = messageId;
+            
+            // Add message timestamps for Slack API operations
+            if (messageTs) {
+              contentObj.message_ts = messageTs;
+              
+              // Mark this as the preferred identifier for API operations
+              contentObj.api_identifier = messageTs;
+            }
+            
+            // Include the channel ID if available for API operations
+            const channelId = item.item.channelId || 
+                            item.item.metadata?.channel || 
+                            this.getChannel(threadTs);
+            if (channelId) {
+              contentObj.channel_id = channelId;
+            }
+            
+            // Add additional metadata if available in the original message
+            if (item.item.metadata) {
+              // Add message index if available
+              if (item.item.metadata.messageIndex !== undefined) {
+                contentObj.message_index = item.item.metadata.messageIndex;
+              }
+              
+              // Add parent message flag
+              if (item.item.metadata.isParent) {
+                contentObj.is_parent = true;
+              }
+              
+              // Add thread timestamp
+              if (item.item.metadata.threadTs) {
+                contentObj.thread_ts = item.item.metadata.threadTs;
+              }
+            }
+            
+            // Add reactions if available in the message metadata
+            if (item.item.metadata && item.item.metadata.reactions) {
+              contentObj.reactions = item.item.metadata.reactions;
+              
+              // Add formatted reactions string if available
+              if (item.item.metadata.formattedReactions) {
+                contentObj.formatted_reactions = item.item.metadata.formattedReactions;
+              }
+            }
+            
+            // Add JSON context entry with proper role, turn number, and timestamp
+            jsonContext.push({
+              index: currentIndex,
+              turn: currentTurn,
+              timestamp: item.timestamp,
+              role: formattedMessage.role,
+              content: contentObj
+            });
+            
+            currentIndex++;
           }
-        });
+        } else if (item.type === 'tool' && includeToolCalls) {
+          // Format tool executions
+          const formattedTool = this._formatToolExecutionForLLM(item.item, currentIndex);
+          
+          if (formattedTool) {
+            // Create a JSON structure for the tool call
+            jsonContext.push({
+              index: currentIndex,
+              turn: currentTurn,
+              timestamp: item.timestamp,
+              role: formattedTool.role,
+              content: {
+                type: "tool_call",
+                tool_name: item.item.toolName,
+                status: item.item.error ? "error" : (item.item.skipped ? "skipped" : "success"),
+                args: item.item.args || {},
+                result: item.item.result || null,
+                error: item.item.error || null
+              }
+            });
+            
+            currentIndex++;
+          }
+        }
       }
       
-      // We'll skip logging here since llmInterface will handle it with the formatter
-      
+      // Return the fully formatted JSON context
       return jsonContext;
     } catch (error) {
-      logger.error(`Error building formatted LLM context for thread ${threadTs}:`, error);
+      logError('Error building LLM context', error, { threadTs });
       return [];
     }
   }
@@ -1396,9 +1374,9 @@ Never call getThreadHistory more than once for the same request.`;
           // For postMessage, compare text content with similarity detection
           const similarity = calculateTextSimilarity(args.text, exec.args.text);
           
-          // Only consider it a match if similarity is very high (95% or more)
-          // This allows for minor formatting differences but catches duplicates
-          return similarity > 0.95;
+          // Lower the similarity threshold from 0.95 to 0.85
+          // This allows more variation between messages while still catching true duplicates
+          return similarity > 0.85;
         });
       }
       

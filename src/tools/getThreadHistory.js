@@ -21,15 +21,18 @@ const callCounter = new Map(); // threadId -> count
 async function getThreadHistory(args = {}, threadContext) {
   try {
     // Log reasoning if available
-    if (args.reasoning) {
+    if (args && args.reasoning) {
       logger.info(`🧠 REASONING: ${args.reasoning}`);
     }
     
     // Handle potential nested parameters structure 
-    if (args.parameters && !args.limit) {
+    if (args && args.parameters && !args.limit) {
       logger.info('Detected nested parameters structure, extracting inner parameters');
-      args = { ...args.parameters, reasoning: args.reasoning };
+      args = { ...(args.parameters || {}), reasoning: args.reasoning };
     }
+    
+    // Ensure args is always an object
+    args = args || {};
     
     // Extract the top-level reasoning (no need to filter it out)
     const reasoning = args.reasoning;
@@ -70,8 +73,17 @@ async function getThreadHistory(args = {}, threadContext) {
       logger.warn(`Invalid order parameter "${order}". Using default "chronological".`);
     }
     
+    // Ensure threadContext is valid
+    if (!threadContext) {
+      throw new Error('Thread context is required for getThreadHistory');
+    }
+    
     // Get thread ID for context
     const threadId = threadContext.threadId;
+    
+    if (!threadId) {
+      throw new Error('Thread ID is missing in thread context');
+    }
     
     // Track call count for this thread
     if (!callCounter.has(threadId)) {
@@ -86,13 +98,17 @@ async function getThreadHistory(args = {}, threadContext) {
         
         // Add a direct system message to prevent further calls
         if (threadContext.addMessage) {
-          threadContext.addMessage({
-            source: 'system',
-            text: `⚠️ CRITICAL: getThreadHistory has been called too many times (${currentCount + 1}). DO NOT call it again. The thread history is already in your context. Please respond to the user with postMessage and call finishRequest immediately.`,
-            timestamp: new Date().toISOString(),
-            threadTs: threadId,
-            type: 'error_notice'
-          });
+          try {
+            threadContext.addMessage({
+              source: 'system',
+              text: `⚠️ CRITICAL: getThreadHistory has been called too many times (${currentCount + 1}). DO NOT call it again. The thread history is already in your context. Please respond to the user with postMessage and call finishRequest immediately.`,
+              timestamp: new Date().toISOString(),
+              threadTs: threadId,
+              type: 'error_notice'
+            });
+          } catch (msgError) {
+            logger.error(`Error adding warning message: ${msgError.message}`);
+          }
         }
         
         return {
@@ -109,24 +125,29 @@ async function getThreadHistory(args = {}, threadContext) {
     
     // Check for repeated calls - get tool execution history if available
     if (threadContext.getToolExecutionHistory) {
-      const recentCalls = threadContext.getToolExecutionHistory(threadId, 10)
-        .filter(exec => exec.toolName === 'getThreadHistory')
-        .filter(exec => !exec.error); // Only count successful calls
-      
-      // Check if this is being called repeatedly in a short period
-      if (recentCalls.length >= 3 && !forceRefresh) {
-        // This might be a loop - add special warning
-        logger.warn(`⚠️ POTENTIAL LOOP DETECTED: getThreadHistory called ${recentCalls.length} times recently`);
+      try {
+        const recentCalls = threadContext.getToolExecutionHistory(threadId, 10)
+          .filter(exec => exec && exec.toolName === 'getThreadHistory')
+          .filter(exec => exec && exec.status === 'SUCCESS'); // Only count successful calls
         
-        // Return a clear warning in the result
-        return {
-          warning: `You've called getThreadHistory ${recentCalls.length} times recently. This might indicate a loop. The thread history is already in your context.`,
-          previousCalls: recentCalls.length,
-          messagesRetrieved: 0,
-          loopDetected: true,
-          recommendation: "Use the thread history you already have, or use forceRefresh:true if you really need fresh data.",
-          isErrorState: false
-        };
+        // Check if this is being called repeatedly in a short period
+        if (recentCalls.length >= 3 && !forceRefresh) {
+          // This might be a loop - add special warning
+          logger.warn(`⚠️ POTENTIAL LOOP DETECTED: getThreadHistory called ${recentCalls.length} times recently`);
+          
+          // Return a clear warning in the result
+          return {
+            warning: `You've called getThreadHistory ${recentCalls.length} times recently. This might indicate a loop. The thread history is already in your context.`,
+            previousCalls: recentCalls.length,
+            messagesRetrieved: 0,
+            loopDetected: true,
+            recommendation: "Use the thread history you already have, or use forceRefresh:true if you really need fresh data.",
+            isErrorState: false
+          };
+        }
+      } catch (historyError) {
+        logger.warn(`Error checking tool execution history: ${historyError.message}`);
+        // Continue execution rather than failing completely
       }
     }
     
@@ -141,9 +162,13 @@ async function getThreadHistory(args = {}, threadContext) {
       }
       // Try from metadata
       else if (threadContext.getMetadata) {
-        const context = threadContext.getMetadata('context');
-        if (context && context.channelId) {
-          channelId = context.channelId;
+        try {
+          const context = threadContext.getMetadata('context');
+          if (context && context.channelId) {
+            channelId = context.channelId;
+          }
+        } catch (metadataError) {
+          logger.warn(`Error getting channel ID from metadata: ${metadataError.message}`);
         }
       }
     }
@@ -155,9 +180,13 @@ async function getThreadHistory(args = {}, threadContext) {
       }
       // Try from metadata
       else if (threadContext.getMetadata) {
-        const context = threadContext.getMetadata('context');
-        if (context && context.threadTs) {
-          threadTs = context.threadTs;
+        try {
+          const context = threadContext.getMetadata('context');
+          if (context && context.threadTs) {
+            threadTs = context.threadTs;
+          }
+        } catch (metadataError) {
+          logger.warn(`Error getting thread TS from metadata: ${metadataError.message}`);
         }
       }
     }
@@ -307,6 +336,30 @@ async function getThreadHistory(args = {}, threadContext) {
         relativeTime = 'recently';
       }
       
+      // Fetch reactions for this message
+      let reactions = [];
+      try {
+        const reactionsResponse = await slackClient.reactions.get({
+          channel: channelId,
+          timestamp: message.ts,
+          full: true
+        });
+        
+        if (reactionsResponse && reactionsResponse.ok && reactionsResponse.message && reactionsResponse.message.reactions) {
+          reactions = reactionsResponse.message.reactions.map(reaction => ({
+            name: reaction.name,
+            count: reaction.count,
+            users: reaction.users || []
+          }));
+          logger.info(`Retrieved ${reactions.length} reactions for message ${message.ts}`);
+        }
+      } catch (error) {
+        logger.warn(`Could not retrieve reactions for message ${message.ts}: ${error.message}`);
+      }
+      
+      // Format reactions for easier consumption by LLM
+      const formattedReactions = reactions.map(r => `:${r.name}:`).join(' ');
+      
       // Add the formatted message to our list
       formattedMessages.push({
         index,
@@ -323,7 +376,9 @@ async function getThreadHistory(args = {}, threadContext) {
         isParent,
         isUser: !isBot,
         threadTs: message.thread_ts || message.ts,
-        hasAttachments: !!message.attachments?.length
+        hasAttachments: !!message.attachments?.length,
+        reactions: reactions,
+        formattedReactions: formattedReactions
       });
     }
     
@@ -403,76 +458,95 @@ async function getThreadHistory(args = {}, threadContext) {
     // Add messages to the context builder if available
     if (threadContext && threadContext.addMessage && formattedMessages.length > 0) {
       // Get the context builder instance to check for existing messages
-      const contextBuilder = require('../contextBuilder').getContextBuilder();
-      const existingThreadMessages = contextBuilder.getThreadMessages(threadId);
-      
-      // Track existing messages by their timestamp to avoid duplicates
-      const existingMessageTimestamps = new Set();
-      existingThreadMessages.forEach(msg => {
-        if (msg.timestamp) {
-          // Convert ISO timestamp to Unix timestamp (seconds) for comparison
-          const unixTimestamp = new Date(msg.timestamp).getTime() / 1000;
-          existingMessageTimestamps.add(unixTimestamp.toString());
-        }
-      });
-      
-      // Count how many messages we're adding to context
-      let messagesAddedToContext = 0;
-      let skippedDuplicates = 0;
-      let failedAdditions = 0;
-      
-      // Add only non-duplicate formatted messages to the context
-      for (const msg of formattedMessages) {
-        // Skip if this message timestamp already exists in the context
-        if (existingMessageTimestamps.has(msg.timestamp.toString())) {
-          skippedDuplicates++;
-          continue;
-        }
-        
-        // Create message object with all required fields
-        const messageObj = {
-          source: msg.isUser ? 'user' : 'assistant',
-          id: `${msg.isUser ? 'user' : 'bot'}_${msg.timestamp}`,
-          timestamp: msg.timestamp, // Already in ISO format, don't multiply again
-          threadTs: msg.threadTs || threadId, // Ensure threadTs is set correctly
-          text: msg.text,
-          sourceId: msg.userId,
-          type: 'history',
-          metadata: {
-            isParent: msg.isParent,
-            fromHistory: true,
-            threadTs: msg.threadTs || threadId, // Additional thread info in metadata
-            messageIndex: msg.messageIndex, // Add message index to metadata
-            messageIndexStr: msg.messageIndexStr // Add formatted string version
+      try {
+        const contextBuilder = require('../contextBuilder').getContextBuilder();
+        if (!contextBuilder) {
+          logger.warn('ContextBuilder instance not available');
+          // Continue execution - we'll return formatted messages even without context rebuild
+        } else {
+          const existingThreadMessages = contextBuilder.getThreadMessages ? 
+            contextBuilder.getThreadMessages(threadId) : [];
+          
+          // Track existing messages by their timestamp to avoid duplicates
+          const existingMessageTimestamps = new Set();
+          if (existingThreadMessages && Array.isArray(existingThreadMessages)) {
+            existingThreadMessages.forEach(msg => {
+              if (msg && msg.timestamp) {
+                // Convert ISO timestamp to Unix timestamp (seconds) for comparison
+                try {
+                  const unixTimestamp = new Date(msg.timestamp).getTime() / 1000;
+                  existingMessageTimestamps.add(unixTimestamp.toString());
+                } catch (tsError) {
+                  logger.warn(`Error processing timestamp in message: ${tsError.message}`);
+                }
+              }
+            });
           }
-        };
-        
-        // Try to add to context and track success
-        try {
-          const result = threadContext.addMessage(messageObj);
-          if (result) {
-            messagesAddedToContext++;
-          } else {
-            failedAdditions++;
+          
+          // Count how many messages we're adding to context
+          let messagesAddedToContext = 0;
+          let skippedDuplicates = 0;
+          let failedAdditions = 0;
+          
+          // Add only non-duplicate formatted messages to the context
+          for (const msg of formattedMessages) {
+            // Skip if this message timestamp already exists in the context
+            if (!msg || !msg.timestamp || existingMessageTimestamps.has(msg.timestamp.toString())) {
+              skippedDuplicates++;
+              continue;
+            }
+            
+            // Create message object with all required fields
+            const messageObj = {
+              source: msg.isUser ? 'user' : 'assistant',
+              id: `${msg.isUser ? 'user' : 'bot'}_${msg.timestamp}`,
+              timestamp: msg.timestamp,
+              threadTs: msg.threadTs || threadId,
+              text: msg.text,
+              sourceId: msg.userId,
+              type: 'history',
+              metadata: {
+                isParent: msg.isParent,
+                fromHistory: true,
+                threadTs: msg.threadTs || threadId,
+                messageIndex: msg.messageIndex,
+                messageIndexStr: msg.messageIndexStr,
+                reactions: msg.reactions || [],
+                formattedReactions: msg.formattedReactions || ''
+              }
+            };
+            
+            // Try to add to context and track success
+            try {
+              if (threadContext.addMessage) {
+                const result = threadContext.addMessage(messageObj);
+                if (result) {
+                  messagesAddedToContext++;
+                } else {
+                  failedAdditions++;
+                }
+              } else {
+                failedAdditions++;
+              }
+            } catch (err) {
+              failedAdditions++;
+              logger.error(`Error adding message to context: ${err.message}`);
+            }
           }
-        } catch (err) {
-          failedAdditions++;
-          logger.error(`Error adding message to context: ${err.message}`);
+          
+          // Single log line for context addition summary
+          logger.info(`Context rebuilt: Added ${messagesAddedToContext}/${formattedMessages.length} messages to context builder (${skippedDuplicates} duplicates skipped, ${failedAdditions} failed)`);
         }
+      } catch (contextError) {
+        logger.error(`Error rebuilding context: ${contextError.message}`);
+        // Continue execution - we'll return formatted messages even without context rebuild
       }
-      
-      // Single log line for context addition summary
-      logger.info(`Context rebuilt: Added ${messagesAddedToContext}/${formattedMessages.length} messages to context builder (${skippedDuplicates} duplicates skipped, ${failedAdditions} failed)`);
     } else {
       // Simplified error reporting
       const reason = !threadContext ? 'No thread context' : 
                     !threadContext.addMessage ? 'No addMessage method available' : 
                     formattedMessages.length === 0 ? 'No messages to add' : 'Unknown reason';
       logger.warn(`Context not rebuilt: ${reason}`);
-      
-      // Include formatted messages in return value even if we couldn't add them to context
-      // This way the LLM can still use them to display thread history
-      // This respects the LLM-first principle by giving the LLM the data to make decisions
     }
     
     // Format the history for display and LLM context
@@ -483,8 +557,9 @@ async function getThreadHistory(args = {}, threadContext) {
       const prefix = msg.isParent ? '[PARENT]' : `[${idx}]`;
       const userLabel = msg.isBot ? 'Assistant' : 'User';
       const timestamp = msg.formattedTime;
+      const reactions = msg.formattedReactions ? ` Reactions: ${msg.formattedReactions}` : '';
       
-      formattedHistoryText += `${prefix} ${timestamp} - ${userLabel}: ${msg.text}\n\n`;
+      formattedHistoryText += `${prefix} ${timestamp} - ${userLabel}: ${msg.text}${reactions}\n\n`;
     });
     
     // Return a summary of what we did along with thread statistics
@@ -542,13 +617,20 @@ async function getThreadHistory(args = {}, threadContext) {
     
     // Record the tool execution in the context builder
     if (threadContext) {
-      const contextBuilder = require('../contextBuilder').getContextBuilder();
-      contextBuilder.recordToolExecution(
-        threadId,
-        'getThreadHistory',
-        args,
-        summary
-      );
+      try {
+        const contextBuilder = require('../contextBuilder').getContextBuilder();
+        if (contextBuilder && typeof contextBuilder.recordToolExecution === 'function') {
+          contextBuilder.recordToolExecution(
+            threadId,
+            'getThreadHistory',
+            args,
+            summary
+          );
+        }
+      } catch (recordError) {
+        logger.warn(`Error recording tool execution: ${recordError.message}`);
+        // Continue execution rather than failing the entire call
+      }
     }
     
     return summary;

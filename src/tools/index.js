@@ -8,7 +8,6 @@ const { updateMessage } = require('./updateMessage.js');
 const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
 const getUserAvatar = require('./getUserAvatar.js');
 const { addReaction, availableEmojis } = require('./addReaction.js');
-const processLLMFeedback = require('./processLLMFeedback.js');
 const { removeReaction } = require('./removeReaction.js');
 
 /**
@@ -278,12 +277,27 @@ const toolRegistry = {
         type: 'object',
         properties: {
           emoji: {
-            type: 'string',
-            description: 'Emoji name to add as reaction (without colons, e.g. "thumbsup")'
+            type: ['string', 'array'],
+            description: 'Emoji name to add as reaction (without colons, e.g. "thumbsup") or array of emoji names',
+            items: {
+              type: 'string'
+            }
           },
           messageTs: {
             type: 'string',
-            description: 'Timestamp of the message to react to'
+            description: 'Timestamp of the message to react to (optional)'
+          },
+          message_ts: {
+            type: 'string',
+            description: 'Alternative parameter name for messageTs (optional)'
+          },
+          message_id: {
+            type: 'string',
+            description: 'ID of the message to react to from the context (optional)'
+          },
+          channel_id: {
+            type: 'string',
+            description: 'Channel ID where the message is located (optional, will use current channel if not specified)'
           },
           reasoning: {
             type: 'string',
@@ -297,30 +311,6 @@ const toolRegistry = {
     },
     implementation: addReaction
   },
-  processLLMFeedback: {
-    type: "function",
-    function: {
-      name: 'processLLMFeedback',
-      description: 'Retrieves button click feedback and user selections from thread state for context awareness. Call this at the beginning of your processing to get information about button interactions.',
-      parameters: {
-        type: 'object',
-        properties: {
-          checkForSelection: {
-            type: 'boolean',
-            description: 'Whether to specifically check for button selections (default: true)'
-          },
-          reasoning: {
-            type: 'string',
-            description: 'Explanation for why you are processing feedback'
-          }
-        },
-        required: ['reasoning'],
-        additionalProperties: false
-      },
-      strict: true
-    },
-    implementation: processLLMFeedback
-  },
   removeReaction: {
     type: "function",
     function: {
@@ -330,12 +320,27 @@ const toolRegistry = {
         type: 'object',
         properties: {
           emoji: {
-            type: 'string',
-            description: 'Emoji name to remove (without colons, e.g. "thumbsup")'
+            type: ['string', 'array'],
+            description: 'Emoji name to remove (without colons, e.g. "thumbsup") or array of emoji names',
+            items: {
+              type: 'string'
+            }
           },
           messageTs: {
             type: 'string',
-            description: 'Timestamp of the message to remove reaction from'
+            description: 'Timestamp of the message to remove reaction from (optional)'
+          },
+          message_ts: {
+            type: 'string',
+            description: 'Alternative parameter name for messageTs (optional)'
+          },
+          message_id: {
+            type: 'string',
+            description: 'ID of the message to remove reaction from (optional)'
+          },
+          channel_id: {
+            type: 'string',
+            description: 'Channel ID where the message is located (optional, will use current channel if not specified)'
           },
           reasoning: {
             type: 'string',
@@ -411,6 +416,5 @@ module.exports = {
   getVoteResults,
   getUserAvatar,
   addReaction,
-  removeReaction,
-  processLLMFeedback
+  removeReaction
 }; 

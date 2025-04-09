@@ -126,87 +126,6 @@ async function executeTool(toolName, args, threadId) {
     // Get context builder
     const contextBuilder = getContextBuilder();
     
-    // Special handling for getThreadHistory to prevent loops
-    if (toolName === 'getThreadHistory') {
-        // Check for previous failures
-        const recentExecutions = contextBuilder.getToolExecutionHistory(threadId, 5);
-        const recentFailures = recentExecutions.filter(
-            exec => exec.toolName === 'getThreadHistory' && exec.error
-        );
-        
-        if (recentFailures.length >= 2) {
-            logger.warn(`⚠️ LOOP PREVENTION: Blocking repeated getThreadHistory calls after ${recentFailures.length} failures`);
-            // Return helpful error message instead of executing the tool again
-            
-            // Record this as a skipped tool execution
-            const skippedResult = {
-                status: 'error',
-                error: 'REPEATED_FAILURES',
-                errorMessage: 'Multiple getThreadHistory failures detected',
-                suggestion: 'Please respond directly to the user with postMessage instead of trying to get thread history',
-                skipRetry: true,
-                skipped: true
-            };
-            
-            contextBuilder.recordToolExecution(threadId, toolName, args, skippedResult, null, true);
-            
-            return skippedResult;
-        }
-    }
-    
-    // Check if we've already executed this exact tool call
-    if (contextBuilder.hasExecuted(threadId, toolName, args)) {
-        logger.info(`Tool ${toolName} already executed with these args, skipping`);
-        
-        // Get the previous result
-        const previousResult = contextBuilder.getToolResult(threadId, toolName, args);
-        
-        // Enhanced error message for duplicate postMessage
-        if (toolName === 'postMessage') {
-            // Record this as a skipped execution, not an error but a special status
-            const skippedResult = {
-                ...previousResult,
-                status: previousResult.status || 'success',
-                skipped: true,
-                message: `You are trying to send a very similar or identical message to one already sent. If the user is asking for more information or clarification, please provide a substantially different and more detailed response. Focus on expanding on specific aspects the user might be asking about.`
-            };
-            
-            // Update context with this skipped execution
-            contextBuilder.recordToolExecution(threadId, toolName, args, skippedResult, null, true);
-            
-            // Get the user's most recent message to provide better context
-            const recentMessages = contextBuilder.getThreadMessages(threadId) || [];
-            const userMessages = recentMessages.filter(msg => msg.source === 'user');
-            const latestUserMessage = userMessages.length > 0 ? 
-                userMessages[userMessages.length - 1].text : 
-                'unknown message';
-            
-            // Add explicit system message for guidance - more specific to the user's query
-            contextBuilder.addMessage({
-                source: 'system',
-                text: `⚠️ SIMILAR MESSAGE DETECTED: You tried to send a message very similar to one you've already sent. The user's latest message was: "${latestUserMessage}". This likely means they're asking for more specific information or clarification. Please provide a NEW response with substantially different content that addresses their follow-up question more thoroughly.`,
-                timestamp: new Date().toISOString(),
-                threadTs: threadId,
-                type: 'warning'
-            });
-            
-            return skippedResult;
-        } else {
-            // For non-postMessage tools, use the standard skipped message
-            const skippedResult = {
-                ...previousResult,
-                status: previousResult.status || 'success',
-                skipped: true,
-                message: `This same tool call was already executed with identical parameters. Reusing previous result.`
-            };
-            
-            // Update context with this skipped execution
-            contextBuilder.recordToolExecution(threadId, toolName, args, skippedResult, null, true);
-            
-            return skippedResult;
-        }
-    }
-
     try {
         logger.info(`📣 Executing tool: ${toolName}`);
         
@@ -284,8 +203,18 @@ async function executeTool(toolName, args, threadId) {
             }
         }
 
-        // Right before the actual tool call
-        logger.info(`Executing tool ${toolName} with parameters: ${JSON.stringify(sanitizedArgs, null, 2)}`);
+        // Right before the actual tool call - avoid logging large argument objects for getThreadHistory
+        if (toolName === 'getThreadHistory') {
+            const simplifiedArgs = {
+                limit: sanitizedArgs.limit,
+                threadTs: sanitizedArgs.threadTs,
+                includeParent: sanitizedArgs.includeParent,
+                forceRefresh: sanitizedArgs.forceRefresh
+            };
+            logger.info(`Executing tool ${toolName} with parameters: ${JSON.stringify(simplifiedArgs, null, 2)}`);
+        } else {
+            logger.info(`Executing tool ${toolName} with parameters: ${JSON.stringify(sanitizedArgs, null, 2)}`);
+        }
 
         // Add tool tracing to global namespace for debugging
         if (!global.toolTraces) {
@@ -320,11 +249,26 @@ async function executeTool(toolName, args, threadId) {
             contextBuilder.setMetadata(threadId, 'recentMessages', recentMessages);
         }
         
-        // Record the tool execution in context builder
-        contextBuilder.recordToolExecution(threadId, toolName, sanitizedArgs, result);
+        // Record the tool execution in context builder, but create a summarized version of large results
+        if (toolName === 'getThreadHistory' && result) {
+            // Create a summarized version of the getThreadHistory result to prevent log bloat
+            const summarizedResult = {
+                messagesRetrieved: result.messagesRetrieved,
+                threadTs: result.threadTs,
+                channelId: result.channelId,
+                threadStats: result.threadStats,
+                indexInfo: result.indexInfo,
+                contextRebuilt: result.contextRebuilt,
+                fromCache: result.fromCache,
+                // Exclude full message content and formatted history to reduce log size
+                messagesCount: result.messages ? result.messages.length : 0
+            };
+            contextBuilder.recordToolExecution(threadId, toolName, sanitizedArgs, summarizedResult);
+        } else {
+            contextBuilder.recordToolExecution(threadId, toolName, sanitizedArgs, result);
+        }
         
         return result;
-
     } catch (error) {
         logger.warn(`❌ Tool execution failed: ${error.message}`);
         // Add more detailed error information
@@ -387,11 +331,30 @@ async function processThread(threadId) {
         let threadHistoryCalls = 0;
         let threadHistoryErrorCount = 0;
         
+        // Track consecutive similar operations to detect loops
+        let consecutiveSimilarOperations = 0;
+        let lastOperationType = null;
+        let waitingForFinishRequest = false;
+        let idleIterations = 0;
+        
         // Array to store recent messages to help detect duplicates
-        let recentMessages = [];
+        let recentMessages = contextBuilder.getMetadata(threadId, 'recentMessages') || [];
         
         // Check if this is a button selection
         const isButtonSelection = contextBuilder.getMetadata(threadId, 'isButtonSelection') || false;
+        
+        // Add a warning note if we're in a direct message with minimal context
+        if (context && context.isDirectMessage) {
+            const messages = contextBuilder.getThreadMessages(threadId) || [];
+            if (messages.length <= 2) {
+                contextBuilder.addMessage({
+                    source: 'system',
+                    text: `📝 NOTE: You are in a direct message with the user. Keep responses helpful and concise. Always complete your response by calling finishRequest.`,
+                    timestamp: new Date().toISOString(),
+                    threadTs: threadId
+                });
+            }
+        }
         
         // LLM-driven processing loop
         for (iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
@@ -421,6 +384,61 @@ async function processThread(threadId) {
                     break;
                 }
                 
+                // Check for idle iterations with no meaningful progress
+                if (messagePosted && iteration > 2 && idleIterations > 1) {
+                    logger.warn(`⚠️ Detected ${idleIterations} idle iterations after posting a message - auto-finishing request`);
+                    
+                    // Add explicit guidance message
+                    contextBuilder.addMessage({
+                        source: 'system',
+                        text: `⚠️ AUTO-FINISHING: The conversation has stalled after posting a message. The response has been completed and the request will be automatically finished. Next time, please call finishRequest directly after completing your response.`,
+                        timestamp: new Date().toISOString(),
+                        threadTs: threadId
+                    });
+                    
+                    // Auto-finish the request
+                    const finishTool = getTool('finishRequest');
+                    if (finishTool) {
+                        await finishTool({
+                            summary: "Auto-finishing after stalled conversation",
+                            reasoning: `Posted message but no finishRequest call after ${idleIterations} iterations`
+                        }, getThreadContext(threadId, context));
+                    }
+                    
+                    requestCompleted = true;
+                    break;
+                }
+                
+                // Add warning if waiting for finishRequest for too long
+                if (waitingForFinishRequest && iteration > 3) {
+                    logger.warn(`⚠️ Waiting for finishRequest for ${iteration - 3} iterations`);
+                    
+                    // After 2 iterations of waiting, force finishRequest
+                    if (iteration - 3 >= 2) {
+                        logger.warn(`🛑 Force finishing request after waiting too long`);
+                        
+                        // Add system message about forced completion
+                        contextBuilder.addMessage({
+                            source: 'system',
+                            text: `⚠️ IMPORTANT: Your response has been delivered, but you didn't call finishRequest to complete the interaction. Always call finishRequest after posting your response to the user.`,
+                            timestamp: new Date().toISOString(),
+                            threadTs: threadId
+                        });
+                        
+                        // Auto-finish the request
+                        const finishTool = getTool('finishRequest');
+                        if (finishTool) {
+                            await finishTool({
+                                summary: "Auto-finishing after response completed",
+                                reasoning: `Response was sent but finishRequest wasn't called`
+                            }, getThreadContext(threadId, context));
+                        }
+                        
+                        requestCompleted = true;
+                        break;
+                    }
+                }
+                
                 // Update iteration metadata
                 contextBuilder.setMetadata(threadId, 'iterations', iteration);
                 
@@ -440,240 +458,312 @@ async function processThread(threadId) {
                 // If we've already sent a message but haven't called finishRequest yet, add a note
                 if (messagePosted && iteration > 1) {
                     logger.info(`Already sent ${messagesSent} messages, but allowing LLM to continue processing`);
+                    
+                    // Set flag to indicate we're waiting for finishRequest
+                    waitingForFinishRequest = true;
+                    
+                    // Add explicit guidance if we're just waiting for finishRequest
+                    if (iteration === 3) {
+                        contextBuilder.addMessage({
+                            source: 'system',
+                            text: `⚠️ REMINDER: You've already responded to the user's request. Please call finishRequest now to complete this interaction.`,
+                            timestamp: new Date().toISOString(),
+                            threadTs: threadId
+                        });
+                    }
                 }
                 
                 // Get the next action from the LLM
                 const {toolCalls} = await getNextAction(threadId);
+                
+                // Track if this iteration produced meaningful actions
+                let meaningfulActionTaken = false;
                 
                 // Process each tool call
                 for (const {tool: toolName, parameters: args, reasoning} of toolCalls) {
                     // Add reasoning to args
                     args.reasoning = reasoning || args.reasoning;
                     
-                    // Check if this is an extra getThreadHistory call
-                    if (toolName === 'getThreadHistory') {
-                        threadHistoryCalls++;
+                    // Handle finishRequest specifically - this completes the conversation
+                    if (toolName === 'finishRequest') {
+                        logger.info('🏁 finishRequest called, completing conversation');
                         
-                        // Add warning if this is called multiple times
-                        if (threadHistoryCalls > 1) {
-                            const messages = contextBuilder.getThreadMessages(threadId) || [];
-                            const context = contextBuilder.getMetadata(threadId, 'context') || {};
-                            const isDirectMessage = context.isDirectMessage || false;
-                            
-                            // For DMs or simple threads, strongly discourage multiple history calls
-                            if (isDirectMessage && messages.length <= 2) {
-                                contextBuilder.addMessage({
-                                    source: 'system',
-                                    text: `⚠️ NOTE: You are in a direct message with only ${messages.length} messages. Thread history has already been loaded automatically. Multiple getThreadHistory calls are unnecessary and waste resources. Please respond directly to the user.`,
-                                    timestamp: new Date().toISOString(),
-                                    threadTs: threadId,
-                                    type: 'warning'
-                                });
-                            } else if (threadHistoryCalls > 2) {
-                                // Add strong warning after 3+ calls
-                                contextBuilder.addMessage({
-                                    source: 'system',
-                                    text: `⚠️ WARNING: getThreadHistory called ${threadHistoryCalls} times. This is excessive and inefficient. You already have the necessary context. Please focus on answering the user's query directly without requesting more history.`,
-                                    timestamp: new Date().toISOString(),
-                                    threadTs: threadId,
-                                    type: 'warning'
-                                });
-                            }
-                        }
+                        // Execute finish request
+                        await executeTool(toolName, args, threadId);
                         
-                        // Create a hard limit for thread history calls
-                        if (threadHistoryCalls > 3) {
-                            logger.warn(`⚠️ HARD LIMIT: getThreadHistory called ${threadHistoryCalls} times for thread ${threadId}`);
-                            
-                            // Record this as a skipped execution
-                            const skippedResult = {
-                                status: 'error',
-                                error: 'EXECUTION_LIMIT_REACHED',
-                                errorMessage: `Maximum getThreadHistory calls (3) reached for this conversation`,
-                                skipped: true,
-                                suggestion: 'You already have sufficient context. Please respond to the user without further history retrieval.'
-                            };
-                            
-                            contextBuilder.recordToolExecution(threadId, toolName, args, skippedResult, null, true);
-                            
-                            // Add explicit system message
-                            contextBuilder.addMessage({
-                                source: 'system',
-                                text: `⛔ BLOCKED: getThreadHistory has been called too many times (${threadHistoryCalls}). The tool is now disabled for this conversation. You have all necessary context - please respond to the user directly.`,
-                                timestamp: new Date().toISOString(),
-                                threadTs: threadId,
-                                type: 'error'
-                            });
-                            
-                            continue;
-                        }
+                        // Mark request as completed and exit loop
+                        requestCompleted = true;
+                        break;
                     }
-                    
-                    // For button selections, limit number of messages 
-                    if (isButtonSelection && toolName === 'postMessage') {
-                        buttonResponses++;
-                        if (buttonResponses > MAX_BUTTON_MESSAGES) {
-                            logger.info(`Reached maximum messages (${MAX_BUTTON_MESSAGES}) for button selection - stopping iterations`);
-                            requestCompleted = true;
-                            
-                            // Auto-finish the request
-                            const finishTool = getTool('finishRequest');
-                            if (finishTool) {
-                                await finishTool({
-                                    summary: "Button selection completed after first response message",
-                                    reasoning: "Button selection was already visually acknowledged - stopping iterations after first message"
-                                }, {
-                                    threadId: threadId,
-                                    threadTs: context.threadTs,
-                                    channelId: context.channelId,
-                                    addMessage: (message) => {
-                                        message.threadTs = threadId;
-                                        return contextBuilder.addMessage(message);
-                                    }
-                                });
-                            }
-                            
-                            break;
-                        }
-                    }
-                    
-                    // Process tool call
-                    let result;
-                    try {
-                        // Execute the tool
-                        result = await executeTool(toolName, args, threadId);
+
+                    // Handle postMessage - track that we've posted a message
+                    if (toolName === 'postMessage') {
+                        // This is a meaningful action
+                        meaningfulActionTaken = true;
                         
-                        // Reset error count on success
-                        if (toolName === 'getThreadHistory' && !result.error) {
-                            threadHistoryErrorCount = 0;
-                        }
-                        
-                        // Update metadata
-                        lastToolExecuted = toolName;
-                        
-                        // Track message posting
-                        if (toolName === 'postMessage' && result && result.ts) {
-                            messagePosted = true;
-                            messagesSent++;
+                        // If we execute this successfully, mark that we've posted a message
+                        try {
+                            const result = await executeTool(toolName, args, threadId);
                             
-                            // Store message text to detect duplicates
-                            if (args.text) {
-                                recentMessages.push({
-                                    text: args.text,
-                                    timestamp: Date.now()
-                                });
-                            }
-                            
-                            // Add system instruction after successful message posting
-                            try {
-                                const { formatTimestamp } = require('./toolUtils/dateUtils');
-                                let formattedTime = 'just now';
-                                try {
-                                    formattedTime = formatTimestamp(new Date());
-                                } catch (timeError) {
-                                    logger.warn(`Error formatting timestamp in processThread: ${timeError.message}`);
-                                }
+                            // If the message was actually sent (not skipped)
+                            if (result && !result.skipped) {
+                                messagePosted = true;
+                                messagesSent++;
                                 
+                                // Reset consecutive similar operations
+                                consecutiveSimilarOperations = 0;
+                                
+                                // Add a prompt to call finishRequest
                                 contextBuilder.addMessage({
                                     source: 'system',
-                                    text: `Message was successfully posted at ${formattedTime}. Decide if you want to call finishRequest to complete this user interaction or wait for user response.`,
+                                    text: `✅ Message sent successfully. Please call finishRequest now to complete this interaction.`,
                                     timestamp: new Date().toISOString(),
                                     threadTs: threadId
                                 });
-                            } catch (systemMsgError) {
-                                logger.warn(`Error adding system message after post: ${systemMsgError.message}`);
                             }
-                            
-                            logger.info(`✅ Message posted successfully (${messagesSent}/${MAX_MESSAGES_PER_REQUEST})`);
+                        } catch (error) {
+                            logger.error(`Error executing postMessage: ${error.message}`);
                         }
                         
-                        // Check for request completion
-                        if (toolName === 'finishRequest') {
-                            requestCompleted = true;
-                            logger.info("✅ Request completed with finishRequest");
-                            break;
-                        }
-                    } catch (error) {
-                        logger.warn(`❌ Tool execution error: ${error.message}`);
+                        // Update last operation for loop detection
+                        lastOperationType = 'postMessage';
+                    }
+                    // Handle other tools
+                    else {
+                        // Track if this tool call is similar to the previous one
+                        let isSimilarOperation = toolName === lastOperationType;
                         
-                        // Track getThreadHistory errors
+                        if (isSimilarOperation) {
+                            consecutiveSimilarOperations++;
+                            // If we're repeating the same operation too many times, it's likely a loop
+                            if (consecutiveSimilarOperations >= 3) {
+                                logger.warn(`⚠️ Loop detected: ${consecutiveSimilarOperations} consecutive ${toolName} calls`);
+                                
+                                // Add system message about loop detection
+                                contextBuilder.addMessage({
+                                    source: 'system',
+                                    text: `⚠️ LOOP DETECTED: You've called ${toolName} ${consecutiveSimilarOperations} times consecutively. Please respond to the user with postMessage and then call finishRequest.`,
+                                    timestamp: new Date().toISOString(),
+                                    threadTs: threadId
+                                });
+                                
+                                // If we've already posted a message, auto-finish to break the loop
+                                if (messagePosted) {
+                                    logger.warn(`🛑 Auto-finishing to break tool execution loop`);
+                                    
+                                    // Auto-finish the request
+                                    const finishTool = getTool('finishRequest');
+                                    if (finishTool) {
+                                        await finishTool({
+                                            summary: "Auto-finishing to break tool execution loop",
+                                            reasoning: `Detected ${consecutiveSimilarOperations} consecutive ${toolName} calls`
+                                        }, getThreadContext(threadId, context));
+                                    }
+                                    
+                                    requestCompleted = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            // Reset counter if we're doing a different operation
+                            consecutiveSimilarOperations = 0;
+                        }
+                        
+                        // Special handling for getThreadHistory
                         if (toolName === 'getThreadHistory') {
-                            threadHistoryErrorCount++;
-                            
-                            // After multiple failures, add stronger guidance
-                            if (threadHistoryErrorCount >= 2) {
-                                contextBuilder.addMessage({
-                                    source: 'system',
-                                    text: `⚠️ CRITICAL: Thread history retrieval has failed ${threadHistoryErrorCount} times. DO NOT try again. Instead, respond directly to the user using the postMessage tool.`,
-                                    timestamp: new Date().toISOString(),
-                                    threadTs: threadId
-                                });
+                            handleGetThreadHistory(args, threadId, context, threadHistoryCalls, threadHistoryErrorCount);
+                            threadHistoryCalls++;
+                        } else {
+                            // For other tools, execute normally
+                            try {
+                                await executeTool(toolName, args, threadId);
+                                meaningfulActionTaken = true;
+                            } catch (error) {
+                                logger.error(`Error executing ${toolName}: ${error.message}`);
+                                threadHistoryErrorCount++;
                             }
                         }
                         
-                        // Add error to context
-                        contextBuilder.addMessage({
-                            source: 'system',
-                            text: `ERROR executing ${toolName}: ${error.message}\n\nYou should handle this error appropriately and decide what to do next.`,
-                            timestamp: new Date().toISOString(),
-                            threadTs: threadId
-                        });
-                        
-                        // Continue with next iteration
-                        continue;
+                        // Update last operation type
+                        lastOperationType = toolName;
                     }
                 }
-            } catch (error) {
-                logger.warn(`Error processing thread: ${error.message}`);
-                logger.detail(error.stack);
                 
-                // Add error to context
-                contextBuilder.addMessage({
-                    source: 'system',
-                    text: `Error in thread processing: ${error.message}. Please try again with a different approach.`,
-                    timestamp: new Date().toISOString(),
-                    threadTs: threadId
-                });
+                // If the request is completed (finishRequest was called), exit the loop
+                if (requestCompleted) {
+                    break;
+                }
+                
+                // If no meaningful action was taken this iteration, increment idle counter
+                if (!meaningfulActionTaken) {
+                    idleIterations++;
+                } else {
+                    // Reset idle counter if we did something meaningful
+                    idleIterations = 0;
+                }
+                
+                // Special handling for button selections
+                if (isButtonSelection && buttonResponses === 0 && messagePosted) {
+                    // Auto-finish button selection responses after first message
+                    logger.info('Button selection response sent, auto-finishing request');
+                    
+                    // Auto-finish the request
+                    const finishTool = getTool('finishRequest');
+                    if (finishTool) {
+                        await finishTool({
+                            summary: "Auto-finishing after button selection response",
+                            reasoning: `Button selection response completed`
+                        }, getThreadContext(threadId, context));
+                    }
+                    
+                    requestCompleted = true;
+                    break;
+                }
+                
+            } catch (iterationError) {
+                logger.error(`Error in iteration ${iteration}: ${iterationError.message}`);
+                // Continue to next iteration
             }
         }
         
-        if (iteration >= MAX_ITERATIONS && !requestCompleted) {
-            logger.warn(`⚠️ Reached maximum iterations (${MAX_ITERATIONS}) without explicit finishRequest - auto-completing`);
+        // If we reached maximum iterations without completing the request, auto-finish
+        if (!requestCompleted) {
+            logger.warn(`⚠️ Reached maximum iterations (${MAX_ITERATIONS}) without completing request, auto-finishing`);
             
             try {
+                // If no message was posted, send a fallback message
+                if (!messagePosted) {
+                    logger.warn(`⚠️ No message posted after ${MAX_ITERATIONS} iterations, sending fallback message`);
+                    
+                    // Get basic context info
+                    const channel = context?.channelId;
+                    const threadTs = context?.threadTs;
+                    
+                    if (channel) {
+                        // Send a fallback message
+                        const postMessageTool = getTool('postMessage');
+                        if (postMessageTool) {
+                            await postMessageTool({
+                                text: "#header: I'm processing your request\n\n#section: I need a moment to complete this task. I'll get back to you shortly.",
+                                color: "#E01E5A",
+                                thread_ts: threadTs,
+                                reasoning: "Sending fallback message after reaching iteration limit"
+                            }, getThreadContext(threadId, context));
+                        }
+                    }
+                }
+                
                 // Auto-finish the request
                 const finishTool = getTool('finishRequest');
                 if (finishTool) {
                     await finishTool({
-                        summary: "Auto-completing after reaching maximum iterations",
-                        reasoning: "Maximum iterations reached without explicit finishRequest"
-                    }, {
-                        threadId: threadId,
-                        threadTs: context?.threadTs,
-                        channelId: context?.channelId,
-                        addMessage: (message) => {
-                            message.threadTs = threadId;
-                            return contextBuilder.addMessage(message);
-                        }
-                    });
+                        summary: "Auto-finishing after reaching maximum iterations",
+                        reasoning: `Reached iteration limit (${MAX_ITERATIONS})`
+                    }, getThreadContext(threadId, context));
                 }
-                
-                logger.info("Request finished with finishRequest tool");
             } catch (finishError) {
-                logger.error(`Error finishing request: ${finishError.message}`);
+                logger.error(`Error auto-finishing: ${finishError.message}`);
             }
         }
-    } catch (error) {
-        logger.error(`Error processing thread: ${error.message}`);
-        logger.detail(error.stack);
         
-        // Add error to context
-        contextBuilder.addMessage({
-            source: 'system',
-            text: `Error in thread processing: ${error.message}. Please try again with a different approach.`,
-            timestamp: new Date().toISOString(),
-            threadTs: threadId
-        });
+    } catch (error) {
+        logger.error(`Error processing thread ${threadId}: ${error.message}`);
+        logError('Error processing thread', error, { threadId });
+    }
+}
+
+/**
+ * Helper function to create a thread context object
+ */
+function getThreadContext(threadId, context) {
+    return {
+        threadId: threadId,
+        threadTs: context?.threadTs,
+        channelId: context?.channelId,
+        addMessage: (message) => {
+            message.threadTs = threadId;
+            return getContextBuilder().addMessage(message);
+        },
+        // Add getMetadata method to fix the error in postMessage
+        getMetadata: (key) => {
+            if (key === 'context') {
+                return context;
+            }
+            return context?.[key];
+        }
+    };
+}
+
+/**
+ * Handle special processing for getThreadHistory tool
+ */
+function handleGetThreadHistory(args, threadId, context, callCount, errorCount) {
+    // Check if this is an extra getThreadHistory call
+    if (callCount > 0) {
+        const contextBuilder = getContextBuilder();
+        
+        // Add warning if this is called multiple times
+        if (callCount > 1) {
+            const messages = contextBuilder.getThreadMessages(threadId) || [];
+            const isDirectMessage = context?.isDirectMessage || false;
+            
+            // For DMs or simple threads, strongly discourage multiple history calls
+            if (isDirectMessage && messages.length <= 2) {
+                contextBuilder.addMessage({
+                    source: 'system',
+                    text: `⚠️ NOTE: You are in a direct message with only ${messages.length} messages. Thread history has already been loaded automatically. Multiple getThreadHistory calls are unnecessary and waste resources. Please respond directly to the user.`,
+                    timestamp: new Date().toISOString(),
+                    threadTs: threadId,
+                    type: 'warning'
+                });
+            } else if (callCount > 2) {
+                // Add strong warning after 3+ calls
+                contextBuilder.addMessage({
+                    source: 'system',
+                    text: `⚠️ WARNING: getThreadHistory called ${callCount} times. This is excessive and inefficient. You already have the necessary context. Please focus on answering the user's query directly without requesting more history.`,
+                    timestamp: new Date().toISOString(),
+                    threadTs: threadId,
+                    type: 'warning'
+                });
+            }
+        }
+        
+        // Create a hard limit for thread history calls
+        if (callCount > 3) {
+            logger.warn(`⚠️ HARD LIMIT: getThreadHistory called ${callCount} times for thread ${threadId}`);
+            
+            // Record this as a skipped execution
+            const skippedResult = {
+                status: 'error',
+                error: 'EXECUTION_LIMIT_REACHED',
+                errorMessage: `Maximum getThreadHistory calls (3) reached for this conversation`,
+                skipped: true,
+                suggestion: 'You already have sufficient context. Please respond to the user without further history retrieval.'
+            };
+            
+            // Record the skipped execution
+            contextBuilder.recordToolExecution(threadId, 'getThreadHistory', args, skippedResult, null, true);
+            
+            // Add explicit system message
+            contextBuilder.addMessage({
+                source: 'system',
+                text: `⚠️ LIMIT REACHED: You've called getThreadHistory ${callCount} times. This tool is being blocked to prevent inefficient usage. Please use the existing context and respond to the user.`,
+                timestamp: new Date().toISOString(),
+                threadTs: threadId,
+                type: 'error_notice'
+            });
+            
+            // Return the skipped result instead of executing the tool
+            return skippedResult;
+        }
+    }
+    
+    // Execute the tool normally
+    try {
+        return executeTool('getThreadHistory', args, threadId);
+    } catch (error) {
+        logger.error(`Error executing getThreadHistory: ${error.message}`);
+        throw error;
     }
 }
 

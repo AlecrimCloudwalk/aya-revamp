@@ -231,6 +231,8 @@ function calculateTextSimilarity(text1, text2) {
  */
 async function postMessage(args, threadState) {
   let messageParams;
+  let channelId;
+  let threadTs; // Define threadTs at function scope so it's available in catch block
   
   try {
     // Log the tool call and reasoning
@@ -353,8 +355,8 @@ async function postMessage(args, threadState) {
     
     // Get required context info
     const context = threadState.getMetadata('context');
-    const channelId = getChannelId(args, threadState);
-    const threadTs = getThreadTs(args, threadState);
+    channelId = getChannelId(args, threadState);
+    threadTs = getThreadTs(args, threadState); // Assign to the function-scope variable
     
     if (!channelId) {
       throw new Error('Channel ID not found in thread context');
@@ -509,7 +511,7 @@ async function postMessage(args, threadState) {
           source: 'system',
           id: `error_${Date.now()}`,
           timestamp: new Date().toISOString(),
-          threadTs: threadTs,
+          threadTs: threadTs, // Now threadTs is defined at function scope
           text: `Error posting message: ${error.message}`,
           type: 'error',
           metadata: {

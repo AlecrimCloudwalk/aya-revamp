@@ -99,4 +99,58 @@ See `docs/LLM_DEBUGGING.md` for detailed information on the debugging capabiliti
 
 ## License
 
-MIT 
+MIT
+
+## System Prompt Organization
+
+The system prompts for the LLM are centralized in a single module to avoid duplication and inconsistency:
+
+### Key Files
+
+- **`src/prompts/aya.js`**: The central location for all system prompt content. This module includes:
+  - Personality configuration 
+  - Complete system prompt text (previously in system_prompt_updated.md)
+  - Technical guidelines for tool calls
+  - Emoji reaction guidelines
+  - Formatting guidelines
+  - Tool call examples
+
+### Exports and Functions
+
+The aya.js module exports several constants and functions:
+
+```javascript
+// Constants
+PERSONALITY                // Basic personality config
+TECHNICAL_GUIDELINES       // Technical formatting requirements
+PERSONALITY_TRAITS         // Personality traits for the chatbot
+EMOJI_REACTION_GUIDELINES  // Guidelines for emoji reactions
+CUSTOM_EMOJIS              // List of custom workspace emojis
+FORMATTING_GUIDELINES      // Formatting guidelines for messages
+TOOL_CALL_EXAMPLES         // Example tool calls
+COMPLETE_SYSTEM_PROMPT     // The entire system prompt content
+
+// Functions
+generatePersonalityPrompt()  // Creates the main personality prompt
+getCompleteSystemPrompt()    // Gets the full system prompt
+generateTechnicalAppendix()  // Creates the technical appendix
+getFormattedEmojiList()      // Formats the list of custom emojis
+```
+
+### Usage
+
+The centralized prompts are used in two main places:
+
+1. **`src/llmInterface.js`**: Uses the system prompt and technical guidelines for API calls
+2. **`src/contextBuilder.js`**: Uses the personality prompt for message context
+
+## Future Changes to System Prompts
+
+When making changes to the system prompts:
+
+1. **DO NOT** modify inline prompts in contextBuilder.js or llmInterface.js
+2. **DO** update the appropriate section in `src/prompts/aya.js`
+3. Any feature-specific content should be organized into logical sections in aya.js
+4. For extensive changes to the main system prompt, modify the `COMPLETE_SYSTEM_PROMPT` constant
+
+This monolithic structure helps maintain consistency across the application and prevents duplicate or conflicting prompt content. 

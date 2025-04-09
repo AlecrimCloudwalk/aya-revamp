@@ -103,6 +103,68 @@ function info(message) {
 }
 
 /**
+ * Truncate and summarize large objects for logging
+ * @param {Object} obj - Object to summarize
+ * @param {number} maxDepth - Maximum depth to traverse
+ * @param {number} maxLength - Maximum length for arrays/strings
+ * @returns {Object} - Summarized object
+ */
+function summarizeObject(obj, maxDepth = 2, maxLength = 5) {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  
+  // If not an object, return as is if it's not a long string
+  if (typeof obj !== 'object') {
+    if (typeof obj === 'string' && obj.length > 100) {
+      return obj.substring(0, 100) + '... [truncated, length: ' + obj.length + ']';
+    }
+    return obj;
+  }
+  
+  // Don't go deeper than maxDepth
+  if (maxDepth <= 0) {
+    if (Array.isArray(obj)) {
+      return `[Array with ${obj.length} items]`;
+    }
+    return `{Object with ${Object.keys(obj).length} keys}`;
+  }
+  
+  // Handle arrays - truncate and summarize
+  if (Array.isArray(obj)) {
+    if (obj.length <= maxLength) {
+      return obj.map(item => summarizeObject(item, maxDepth - 1, maxLength));
+    }
+    // For larger arrays, only show a few items and indicate there are more
+    const truncated = obj.slice(0, maxLength).map(item => summarizeObject(item, maxDepth - 1, maxLength));
+    truncated.push(`... ${obj.length - maxLength} more items`);
+    return truncated;
+  }
+  
+  // Handle objects - summarize each property
+  const result = {};
+  const keys = Object.keys(obj);
+  
+  // If there are too many keys, summarize
+  if (keys.length > maxLength) {
+    // Take the first few keys
+    for (let i = 0; i < maxLength; i++) {
+      if (i < keys.length) {
+        result[keys[i]] = summarizeObject(obj[keys[i]], maxDepth - 1, maxLength);
+      }
+    }
+    result['__summary'] = `...${keys.length - maxLength} more keys`;
+  } else {
+    // Process all keys if within limit
+    for (const key of keys) {
+      result[key] = summarizeObject(obj[key], maxDepth - 1, maxLength);
+    }
+  }
+  
+  return result;
+}
+
+/**
  * Log detailed messages (shown in VERBOSE and above)
  * @param {string} message - Log message
  * @param {Object} [data] - Optional data to log
@@ -117,6 +179,16 @@ function detail(message, data) {
     }
     
     if (data !== undefined && SHOW_DETAILS) {
+      // Check for large objects that might need summarization
+      if (data && typeof data === 'object') {
+        // If the stringified data would be very large, summarize it
+        const jsonStr = JSON.stringify(data);
+        if (jsonStr.length > 1000) {
+          console.log("(Large object summarized)");
+          console.log(JSON.stringify(summarizeObject(data), null, 2));
+          return;
+        }
+      }
       console.log(JSON.stringify(data, null, 2));
     }
   }
@@ -137,6 +209,16 @@ function debug(message, data) {
     }
     
     if (data !== undefined) {
+      // Check for large objects that might need summarization
+      if (data && typeof data === 'object') {
+        // If the stringified data would be very large, summarize it
+        const jsonStr = JSON.stringify(data);
+        if (jsonStr.length > 1000) {
+          console.log("(Large object summarized)");
+          console.log(JSON.stringify(summarizeObject(data), null, 2));
+          return;
+        }
+      }
       console.log(JSON.stringify(data, null, 2));
     }
   }
@@ -246,5 +328,6 @@ module.exports = {
   detail,
   debug,
   logMessageStructure,
-  logButtonClick
+  logButtonClick,
+  summarizeObject
 }; 

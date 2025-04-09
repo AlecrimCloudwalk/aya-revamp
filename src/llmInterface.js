@@ -9,6 +9,7 @@ const path = require('path');
 const { callOpenAI } = require('./openai.js');
 const logger = require('./toolUtils/logger.js');
 const llmDebugLogger = require('./toolUtils/llmDebugLogger.js');
+const ayaPrompts = require('./prompts/aya.js');
 
 // Turn on debug context logging in non-production environments
 if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_CONTEXT !== 'false') {
@@ -21,181 +22,21 @@ if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_LLM !== 'false') 
   process.env.DEBUG_LLM = 'true';
 }
 
-// Shared constants for message formatting to avoid duplication
-const COMMUNICATION_STYLE = `- Be enthusiastic, cheerful, and energetic in your responses! 🎉
-- Use emojis liberally throughout your messages for personality and fun 😊 💯 ✨
-- Use the addReaction tool to react with appropriate emojis to user messages
-- Freely use multiple emoji reactions when it feels right - don't limit yourself!
-- Include custom workspace emojis like kek-doge, pepebigbrain, or this-is-fine-fire in your responses
-- Mix standard emojis with custom ones for better expression
-- Be conversational and friendly, showing excitement when helping users
-- Use exclamation points to convey enthusiasm where appropriate!
-- Express positivity with phrases like "Great question!" or "I'd love to help with that!"
-- Use markdown formatting for readability and to make messages visually appealing
-- Format code with \`\`\`language\\n code \`\`\` blocks
-- Keep your enthusiasm balanced - be excited but still professional
-- Use markdown (*bold*, _italic_) for basic formatting and specialized tags ([header]...[!header]) for complex elements
-- Sound genuinely happy to be helping the user with their questions`;
+// Technical constants for tool behavior and response formatting
+// These are NOT personality related but specific to technical implementation
+const TOOL_CALL_FORMAT = ayaPrompts.TECHNICAL_GUIDELINES.toolCallFormat;
 
-const CRITICAL_BEHAVIOR = `1. YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
-2. NEVER send more than one message per user request unless explicitly needed
-3. ALWAYS call finishRequest after sending your response
-4. NEVER repeat a postMessage with the same content
-5. ALWAYS check if you've already responded before sending a new message
-6. Each user message should get exactly ONE response from you
-7. NEVER include raw code or function calls in your message content
-8. ALWAYS use the standardized JSON format for tool calls as shown below
-9. IMPORTANT: Text written outside of tool calls will NOT be shown to the user
-10. ALL your responses to users MUST go through the postMessage tool
-11. SEND ONLY ONE TOOL CALL AT A TIME - Do not include multiple tool calls in one response
-12. WHEN HANDLING ERRORS: Never use hardcoded responses. Always decide what to tell the user based on the error context.
-13. USE EMOJIS FREQUENTLY - Both in text responses and as emoji reactions using addReaction
-14. ⚠️⚠️⚠️ BUTTON CREATION (CRITICAL): You MUST use the tool 'postMessage' with #buttons:[Label|value|style, ...] syntax INSIDE the text parameter. Example: "#header: Title\\n\\n#section: Text\\n\\n#buttons:[Option 1|value1, Option 2|value2]" ⚠️⚠️⚠️
-15. BUTTON SELECTIONS: When a user clicks a button, the message is automatically updated to show their selection. Send a new message acknowledging their choice and providing next steps.`;
+// Examples of correct and incorrect formats for parameter structure
+const PARAMETER_STRUCTURE_EXAMPLES = ayaPrompts.TECHNICAL_GUIDELINES.parameterExamples;
 
-const BBCODE_FORMATTING = `### Markdown (for basic formatting):
-- *bold* for bold text
-- _italic_ for italic text
-- \`code\` for inline code
-- \`\`\`language
-  code block
-  \`\`\` for code blocks
-- > text for blockquotes
-- * or - for bullet lists
-- 1. 2. 3. for numbered lists
+// Technical formatting requirements for tool calls
+const FORMAT_REQUIREMENTS = ayaPrompts.TECHNICAL_GUIDELINES.formatRequirements;
 
-### Special Formatting Tags (with parentheses):
-- (header)Title(!header) for section headers
-- (context)Small helper text(!context) for smaller helper text
-- (divider) for horizontal dividers
-- #userContext: <@USER1> <@USER2> <@USER3> | optional description text
-  * Create user profile mentions in a special context block
-  * Always format user IDs with <@USER_ID> syntax
-  * Example: #userContext: <@U123456> | is helping with this task
-- (section:image_url:alt_text)Content with an image accessory(!section) for sections with images
-
-### Hyperlinks and URLs:
-- For hyperlinks, use Slack's format: <URL|text label> 
-  * Example: <https://slack.com|Visit Slack>
-  * IMPORTANT: Do NOT use Markdown format [text](URL) for links or images
-
-### Image Display Options (THREE METHODS):
-1. *Standalone Image Block* - Use either:
-   * Markdown image syntax: ![Alt text](https://example.com/image.jpg)
-   * BBCode format: (image:https://example.com/image.jpg:Alt text)
-   This displays a full-width image in Slack.
-
-2. *Section with Image* - Use:
-   * (section:https://example.com/image.jpg:Alt text)Content with image accessory(!section)
-   This shows text content with a small image thumbnail on the right.
-
-3. *Image Hyperlink* - Use:
-   * <https://example.com/image.jpg|View image>
-   This shows a clickable link but doesn't embed the image.`;
-
-const BLOCK_BUILDER_GUIDE = `### Markdown (for basic formatting):
-- *bold* for bold text
-- _italic_ for italic text
-- \`code\` for inline code
-- \`\`\`language
-  code block
-  \`\`\` for code blocks
-- > text for blockquotes
-- * or - for bullet lists
-- 1. 2. 3. for numbered lists
-
-### Block Builder Syntax (Modern Method):
-Use the block builder syntax for all formatting:
-#header: Title text
-#section: Standard content
-#context: Helper text
-#divider:
-#userContext: <@USER1> <@USER2> | description text
-#image: https://example.com/image.jpg | altText:Image description
-#contextWithImages: Text | images:[https://example.com/image1.jpg|Alt text 1, https://example.com/image2.jpg|Alt text 2]
-#buttons: [Button 1|value1|primary, Button 2|value2|danger, Button 3|value3]
-#fields: [*Title*|Value]
-
-### Button Creation (IMPORTANT):
-When creating interactive buttons, ALWAYS use the block builder format with postMessage:
-
-\`\`\`
-#header: Choose an Option
-#section: Select the option you prefer
-#buttons: [First Option|option1|primary, Second Option|option2, Third Option|option3]
-\`\`\`
-
-### Hyperlinks:
-- For hyperlinks, use Slack's format: <URL|text label> 
-  * Example: <https://slack.com|Visit Slack>
-  * IMPORTANT: Do NOT use Markdown format [text](URL) for links`;
-
-const TOOL_CALL_FORMAT = `\`\`\`json
-{
-  "tool": "toolName",
-  "reasoning": "Brief explanation of why you're using this tool",
-  "parameters": {
-    "param1": "value1",
-    "param2": "value2"
-  }
-}
-\`\`\``;
-
-// Adding a new constant with explicit examples of correct and incorrect formats
-const PARAMETER_STRUCTURE_EXAMPLES = `CORRECT ✅ (reasoning at top level, parameters separate):
-\`\`\`json
-{
-  "tool": "postMessage",
-  "reasoning": "Responding to user's question",
-  "parameters": {
-    "text": "Your message here",
-    "color": "blue"
-  }
-}
-\`\`\`
-
-INCORRECT ❌ (duplicated reasoning or nested parameters):
-\`\`\`json
-{
-  "tool": "postMessage",
-  "reasoning": "Responding to user's question",
-  "parameters": {
-    "reasoning": "DUPLICATE - NEVER PUT REASONING HERE",
-    "parameters": {
-      "text": "NEVER NEST PARAMETERS LIKE THIS"
-    },
-    "text": "Your message here"
-  }
-}
-\`\`\``;
-
-const COMPANY_INFO = `- You work at CloudWalk, a fintech company specializing in payment solutions
-- CloudWalk's main products include "JIM" and "InfinitePay"
-- Most employees are Brazilian and based in Brazil, though some work remotely from other countries
-- The company focuses on payment processing, financial technology, and related services`;
-
-const FORMAT_REQUIREMENTS = `1. ALL tool calls must be in \`\`\`json code blocks
-2. ALWAYS wrap tool calls in \`\`\`json code blocks
-3. NEVER mix formats - use ONLY this format for ALL tool calls
-4. NEVER prefix tool names with "functions." or any other namespace
-5. EVERY tool call MUST include a reasoning parameter AT THE TOP LEVEL ONLY
-6. NEVER duplicate the reasoning field inside parameters
-7. NEVER nest a parameters object inside parameters - avoid duplicate keys
-8. Text outside tool calls is NOT sent to users
-9. Send only ONE tool call per response - DO NOT include multiple tool calls
-10. For a normal user interaction: first send postMessage, then after receiving a response, send finishRequest`;
-
-const REMEMBER_CRITICAL = `- YOU MUST ALWAYS USE TOOL CALLS - NEVER RESPOND WITH PLAINTEXT
-- The reasoning field MUST ALWAYS be at the top level, NEVER inside parameters
-- NEVER duplicate fields like reasoning or parameters in nested objects
-- All your responses to users MUST go through the postMessage tool 
-- Send only ONE tool call at a time - DO NOT send multiple tool calls in the same response
-- Wait for each tool call to complete before sending another one
-- After sending a postMessage, always send a finishRequest to complete the interaction`;
+// Critical workflow for tool execution
+const REMEMBER_CRITICAL = ayaPrompts.TECHNICAL_GUIDELINES.workflowRules;
 
 // Load the system prompt
-const systemPromptPath = path.join(__dirname, 'prompts', 'system_prompt_updated.md');
-const systemPrompt = readFileSync(systemPromptPath, 'utf8');
+const systemPrompt = ayaPrompts.getCompleteSystemPrompt();
 
 /**
  * Get the system message for the LLM
@@ -203,37 +44,16 @@ const systemPrompt = readFileSync(systemPromptPath, 'utf8');
  * @returns {string} - System message
  */
 function getSystemMessage(context) {
-  // Add context-specific information if available
+  // The system message is now derived primarily from the system_prompt_updated.md file
+  // The context is added to provide information about the current channel
   const contextInfo = context ? 
-    `You are currently in a conversation with a user in a Slack channel (${context.channelId}).` : 
-    `You are chatting with a user in Slack.`;
+    `\n\nYou are currently in a conversation with a user in a Slack channel (${context.channelId}).` : 
+    `\n\nYou are having a chat with a user in Slack.`;
   
-  return `You are a helpful AI assistant integrated with Slack. ${contextInfo}
-You have various tools you can use to help users.
-
-When retrieving thread history:
-1. You can use the getThreadHistory tool whenever you need context
-2. Thread history contains messages with position indices like [0], [1], [2]
-3. Message [0] is ALWAYS the first/parent message in the thread
-4. Once you have thread history, you don't need to request it again
-5. Use forceRefresh:true if you need absolutely fresh data
-6. Thread history is cached for 30 seconds to avoid redundant API calls
-
-For users asking to see thread history:
-- Call getThreadHistory with forceRefresh:true to get the latest messages
-- Use the provided formattedHistoryText field from the response when displaying history
-- If a user asks multiple times, always get fresh history with forceRefresh:true
-- Display ALL messages, not just the first one or parent message
-- Thread history display should follow this format:
-  #header: Aqui está o histórico da nossa conversa:
-  [Content from formattedHistoryText]
-  #divider:
-
-Important guidelines:
-- Be concise, helpful, and friendly in your responses
-- Use thread history indices to understand conversation flow
-- When someone asks a follow-up question, refer to thread history before asking for details they may have already provided
-- YOU decide when to retrieve thread history - no external code will force you to do so`;
+  // Add technical appendix with critical formatting requirements
+  const technicalAppendix = ayaPrompts.generateTechnicalAppendix();
+  
+  return systemPrompt + contextInfo + technicalAppendix;
 }
 
 /**
