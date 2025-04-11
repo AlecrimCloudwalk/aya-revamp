@@ -36,6 +36,9 @@ async function callOpenAI(params) {
         
         // Handle tools and tool_choice according to OpenAI's latest API
         if (params.tools && params.tools.length > 0) {
+            // Log tool schemas for debugging
+            logger.info(`Providing ${params.tools.length} tools to OpenAI API`);
+
             // Tools are already in the correct format from the tool registry
             requestBody.tools = params.tools;
             
@@ -65,8 +68,18 @@ async function callOpenAI(params) {
         // Log request details
         logger.info(`Using model: ${model}`);
         logger.info(`API URL: ${LLM_API_URL || 'https://api.openai.com/v1/chat/completions'}`);
+        
+        // Enhanced logging: log full messages and request body
+        logger.info('=== FULL MESSAGES BEING SENT TO LLM ===');
+        logger.info(JSON.stringify(params.messages, null, 2));
+        logger.info('=== FULL REQUEST BODY ===');
+        logger.info(JSON.stringify(requestBody, null, 2));
+        
         // Use the new llmDebugLogger for comprehensive request logging
-        llmDebugLogger.logRequest(threadId, params.messages, params.tools || []);
+        llmDebugLogger.logRequest(threadId, params);
+        
+        // Track the start time for performance monitoring
+        const startTime = Date.now();
         
         // Make request to OpenAI API
         const response = await fetch(
@@ -83,6 +96,10 @@ async function callOpenAI(params) {
         
         // Parse response
         const data = await response.json();
+        
+        // Enhanced response logging
+        logger.info('=== FULL OPENAI API RESPONSE ===');
+        logger.info(JSON.stringify(data, null, 2));
         
         // Use the new llmDebugLogger for comprehensive response logging
         llmDebugLogger.logResponse(threadId, data);

@@ -1,106 +1,69 @@
 const { getSlackClient } = require('../slackClient.js');
-const { createToolError } = require('../errors.js');
+const { logError } = require('../errors.js');
+const logger = require('../toolUtils/logger.js');
 
 /**
- * Gets a user's avatar URL from their user ID
- * @param {Object} args - Tool arguments
- * @param {string} args.userId - The Slack user ID to get avatar for
- * @param {string} [args.size] - The size of avatar to return (24, 32, 48, 72, 192, 512, 1024, or 'original')
- * @param {Object} threadState - The current thread state
- * @returns {Promise<Object>} - The result of the operation containing user info and avatar URLs
+ * Gets a user's avatar URL from their Slack user ID
+ * @param {string} userId - Slack user ID to get avatar for
+ * @param {string} [size=512] - Avatar size (one of: 24, 32, 48, 72, 192, 512, 1024)
+ * @param {Object} threadContext - Thread context with connection info
+ * @returns {Promise<Object>} - Object containing the avatar URL
  */
-async function getUserAvatar(args, threadState) {
+async function getUserAvatar(userId, size = 512, threadContext) {
   try {
-    const { userId, size = '192' } = args;
-    
     if (!userId) {
-      throw createToolError('Missing required parameter: userId', 'MISSING_PARAMETER');
+      return { 
+        error: "Missing required parameter: userId",
+        status: "error"
+      };
     }
     
-    // Valid sizes for Slack avatars
-    const validSizes = ['24', '32', '48', '72', '192', '512', '1024', 'original'];
-    const requestedSize = size.toString();
+    // Validate size
+    const validSizes = [24, 32, 48, 72, 192, 512, 1024];
+    const sizeInt = parseInt(size, 10);
+    const validatedSize = validSizes.includes(sizeInt) ? sizeInt : 512;
     
-    if (!validSizes.includes(requestedSize)) {
-      throw createToolError(
-        `Invalid size parameter: ${size}. Valid values are: ${validSizes.join(', ')}`,
-        'INVALID_PARAMETER'
-      );
+    // Get slack client
+    const slackClient = getSlackClient();
+    
+    // Get user info
+    const userInfo = await slackClient.users.info({ user: userId });
+    
+    if (!userInfo.ok || !userInfo.user) {
+      return {
+        error: "Could not retrieve user information",
+        status: "error"
+      };
     }
     
-    const client = getSlackClient();
-    
-    // Call the users.info API method
-    const response = await client.users.info({
-      user: userId
-    });
-    
-    if (!response.ok) {
-      throw createToolError(`Failed to get user info: ${response.error}`, 'API_ERROR');
+    // Get avatar URL
+    const avatar = userInfo.user.profile.image_original || 
+                 userInfo.user.profile[`image_${validatedSize}`] ||
+                 userInfo.user.profile.image_72;
+                 
+    if (!avatar) {
+      return {
+        error: "No avatar found for user",
+        status: "error"
+      };
     }
     
-    const user = response.user;
-    
-    // Extract avatar URLs from the user's profile
-    const avatarUrls = {};
-    
-    if (user.profile) {
-      // Add all available avatar URLs to the response
-      validSizes.forEach(s => {
-        const key = s === 'original' ? 'image_original' : `image_${s}`;
-        if (user.profile[key]) {
-          avatarUrls[s] = user.profile[key];
-        }
-      });
-      
-      // If the requested size doesn't exist, use the closest available size
-      if (!avatarUrls[requestedSize]) {
-        const availableSizes = Object.keys(avatarUrls).filter(s => s !== 'original');
-        if (availableSizes.length > 0) {
-          // Sort sizes numerically
-          availableSizes.sort((a, b) => parseInt(a) - parseInt(b));
-          
-          // Find the closest available size
-          let closestSize = availableSizes[0];
-          const requestedSizeNum = parseInt(requestedSize);
-          if (!isNaN(requestedSizeNum)) {
-            for (const s of availableSizes) {
-              if (parseInt(s) >= requestedSizeNum) {
-                closestSize = s;
-                break;
-              }
-            }
-          }
-          
-          // Add a note about using an alternative size
-          avatarUrls.note = `Requested size ${requestedSize} not available, using ${closestSize} instead`;
-        }
-      }
-    }
-    
+    // Return the avatar URL
     return {
-      ok: true,
-      user: {
-        id: user.id,
-        name: user.name,
-        real_name: user.real_name,
-        display_name: user.profile?.display_name
-      },
-      avatar_urls: avatarUrls,
-      requested_size: requestedSize,
-      avatar_url: avatarUrls[requestedSize] || avatarUrls.original || null
+      avatar_url: avatar,
+      user_id: userId,
+      user_name: userInfo.user.real_name || userInfo.user.name,
+      status: "success"
     };
-  } catch (error) {
-    // Handle errors and return an appropriate response
-    if (error.name === 'ToolError') {
-      throw error;
-    }
     
-    throw createToolError(
-      `Error getting user avatar: ${error.message}`,
-      'TOOL_EXECUTION_ERROR'
-    );
+  } catch (error) {
+    logError('Error getting user avatar', error, { userId });
+    return {
+      error: `Failed to get user avatar: ${error.message}`,
+      status: "error"
+    };
   }
 }
 
+// Export the function directly to avoid circular dependencies
 module.exports = getUserAvatar; 

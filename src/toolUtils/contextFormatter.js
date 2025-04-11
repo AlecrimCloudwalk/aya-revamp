@@ -161,38 +161,50 @@ function formatUserEntry(entry) {
  * @returns {string} Formatted assistant message
  */
 function formatAssistantEntry(entry) {
-  const { toolCall, reasoning } = entry.content;
   const prefix = USE_EMOJIS ? EMOJIS.assistant : SYMBOLS.assistant;
   const timePrefix = USE_EMOJIS ? EMOJIS.time : SYMBOLS.time;
   const reasoningPrefix = USE_EMOJIS ? EMOJIS.reasoningPrefix : SYMBOLS.reasoningPrefix;
-  
-  // Get appropriate emoji/symbol for this tool
-  const toolSymbol = USE_EMOJIS 
-    ? (EMOJIS.toolCalls[toolCall] || EMOJIS.toolCalls.default)
-    : (SYMBOLS.toolCalls[toolCall] || SYMBOLS.toolCalls.default);
   
   let result = [
     `${prefix} Assistant [Turn ${entry.turn}]`,
     `${timePrefix} ${entry.timestamp}`
   ];
   
-  // Format based on tool type
-  if (toolCall === 'postMessage') {
-    result.push(`${toolSymbol} ${toolCall}:`);
-    result.push(`   "${entry.content.text}"`);
-  } else {
-    // Format other tool calls with any parameters
-    const params = Object.entries(entry.content)
-      .filter(([key]) => key !== 'toolCall' && key !== 'reasoning')
-      .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
-      .join(', ');
+  // Handle different content types properly
+  if (typeof entry.content === 'string') {
+    // Simple string content
+    result.push(`${entry.content.substring(0, 100)}${entry.content.length > 100 ? '...' : ''}`);
+  } else if (typeof entry.content === 'object' && entry.content !== null) {
+    // Object content (likely a tool call)
+    const toolCall = entry.content.toolCall || entry.content.tool;
+    const reasoning = entry.content.reasoning;
     
-    result.push(`${toolSymbol} ${toolCall}${params ? ` (${params})` : ''}`);
-  }
-  
-  // Add reasoning if present
-  if (reasoning) {
-    result.push(`   ${reasoningPrefix}Reason: ${reasoning}`);
+    // Get appropriate emoji/symbol for this tool
+    const toolSymbol = USE_EMOJIS 
+      ? (EMOJIS.toolCalls[toolCall] || EMOJIS.toolCalls.default)
+      : (SYMBOLS.toolCalls[toolCall] || SYMBOLS.toolCalls.default);
+    
+    // Format based on tool type
+    if (toolCall === 'postMessage' || entry.content.text) {
+      result.push(`${toolSymbol} ${toolCall || 'Message'}:`);
+      result.push(`   "${entry.content.text || '[No message text]'}"`);
+    } else {
+      // Format other tool calls with any parameters
+      const params = Object.entries(entry.content)
+        .filter(([key]) => key !== 'toolCall' && key !== 'tool' && key !== 'reasoning')
+        .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
+        .join(', ');
+      
+      result.push(`${toolSymbol} ${toolCall || 'Unknown tool'}${params ? ` (${params})` : ''}`);
+    }
+    
+    // Add reasoning if present
+    if (reasoning) {
+      result.push(`   ${reasoningPrefix}Reason: ${reasoning}`);
+    }
+  } else {
+    // Fallback for unexpected content type
+    result.push(`[Unknown content format]`);
   }
   
   return result.join('\n');

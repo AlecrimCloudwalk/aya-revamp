@@ -239,7 +239,17 @@ function logMessageStructure(messageParams, label = 'MESSAGE') {
   if (LOG_LEVEL >= LOG_LEVELS.NORMAL) {
     const blockCount = messageParams.blocks?.length || 0;
     const attachmentCount = messageParams.attachments?.length || 0;
+    
+    // Log message parameter basics
     info(`${label}: ${blockCount} blocks, ${attachmentCount} attachments`);
+    
+    // Show text preview if available (never the full text)
+    if (messageParams.text && typeof messageParams.text === 'string' && messageParams.text.trim()) {
+      const textPreview = messageParams.text.length > 50 ? 
+                          messageParams.text.substring(0, 50) + '...' : 
+                          messageParams.text;
+      info(`${label} text preview: "${textPreview}"`);
+    }
   }
   
   // Detailed breakdown (shown in VERBOSE and above)
@@ -248,43 +258,41 @@ function logMessageStructure(messageParams, label = 'MESSAGE') {
     let actionBlockCount = 0;
     let buttonCount = 0;
     
-    // Check direct blocks
-    if (messageParams.blocks && messageParams.blocks.length > 0) {
-      const actionBlocks = messageParams.blocks.filter(b => b.type === 'actions');
-      actionBlockCount += actionBlocks.length;
+    if (messageParams.blocks && Array.isArray(messageParams.blocks)) {
+      actionBlockCount = messageParams.blocks.filter(b => b.type === 'actions').length;
       
-      actionBlocks.forEach(block => {
-        if (block.elements) {
+      // Count buttons in action blocks
+      messageParams.blocks.forEach(block => {
+        if (block.type === 'actions' && block.elements) {
           buttonCount += block.elements.filter(e => e.type === 'button').length;
         }
       });
+      
+      // Just log each block type count - not full content
+      const blockTypes = {};
+      messageParams.blocks.forEach(block => {
+        blockTypes[block.type] = (blockTypes[block.type] || 0) + 1;
+      });
+      
+      const blocksDescription = Object.entries(blockTypes)
+        .map(([type, count]) => `${type}: ${count}`)
+        .join(', ');
+      
+      detail(`${label} blocks breakdown: ${blocksDescription}`);
     }
     
-    // Check attachment blocks
+    // Show each attachment in summary only
     if (messageParams.attachments && messageParams.attachments.length > 0) {
-      messageParams.attachments.forEach(attachment => {
-        if (attachment.blocks && attachment.blocks.length > 0) {
-          const actionBlocks = attachment.blocks.filter(b => b.type === 'actions');
-          actionBlockCount += actionBlocks.length;
-          
-          actionBlocks.forEach(block => {
-            if (block.elements) {
-              buttonCount += block.elements.filter(e => e.type === 'button').length;
-            }
-          });
-        }
+      messageParams.attachments.forEach((attachment, idx) => {
+        const blockCount = attachment.blocks?.length || 0;
+        const color = attachment.color || 'none';
+        detail(`${label} attachment [${idx}]: color=${color}, blocks=${blockCount}`);
       });
     }
     
-    // Show action block info if found
-    if (actionBlockCount > 0) {
-      detail(`${label} Actions: ${actionBlockCount} action blocks with ${buttonCount} buttons`);
+    if (actionBlockCount > 0 || buttonCount > 0) {
+      detail(`${label} interactive elements: ${actionBlockCount} action blocks, ${buttonCount} buttons`);
     }
-  }
-  
-  // Full dump of message structure (only in DEBUG mode)
-  if (LOG_LEVEL >= LOG_LEVELS.DEBUG) {
-    debug(`${label} FULL STRUCTURE:`, messageParams);
   }
 }
 

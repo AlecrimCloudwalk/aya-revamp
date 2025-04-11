@@ -78,10 +78,16 @@ function createMessageContext(message = {}, context = {}) {
   if (processedText.startsWith('!@#')) {
     // Simply remove the prefix without logging
     processedText = processedText.substring(3).trim();
+    logger.info(`Stripped dev key (!@#) from message text for LLM. Original: "${originalText}", Processed: "${processedText}"`);
   }
   
   // Set the filtered text
   ctx.text = processedText;
+  
+  // Add a property to explicitly flag that this message had a dev key
+  if (originalText.startsWith('!@#')) {
+    ctx.hadDevKey = true;
+  }
   
   // Determine if this is a threaded message
   if (message.thread_ts) {

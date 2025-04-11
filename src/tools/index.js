@@ -1,4 +1,5 @@
 // Tool Registry - Maintains metadata about all available tools
+const crypto = require('crypto');
 
 // Import all tools
 const { postMessage } = require('./postMessage.js');
@@ -9,34 +10,6 @@ const { createEmojiVote, getVoteResults } = require('./createEmojiVote.js');
 const getUserAvatar = require('./getUserAvatar.js');
 const { addReaction, availableEmojis } = require('./addReaction.js');
 const { removeReaction } = require('./removeReaction.js');
-
-/**
- * Check if a parameter schema can support strict mode
- * For strict mode, we need additionalProperties: false and all properties in required
- * @param {Object} parameters Schema object
- * @returns {boolean} Whether strict mode can be enabled
- */
-function canUseStrictMode(parameters) {
-  if (!parameters || parameters.type !== 'object' || !parameters.properties) {
-    return false;
-  }
-  
-  // Check if additionalProperties is already false
-  const hasAdditionalPropsFalse = parameters.additionalProperties === false;
-  
-  // Check if all properties are in required array or if they support null values
-  const allPropertiesHandled = parameters.required && 
-    Object.keys(parameters.properties).every(prop => {
-      const isRequired = parameters.required.includes(prop);
-      const supportsNull = parameters.properties[prop].type && 
-        (Array.isArray(parameters.properties[prop].type) && 
-         parameters.properties[prop].type.includes('null'));
-      
-      return isRequired || supportsNull;
-    });
-  
-  return hasAdditionalPropsFalse && allPropertiesHandled;
-}
 
 // Tool registry with metadata - Using modern OpenAI function format
 const toolRegistry = {
@@ -61,7 +34,7 @@ const toolRegistry = {
             description: 'Explanation for why you are sending this message'
           }
         },
-        required: ['text', 'reasoning'],
+        required: ['text', 'reasoning', 'color'],
         additionalProperties: false
       },
       strict: true
@@ -79,18 +52,19 @@ const toolRegistry = {
         properties: {
           summary: {
             type: 'string',
-            description: 'Optional summary of the completed task or final thoughts'
+            description: 'Optional summary of the completed task or final thoughts (optional)'
           },
           clearCache: {
             type: 'boolean',
-            description: 'Whether to clear the thread history cache for this thread (default: false)'
+            description: 'Whether to clear the thread history cache for this thread (optional, default: false)'
           },
           reasoning: {
             type: 'string',
-            description: 'Explanation for why the conversation is being ended'
+            description: 'Explanation for why the conversation is being ended (optional)'
           }
         },
-        required: []
+        required: ['summary', 'clearCache', 'reasoning'],
+        additionalProperties: false
       },
       strict: true
     },
@@ -126,7 +100,8 @@ const toolRegistry = {
             description: 'Explanation for why thread history is needed'
           }
         },
-        required: []
+        required: ['limit', 'includeParent', 'order', 'forceRefresh', 'reasoning'],
+        additionalProperties: false
       },
       strict: true
     },
@@ -161,7 +136,7 @@ const toolRegistry = {
             description: 'Explanation for why you are updating this message'
           }
         },
-        required: ['messageTs', 'text', 'reasoning'],
+        required: ['messageTs', 'text', 'reasoning', 'color', 'removeButtons'],
         additionalProperties: false
       },
       strict: true
@@ -189,7 +164,8 @@ const toolRegistry = {
                 text: { type: 'string' },
                 emoji: { type: 'string' }
               },
-              required: ['text', 'emoji']
+              required: ['text', 'emoji'],
+              additionalProperties: false
             }
           },
           color: {
@@ -205,7 +181,7 @@ const toolRegistry = {
             description: 'Explanation for why you are creating this emoji vote'
           }
         },
-        required: ['text', 'options', 'color', 'reasoning'],
+        required: ['text', 'options', 'color', 'reasoning', 'threadTs'],
         additionalProperties: false
       },
       strict: true
@@ -233,7 +209,7 @@ const toolRegistry = {
             description: 'Explanation for why you are requesting vote results'
           }
         },
-        required: ['reasoning'],
+        required: ['reasoning', 'voteId', 'messageTs'],
         additionalProperties: false
       },
       strict: true
@@ -261,7 +237,7 @@ const toolRegistry = {
             description: 'Explanation for why you need this user\'s avatar'
           }
         },
-        required: ['userId', 'reasoning'],
+        required: ['userId', 'reasoning', 'size'],
         additionalProperties: false
       },
       strict: true
@@ -304,7 +280,7 @@ const toolRegistry = {
             description: 'Explanation for why you are adding this reaction'
           }
         },
-        required: ['emoji', 'reasoning'],
+        required: ['emoji', 'reasoning', 'messageTs', 'message_ts', 'message_id', 'channel_id'],
         additionalProperties: false
       },
       strict: true
@@ -347,7 +323,7 @@ const toolRegistry = {
             description: 'Explanation for why you are removing this reaction'
           }
         },
-        required: ['emoji', 'reasoning'],
+        required: ['emoji', 'reasoning', 'messageTs', 'message_ts', 'message_id', 'channel_id'],
         additionalProperties: false
       },
       strict: true
@@ -356,65 +332,210 @@ const toolRegistry = {
   }
 };
 
-// For backwards compatibility, maintain these object structures
-Object.keys(toolRegistry).forEach(key => {
-  // Add legacy properties to each tool for backwards compatibility with existing code
-  const tool = toolRegistry[key];
-  tool.name = tool.function.name;
-  tool.description = tool.function.description;
-  tool.parameters = tool.function.parameters;
-  tool.function = tool.implementation;
+/**
+ * Check if a parameter schema can support strict mode
+ * For strict mode, we need additionalProperties: false and all properties in required
+ * @param {Object} parameters Schema object
+ * @returns {boolean} Whether strict mode can be enabled
+ */
+function canUseStrictMode(parameters) {
+  if (!parameters || parameters.type !== 'object' || !parameters.properties) {
+    return false;
+  }
+  
+  // Add detailed logging for debugging
+  console.log('DEBUG: canUseStrictMode check for schema:', JSON.stringify({
+    properties: Object.keys(parameters.properties),
+    required: parameters.required || []
+  }));
+  
+  // Check if additionalProperties is already false
+  const hasAdditionalPropsFalse = parameters.additionalProperties === false;
+  
+  // For OpenAI's strict mode, ALL properties must be in the required array
+  // regardless of whether they're actually optional in the implementation
+  const allPropsAreRequired = parameters.required && 
+    Object.keys(parameters.properties).every(prop => parameters.required.includes(prop));
+  
+  console.log(`DEBUG: canUseStrictMode result: hasAdditionalPropsFalse=${hasAdditionalPropsFalse}, allPropsAreRequired=${allPropsAreRequired}`);
+  
+  return hasAdditionalPropsFalse && allPropsAreRequired;
+}
+
+/**
+ * Creates a tool schema from a function and metadata
+ * @param {Function} fn - The tool function
+ * @param {Object} metadata - Tool metadata
+ * @returns {Object} - Tool schema
+ */
+function createToolSchema(fn, metadata) {
+  // Get function parameter names through reflection
+  const fnStr = fn.toString();
+  const paramMatch = fnStr.match(/\(([^)]*)\)/);
+  const paramNames = paramMatch && paramMatch[1] ?
+    paramMatch[1].split(',').map(p => p.trim()).filter(Boolean) :
+    [];
+  
+  // Extract JSDoc if available
+  const jsDocComment = extractJSDocComment(fnStr);
+  const jsDocParams = parseJSDocParams(jsDocComment);
+  
+  // Create parameters schema
+  const parametersSchema = {
+    type: 'object',
+    properties: {},
+    required: []
+  };
+  
+  // Process each parameter
+  for (const paramName of paramNames) {
+    // Skip the threadState/context parameter (usually last parameter)
+    if (['threadState', 'context', 'threadContext'].includes(paramName)) {
+      continue;
+    }
+    
+    // Add to required parameters if not explicitly optional
+    if (!paramName.startsWith('_') && !jsDocParams[paramName]?.optional) {
+      parametersSchema.required.push(paramName);
+    }
+    
+    // Add parameter to properties with documentation if available
+    parametersSchema.properties[paramName] = {
+      type: jsDocParams[paramName]?.type || 'string',
+      description: jsDocParams[paramName]?.description || `Parameter ${paramName}`
+    };
+  }
+  
+  // Build final schema
+  return {
+    type: "function",
+    function: {
+      name: metadata.name || fn.name,
+      description: metadata.description || extractJSDocDescription(jsDocComment) || `Tool ${fn.name}`,
+      parameters: metadata.parameters || parametersSchema,
+      strict: canUseStrictMode(parametersSchema)
+    },
+    implementation: fn
+  };
+}
+
+/**
+ * Extracts JSDoc comment from function string
+ * @param {string} fnStr - Function as string
+ * @returns {string|null} - JSDoc comment or null
+ */
+function extractJSDocComment(fnStr) {
+  const jsDocMatch = fnStr.match(/\/\*\*([\s\S]*?)\*\//);
+  return jsDocMatch ? jsDocMatch[1] : null;
+}
+
+/**
+ * Extracts description from JSDoc comment
+ * @param {string} jsDocComment - JSDoc comment
+ * @returns {string|null} - Description or null
+ */
+function extractJSDocDescription(jsDocComment) {
+  if (!jsDocComment) return null;
+  
+  // Get first paragraph before any @tags
+  const descMatch = jsDocComment.match(/^\s*\*\s*([^@]*?)(?:\s*\*\s*@|$)/);
+  if (descMatch && descMatch[1]) {
+    return descMatch[1].replace(/\s*\*\s*/g, ' ').trim();
+  }
+  
+  return null;
+}
+
+/**
+ * Parses JSDoc @param tags
+ * @param {string} jsDocComment - JSDoc comment
+ * @returns {Object} - Map of parameter info
+ */
+function parseJSDocParams(jsDocComment) {
+  if (!jsDocComment) return {};
+  
+  const result = {};
+  const paramMatches = jsDocComment.matchAll(/\*\s*@param\s+(?:{([^}]*)})?\s*(?:\[([^\]]*)\]|(\S+))\s*-?\s*(.*?)(?=\*\s*@|\*\/|$)/g);
+  
+  for (const match of Array.from(paramMatches)) {
+    const type = match[1] || 'string';
+    const paramName = match[3] || match[2]?.replace(/[\[\]]/g, '');
+    const description = match[4]?.trim();
+    const optional = !!match[2]; // Parameter was in brackets
+    
+    if (paramName) {
+      result[paramName] = { type, description, optional };
+    }
+  }
+  
+  return result;
+}
+
+/**
+ * Registers a tool with optional metadata enhancement
+ * @param {Function} fn - Tool function to register
+ * @param {Object} metadata - Additional metadata
+ * @returns {Object} - Registered tool info
+ */
+function registerTool(fn, metadata = {}) {
+  // Create tool schema
+  const schema = createToolSchema(fn, metadata);
+  
+  // Override with explicit metadata where provided
+  if (metadata.parameters) {
+    schema.function.parameters = metadata.parameters;
+  }
+  
+  if (metadata.description) {
+    schema.function.description = metadata.description;
+  }
+  
+  // Register the tool in the registry
+  toolRegistry[schema.function.name] = schema;
+  
+  // Return the registered info
+  return {
+    name: schema.function.name,
+    schema
+  };
+}
+
+// Register getUserAvatar with the new utility function
+toolRegistry.getUserAvatar = createToolSchema(getUserAvatar, {
+  name: 'getUserAvatar',
+  description: 'Gets a user\'s avatar URL from their Slack user ID'
 });
 
 /**
- * Gets a tool by name
- * @param {string} name 
+ * Get a tool by name
+ * @param {string} name - Name of the tool to get
  * @returns {Function} - The tool function
  */
 function getTool(name) {
-  const tool = toolRegistry[name];
-  if (!tool) {
+  if (!toolRegistry[name]) {
     return null;
   }
-  return tool.implementation;
+  
+  return toolRegistry[name].implementation;
 }
 
 /**
- * Gets all available tools formatted for the LLM
- * @returns {Array} - The available tools formatted for the LLM
+ * Get all tools in LLM-compatible format
+ * @returns {Array} - Array of tool schemas for the LLM
  */
 function getToolsForLLM() {
-  try {
-    // Return tools directly in the OpenAI format, which is how we now define them
-    return Object.values(toolRegistry).map(tool => ({
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-        strict: tool.function?.strict || canUseStrictMode(tool.parameters)
-      }
-    }));
-  } catch (error) {
-    console.error('Error getting tools for LLM:', error);
-    return [];
-  }
+  return Object.values(toolRegistry);
 }
 
-// Export all tools and utility functions
+// Export utilities
 module.exports = {
   getTool,
   getToolsForLLM,
   toolRegistry,
   availableEmojis,
-  // Individual tool exports
-  postMessage,
-  finishRequest,
-  getThreadHistoryTool,
-  updateMessage,
-  createEmojiVote,
-  getVoteResults,
-  getUserAvatar,
-  addReaction,
-  removeReaction
+  registerTool,
+  createToolSchema,
+  extractJSDocComment,
+  extractJSDocDescription,
+  parseJSDocParams
 }; 

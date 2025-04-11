@@ -35,6 +35,91 @@ const FORMAT_REQUIREMENTS = ayaPrompts.TECHNICAL_GUIDELINES.formatRequirements;
 // Critical workflow for tool execution
 const REMEMBER_CRITICAL = ayaPrompts.TECHNICAL_GUIDELINES.workflowRules;
 
+// Simple GPT token estimator
+const GPT_TOKENS_PER_CHAR = 0.25; // Rough estimate for English text
+
+/**
+ * Token budget constants
+ */
+const TOKEN_BUDGET = {
+  MAX_TOTAL: 4000,  // Target max tokens
+  MIN_USER_MESSAGES: 800  // Ensure some space for user messages
+};
+
+/**
+ * Estimates token count for a text
+ */
+function estimateTokenCount(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length * GPT_TOKENS_PER_CHAR);
+}
+
+/**
+ * Ensures context stays within token limits
+ */
+function ensureContextWithinLimits(context) {
+  // Add fallback for empty context
+  if (!context || !Array.isArray(context) || context.length === 0) {
+    logger.warn('⚠️ Empty context detected, adding fallback system message');
+    return [{
+      role: "system",
+      content: "Note: The conversation context is empty. This might indicate an issue with context loading. Please respond appropriately and call finishRequest after your response."
+    }];
+  }
+  
+  // Clone the context
+  const result = JSON.parse(JSON.stringify(context));
+  
+  // Get total token estimate
+  const totalTokens = estimateTokenCount(JSON.stringify(result));
+  
+  // If we're within limits, just return the context as is
+  if (totalTokens <= TOKEN_BUDGET.MAX_TOTAL) {
+    return result;
+  }
+  
+  logger.info(`Context size (${totalTokens} tokens) exceeds target (${TOKEN_BUDGET.MAX_TOTAL}). Optimizing...`);
+  
+  // If we have messages, keep only the most recent ones
+  if (result.messages && result.messages.length > 0) {
+    // Always keep the first message (system message) 
+    const systemMessages = result.messages.filter(m => m.role === 'system');
+    
+    // Sort user and assistant messages by recency
+    const otherMessages = result.messages
+      .filter(m => m.role !== 'system')
+      .sort((a, b) => {
+        // Try to extract timestamps if available
+        const timeA = a.timestamp || a.ts || 0;
+        const timeB = b.timestamp || b.ts || 0;
+        return timeB - timeA; // Sort descending (newest first)
+      });
+    
+    // Keep reducing context until we're under the limit
+    while (estimateTokenCount(JSON.stringify(result)) > TOKEN_BUDGET.MAX_TOTAL && otherMessages.length > 0) {
+      // Remove the oldest non-system message
+      otherMessages.pop();
+      
+      // Rebuild the messages array
+      result.messages = [...systemMessages, ...otherMessages];
+    }
+    
+    // Add a note about truncation
+    if (otherMessages.length < context.messages.length - systemMessages.length) {
+      result.messages.push({
+        role: 'system',
+        content: `Note: Some older messages were omitted due to context length limits.`
+      });
+    }
+  }
+  
+  // Final size after optimization
+  const finalTokens = estimateTokenCount(JSON.stringify(result));
+  logger.info(`Context optimized to ${finalTokens} tokens`);
+  
+  return result;
+}
+
 // Load the system prompt
 const systemPrompt = ayaPrompts.getCompleteSystemPrompt();
 
@@ -59,9 +144,11 @@ function getSystemMessage(context) {
 /**
  * Get the next action from the LLM
  * @param {string} threadId The thread ID to get the next action for
+ * @param {Object} options Additional options
+ * @param {Object} options.additionalSystemMessage Optional additional system message to include
  * @returns {Promise<{toolCalls: Array<{tool: string, parameters: Object}>}>}
  */
-async function getNextAction(threadId) {
+async function getNextAction(threadId, options = {}) {
     logger.info(`🧠 Getting next action from LLM for thread: ${threadId}`);
     
     // Get context builder
@@ -70,22 +157,86 @@ async function getNextAction(threadId) {
     // Build the prompt with thread-specific information
     const jsonContext = buildPrompt(threadId);
     
+    // Check if context is empty and log a warning
+    if (!jsonContext || !Array.isArray(jsonContext) || jsonContext.length === 0) {
+        logger.error(`⚠️ ERROR: Empty context for thread ${threadId}. This is likely an initialization issue.`);
+    }
+    
+    // Ensure context is within token limits
+    const optimizedContext = ensureContextWithinLimits(jsonContext);
+    
+    // Verify that we have a non-empty context after optimization
+    if (!optimizedContext || !Array.isArray(optimizedContext) || optimizedContext.length === 0) {
+        logger.error(`⚠️ CRITICAL ERROR: Context is still empty after optimization for thread ${threadId}`);
+        // Add a fallback context with an error message
+        const fallbackContext = [{
+            role: "system",
+            content: "ERROR: Failed to build conversation context. Please respond with a generic message and call finishRequest."
+        }];
+        logger.info("Using fallback error context");
+        return {
+            toolCalls: [{
+                tool: "postMessage",
+                parameters: {
+                    text: "#header: I'm having trouble processing your request\n\n#section: There was an error retrieving the conversation history. Let me help you with something else.",
+                    color: "#E01E5A",
+                    reasoning: "Responding with error message due to context failure"
+                },
+                reasoning: "Context build failure fallback response"
+            }]
+        };
+    }
+    
     // Format the JSON context for OpenAI's message format
     const messages = [
         {
             role: "system",
             content: systemPrompt
-        },
-        {
-            role: "user",
-            content: JSON.stringify(jsonContext)
         }
     ];
+    
+    // Add additional system message if provided
+    if (options.additionalSystemMessage) {
+        messages.push(options.additionalSystemMessage);
+    }
+    
+    // Instead of wrapping context as a JSON string in a single message,
+    // add each context message as a separate message in the OpenAI format
+    optimizedContext.forEach(contextMsg => {
+        // Special handling for user messages with content objects
+        if (contextMsg.role === 'user' && typeof contextMsg.content === 'object' && contextMsg.content.text) {
+            // Convert user message content object to plain text
+            // OpenAI expects a string for content, not an object
+            messages.push({
+                role: 'user',
+                content: contextMsg.content.text
+            });
+            logger.info(`Converting user message object to text: ${contextMsg.content.text}`);
+        } else {
+            messages.push({
+                role: contextMsg.role,
+                content: contextMsg.content
+            });
+        }
+    });
+    
+    // Log detailed information about messages being sent
+    logger.info(`Sending ${messages.length} messages to LLM:`);
+    messages.forEach((msg, idx) => {
+        if (msg.role === 'user' && typeof msg.content === 'object') {
+            logger.info(`Message ${idx} (${msg.role}): ${JSON.stringify(msg.content)}`);
+        } else {
+            const contentPreview = typeof msg.content === 'string' 
+                ? (msg.content.length > 50 ? msg.content.substring(0, 50) + '...' : msg.content)
+                : JSON.stringify(msg.content).substring(0, 50) + '...';
+            logger.info(`Message ${idx} (${msg.role}): ${contentPreview}`);
+        }
+    });
     
     // Log the formatted context for debugging using the dedicated formatter
     try {
         const contextFormatter = require('./toolUtils/contextFormatter.js');
-        contextFormatter.logFormattedContext(jsonContext, 'SENDING TO LLM');
+        contextFormatter.logFormattedContext(optimizedContext, 'SENDING TO LLM');
     } catch (error) {
         logger.error('Error formatting context for debug output:', error);
     }
@@ -252,15 +403,110 @@ function buildPrompt(threadId) {
     const context = contextBuilder.getMetadata(threadId, 'context') || {};
     
     // Use the new JSON context format builder with skipLogging to avoid duplication
-    const jsonContext = contextBuilder.buildFormattedLLMContext(threadId, {
+    let jsonContext = contextBuilder.buildFormattedLLMContext(threadId, {
         limit: 25,
         includeBotMessages: true,
         includeToolCalls: true,
         skipLogging: true // Skip logging in context builder since we'll do it here
     });
     
+    // Check if we got a valid context with messages
+    if (!jsonContext || !Array.isArray(jsonContext) || jsonContext.length === 0) {
+        logger.error(`❌ Failed to build normal context for thread ${threadId}, attempting emergency context`);
+        
+        // Try direct context access - don't rely on context builder's filtering
+        try {
+            logger.info(`Attempting direct thread message access...`);
+            
+            // Get raw messages from context builder
+            let rawMessages = [];
+            if (contextBuilder.threadMessages && contextBuilder.threadMessages.has(threadId)) {
+                const messageIds = contextBuilder.threadMessages.get(threadId);
+                if (messageIds && Array.isArray(messageIds) && messageIds.length > 0) {
+                    logger.info(`Found ${messageIds.length} message IDs directly`);
+                    rawMessages = messageIds
+                        .map(id => contextBuilder.messages.get(id))
+                        .filter(Boolean);
+                    logger.info(`Retrieved ${rawMessages.length} raw messages directly`);
+                }
+            }
+            
+            // If we have raw messages, create a minimal context manually
+            if (rawMessages.length > 0) {
+                logger.info(`Creating manual context from ${rawMessages.length} raw messages`);
+                jsonContext = rawMessages.map((msg, idx) => {
+                    // Determine role based on source
+                    const role = msg.source === 'user' ? 'user' : 
+                               msg.source === 'system' ? 'system' : 'assistant';
+                    
+                    // Create content based on role
+                    const content = role === 'user' ? 
+                        { text: msg.text || '', userid: msg.sourceId || 'unknown' } : 
+                        msg.text || '';
+                    
+                    return {
+                        role,
+                        content,
+                        timestamp: msg.timestamp || new Date().toISOString(),
+                        turn: idx + 1
+                    };
+                });
+                
+                logger.info(`Manual context created with ${jsonContext.length} items`);
+            }
+        } catch (directError) {
+            logger.error(`Direct thread access failed: ${directError.message}`);
+        }
+        
+        // If direct access didn't work, try emergency context
+        if (!jsonContext || jsonContext.length === 0) {
+            try {
+                jsonContext = contextBuilder.buildEmergencyContext(threadId, context);
+                logger.info(`✅ Built emergency context with ${jsonContext.length} items`);
+            } catch (emerError) {
+                logger.error(`❌ Emergency context also failed: ${emerError.message}`);
+                
+                // Last resort - hardcoded minimal context
+                jsonContext = [
+                    {
+                        role: 'system',
+                        content: 'CRITICAL: Context building completely failed. Please respond to the user with a generic helpful message and call finishRequest.'
+                    },
+                    {
+                        role: 'user',
+                        content: {
+                            text: context?.text || 'Hello',
+                            userid: context?.userId || 'unknown'
+                        }
+                    }
+                ];
+                logger.info('Using hardcoded minimal context as last resort');
+            }
+        }
+    }
+    
     // Always log a summary of the messages being sent
     logger.info(`Sending ${jsonContext.length} JSON context items to LLM`);
+    
+    // Final check: strip any dev keys that might have made it through
+    jsonContext = jsonContext.map(entry => {
+        if (entry.role === 'user' && entry.content && typeof entry.content === 'object' && entry.content.text) {
+            // Check if the user message text starts with the dev key
+            if (entry.content.text.startsWith('!@#')) {
+                const originalText = entry.content.text;
+                entry.content.text = entry.content.text.substring(3).trim();
+                logger.info(`FINAL CHECK: Stripped dev key (!@#) from user message. Original: "${originalText}", Final: "${entry.content.text}"`);
+            }
+        }
+        
+        // Ensure assistant messages always have content
+        if (entry.role === 'assistant' && (!entry.content || entry.content === '')) {
+            logger.warn(`FINAL CHECK: Found empty content in assistant message, adding placeholder content`);
+            entry.content = 'Assistant response';
+        }
+        
+        return entry;
+    });
     
     // Return the JSON context
     return jsonContext;

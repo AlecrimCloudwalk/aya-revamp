@@ -444,29 +444,36 @@ async function postMessage(args, threadState) {
     // Debug log the full message result structure
     logger.detail('Message result structure from Slack:', result);
     
-    // Add to the context builder
+    // Store the message in context builder for future reference
     try {
-      // Record the tool execution first
-      const toolExecutionId = getContextBuilder().recordToolExecution(
-        threadTs,
-        'postMessage', 
-        args, 
-        result
-      );
+      // Get context builder
+      const contextBuilder = getContextBuilder();
       
-      // Now add the message, associating it with the tool execution
-      getContextBuilder().addMessage({
-        source: 'assistant', // Changed from 'llm' to 'assistant' for consistency
-        id: `bot_${result.ts || Date.now()}`,
+      // Add message to context
+      contextBuilder.addMessage({
+        source: 'assistant',
+        id: `bot_${result.ts}`,
         timestamp: new Date().toISOString(),
         threadTs: threadTs,
-        text: args.text || '',
-        type: 'message',
-        fromToolExecution: true, // Mark that this came from a tool call
-        toolExecutionId: toolExecutionId, // Link to the tool execution
+        text: formattedMessage || args.text || 'Message sent to Slack', // Make sure text is never empty
+        originalContent: {
+          tool: 'postMessage',
+          parameters: args
+        },
+        llmResponse: {
+          tool: 'postMessage',
+          parameters: args,
+          reasoning: args.reasoning 
+        },
+        slackResult: {
+          ts: result.ts,
+          channel: channelId
+        },
         metadata: {
           messageTs: result.ts,
           channelId: channelId,
+          threadTs: threadTs,
+          slackTs: result.ts,
           update: false,
           buttons: null,
           color: normalizeColor(args.color),

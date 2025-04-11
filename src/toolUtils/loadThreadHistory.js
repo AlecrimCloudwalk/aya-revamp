@@ -71,6 +71,8 @@ async function initializeContextIfNeeded(threadId) {
         return;
     }
     
+    logger.info(`Initializing context for thread: ${threadId}`);
+    
     try {
         // Get context builder
         const contextBuilder = getContextBuilder();
@@ -88,18 +90,22 @@ async function initializeContextIfNeeded(threadId) {
             channelId = channelId || context.channelId;
         }
         
-        // Check if context is already initialized
-        const messages = contextBuilder.getThreadMessages(threadId);
+        // Log thread info for debugging
+        logger.info(`Thread info: threadTs=${threadTs}, channelId=${channelId}`);
         
-        if (messages && messages.length > 0) {
-            logger.info(`Context already initialized with ${messages.length} messages`);
+        // Check if context is already initialized
+        const messagesBefore = contextBuilder.getThreadMessages(threadId);
+        
+        if (messagesBefore && messagesBefore.length > 0) {
+            logger.info(`Context already initialized with ${messagesBefore.length} messages`);
             return;
         }
         
         // We need both threadTs and channelId to load history
         if (!threadTs || !channelId) {
-            logger.warn('Cannot initialize context: Missing threadTs or channelId');
-            return;
+            const errorMsg = 'Cannot initialize context: Missing threadTs or channelId';
+            logger.error(errorMsg);
+            throw new Error(errorMsg);
         }
         
         // Use the internal loadThreadHistory function directly instead of through the tool system
@@ -123,10 +129,44 @@ async function initializeContextIfNeeded(threadId) {
         
         logger.info(`Retrieved ${historyResult.messagesRetrieved || 0} messages from thread history for initialization`);
         
+        // Verify that initialization was successful
+        const messagesAfter = contextBuilder.getThreadMessages(threadId);
+        
+        if (!messagesAfter || messagesAfter.length === 0) {
+            const errorMsg = 'Context initialization failed: No messages after loading history';
+            logger.error(errorMsg);
+            
+            // If history was successfully retrieved but not added to context
+            if (historyResult.messagesRetrieved > 0) {
+                logger.error(`History API returned ${historyResult.messagesRetrieved} messages but none were added to context`);
+                
+                // Try a manual rescue - add at least one system message to avoid empty context
+                try {
+                    contextBuilder.addMessage({
+                        source: 'system',
+                        text: 'Thread history was retrieved but could not be properly loaded into context. Please continue with limited context.',
+                        timestamp: new Date().toISOString(),
+                        threadTs: threadId
+                    });
+                    logger.info('Added emergency system message to context');
+                } catch (rescueError) {
+                    logger.error(`Failed to add emergency message: ${rescueError.message}`);
+                }
+            }
+            
+            throw new Error(errorMsg);
+        }
+        
+        logger.info(`✅ Context initialization successful: ${messagesAfter.length} messages in context`);
+        
         // We specifically do NOT record this as a tool execution since we don't want it to appear in the LLM context
     } catch (error) {
-        logger.error('Error initializing context:', error);
+        // Log the error but don't suppress it
+        logger.error(`❌ Error initializing context: ${error.message}`);
         logError('Error initializing context', error, { threadId });
+        
+        // Re-throw the error to make sure it's properly handled upstream
+        throw error;
     }
 }
 

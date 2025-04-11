@@ -194,3 +194,25 @@ llmDebugLogger.logRequest(threadId, messages, tools);
 // Log a response
 llmDebugLogger.logResponse(threadId, response);
 ```
+
+## Request Logging
+
+The `llmDebugLogger` provides a `logRequest` method that logs detailed information about LLM API requests:
+
+```javascript
+// Example of logging an LLM request
+const requestData = {
+  messages: [
+    { role: 'system', content: 'You are a helpful assistant' },
+    { role: 'user', content: 'Hello, who are you?' }
+  ],
+  tools: [
+    { type: 'function', function: { name: 'getWeather' } },
+    { type: 'function', function: { name: 'searchWeb' } }
+  ]
+};
+
+llmDebugLogger.logRequest('thread_12345', requestData);
+```
+
+This will produce a log entry with:

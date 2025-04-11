@@ -2,7 +2,7 @@
 const { getNextAction } = require('./llmInterface.js');
 const tools = require('./tools/index.js');
 const { getTool } = tools;
-const { logError } = require('./errors.js');
+const { logError, createStandardizedErrorContext } = require('./errors.js');
 const { getSlackClient } = require('./slackClient.js');
 const { getContextBuilder } = require('./contextBuilder.js');
 const { initializeContextIfNeeded } = require('./toolUtils/loadThreadHistory');
@@ -10,6 +10,51 @@ const { updateButtonMessage } = require('./buttonUpdater');
 const logger = require('./toolUtils/logger');
 const getThreadHistoryTool = require('./tools/getThreadHistory');
 const callCounter = getThreadHistoryTool.callCounter || new Map();
+
+/**
+ * Handles an error during thread processing
+ */
+async function handleProcessingError(error, threadId, context = {}) {
+  // Log error
+  logError('Error processing thread', error, { threadId, ...context });
+  
+  // Create standardized error context
+  const errorContext = createStandardizedErrorContext(error, 'orchestrator.processThread', {
+    threadId,
+    channelId: context.channelId,
+    userId: context.userId,
+    component: 'orchestrator'
+  });
+  
+  // Get context builder
+  const contextBuilder = getContextBuilder();
+  
+  // Add error to thread context
+  contextBuilder.setMetadata(threadId, 'lastError', errorContext);
+  
+  // Add system message about error
+  contextBuilder.addMessage({
+    source: 'system',
+    originalContent: errorContext,
+    id: `error_${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    threadTs: threadId,
+    text: `Error occurred: ${errorContext.message}`,
+    type: 'error',
+    metadata: {
+      error: true,
+      errorContext
+    }
+  });
+  
+  // Let the LLM handle the error
+  const { handleErrorWithLLM } = require('./errors.js');
+  return await handleErrorWithLLM(error, { 
+    threadTs: threadId, 
+    channelId: context.channelId,
+    userId: context.userId 
+  });
+}
 
 /**
  * Handles an incoming message from Slack
@@ -36,32 +81,62 @@ async function handleIncomingSlackMessage(context) {
             `User:${context.userId}, Channel:${context.channelId}, Thread:${context.threadTs || 'N/A'}`
         );
         
-        // Add message to context
+        // Set timestamp for the message received
+        contextBuilder.setMetadata(threadId, 'lastMessageTime', new Date().toISOString());
+        
+        // Explicitly check if the threadMessages map has an entry for this thread
+        if (!contextBuilder.threadMessages.has(threadId)) {
+            logger.info(`Creating new thread entry for ${threadId} in ContextBuilder`);
+            contextBuilder.threadMessages.set(threadId, []);
+        }
+        
+        // Add message to context - use a simple format to avoid processing issues
         try {
-            contextBuilder.addMessage({
+            const userMessage = {
                 source: 'user',
-                originalContent: {
-                    text: context.text,
-                    user: context.userId,
-                    ts: context.timestamp,
-                    thread_ts: context.threadTs,
-                    channel: context.channelId
-                },
-                id: `user_${context.timestamp || Date.now()}`,
+                threadTs: threadId,
+                text: context.text || '',
                 timestamp: new Date().toISOString(),
-                threadTs: context.threadTs || context.timestamp,
-                text: context.text,
                 sourceId: context.userId,
                 metadata: {
                     channel: context.channelId,
                     isDirectMessage: context.isDirectMessage || false,
                     isMention: context.isMention || false
                 }
-            });
+            };
             
-            logger.info('Added incoming message to context builder');
+            const addedMessage = contextBuilder.addMessage(userMessage);
+            
+            if (addedMessage) {
+                logger.info(`✅ Successfully added user message to context: ${addedMessage.id}`);
+                
+                // Verify the message was actually added to the thread
+                const threadMessages = contextBuilder.getThreadMessages(threadId);
+                logger.info(`Thread ${threadId} now has ${threadMessages.length} messages`);
+                
+                // If first verification showed no messages, try to debug further
+                if (threadMessages.length === 0) {
+                    logger.error(`❌ CRITICAL: Message was not added to thread ${threadId}`);
+                    
+                    // Try explicit emergency message
+                    const emergencyMessage = {
+                        source: 'system',
+                        threadTs: threadId,
+                        text: '⚠️ EMERGENCY MESSAGE: Message tracking issue detected. Please respond to the user.',
+                        timestamp: new Date().toISOString(),
+                        id: `emergency_${Date.now()}`
+                    };
+                    
+                    contextBuilder.addMessage(emergencyMessage);
+                    logger.info('Added emergency system message as fallback');
+                }
+            } else {
+                logger.error('❌ Failed to add message to context builder');
+            }
         } catch (contextError) {
-            logger.error('Error adding message to context builder:', contextError);
+            logger.error(`Error adding message to context builder: ${contextError.message}`);
+            logger.error(contextError.stack);
+            // Continue with best effort
         }
         
         // Add thinking reaction
@@ -98,7 +173,7 @@ async function handleIncomingSlackMessage(context) {
 
     } catch (error) {
         logger.warn(`❌ ERROR HANDLING MESSAGE: ${error.message}`);
-        logError('Error handling incoming Slack message', error, { context });
+        logger.error(error.stack);
         
         // Update reaction to error
         try {
@@ -116,6 +191,9 @@ async function handleIncomingSlackMessage(context) {
         } catch (reactionError) {
             logger.warn(`Failed to add error reaction: ${reactionError.message}`);
         }
+        
+        // Handle processing error with enhanced error handling
+        await handleProcessingError(error, context.threadTs || context.channelId, context);
     }
 }
 
@@ -296,27 +374,173 @@ async function processThread(threadId) {
         
         // Debug log: Print what context is stored
         const context = contextBuilder.getMetadata(threadId, 'context');
+        logger.info(`Thread context: ${JSON.stringify(context || {})}`);
         
         // Initialize the context builder with thread history if needed
+        let contextInitialized = false;
         try {
+            logger.info("Initializing context with thread history...");
             await initializeContextIfNeeded(threadId);
+            contextInitialized = true;
+            logger.info("Context initialization successful");
         } catch (contextError) {
-            logger.error('Error initializing context:', contextError);
-            // Continue even if context initialization fails
+            logger.error(`🚨 CRITICAL: Context initialization failed: ${contextError.message}`);
+            
+            // Add error message to context
+            contextBuilder.addMessage({
+                source: 'system',
+                text: `🚨 CRITICAL: Context initialization failed. The bot may not have full conversation history. Error: ${contextError.message}`,
+                timestamp: new Date().toISOString(),
+                threadTs: threadId,
+                type: 'error'
+            });
+            
+            // Continue with limited context, but track the failure
+            contextBuilder.setMetadata(threadId, 'contextInitFailed', true);
+        }
+
+        // Check what messages we have at this point
+        const messagesBeforeFallback = contextBuilder.getThreadMessages(threadId);
+        logger.info(`Messages in context before fallback: ${messagesBeforeFallback.length}`);
+        
+        // Dump message IDs for debugging
+        if (messagesBeforeFallback.length === 0) {
+            logger.error(`⚠️ EMPTY CONTEXT: No messages found for thread ${threadId}`);
+        } else {
+            logger.info(`Message IDs: ${messagesBeforeFallback.slice(0, 5).join(', ')}${messagesBeforeFallback.length > 5 ? '...' : ''}`);
         }
 
         // First, load thread history directly using internal function instead of the tool
-        try {
-            // Only fetch history if we're in a thread that exists
-            if (context && context.threadTs) {
-                logger.info("Loading thread history for context...");
+        // Only do this if context initialization failed to provide a fallback mechanism
+        if ((!contextInitialized || messagesBeforeFallback.length === 0) && context && context.threadTs) {
+            try {
+                logger.info("🔄 Attempting direct thread history load as fallback...");
                 
-                // Load history using internal function instead of the tool
                 await loadThreadHistoryIntoContext(threadId, context.threadTs, context.channelId);
+                logger.info("✅ Fallback history load successful");
+                
+                // Check again after fallback
+                const messagesAfterFallback = contextBuilder.getThreadMessages(threadId);
+                logger.info(`Messages in context after fallback: ${messagesAfterFallback.length}`);
+            } catch (historyError) {
+                logger.error(`❌ Failed to load thread history via fallback: ${historyError.message}`);
+                
+                // Add last-resort message
+                const fallbackText = context?.text || "No text found";
+                const fallbackUserId = context?.userId || "unknown";
+                
+                // Add a manual message as absolute last resort
+                try {
+                    logger.info(`Adding emergency user message with text: "${fallbackText}"`);
+                    contextBuilder.addMessage({
+                        source: 'user',
+                        text: fallbackText,
+                        timestamp: new Date().toISOString(),
+                        threadTs: threadId,
+                        sourceId: fallbackUserId,
+                        id: `emergency_${Date.now()}`
+                    });
+                    
+                    // Add warning system message
+                    contextBuilder.addMessage({
+                        source: 'system',
+                        text: '⚠️ WARNING: Unable to load conversation history. You are responding with limited context.',
+                        timestamp: new Date().toISOString(),
+                        threadTs: threadId
+                    });
+                } catch (emergencyError) {
+                    logger.error(`Failed to add emergency messages: ${emergencyError.message}`);
+                }
             }
-        } catch (historyError) {
-            logger.warn(`Failed to load thread history: ${historyError.message}`);
-            // Continue even if history load fails
+        }
+        
+        // Final check before proceeding with LLM
+        const finalMessages = contextBuilder.getThreadMessages(threadId);
+        logger.info(`Final message count before LLM: ${finalMessages.length}`);
+        
+        if (finalMessages.length === 0) {
+            logger.error(`🚨 CRITICAL ERROR: Still no messages in context after all fallback attempts`);
+            logger.info(`Attempting direct context insertion for user message`);
+            
+            try {
+                // Try to create a completely new thread entry
+                if (!contextBuilder.threadMessages.has(threadId)) {
+                    contextBuilder.threadMessages.set(threadId, []);
+                    logger.info(`Created brand new thread entry for ${threadId}`);
+                }
+                
+                // Add original user input to the context directly
+                const userText = context?.text || 'Help me please';
+                const userId = context?.userId || 'unknown';
+                
+                // Create multiple emergency messages to ensure at least one gets through
+                const emergencyMessages = [
+                    // System message explaining the situation
+                    {
+                        id: `emergency_system_${Date.now()}`,
+                        source: 'system',
+                        text: `🚨 EMERGENCY: Context loading completely failed for thread ${threadId}. Responding with minimal context.`,
+                        timestamp: new Date().toISOString(),
+                        threadTs: threadId,
+                        type: 'error'
+                    },
+                    // User message with original text
+                    {
+                        id: `emergency_user_${Date.now()}`,
+                        source: 'user',
+                        text: userText,
+                        timestamp: new Date().toISOString(),
+                        threadTs: threadId,
+                        sourceId: userId
+                    },
+                    // Direct map addition to bypass processing completely
+                    {
+                        id: `direct_user_${Date.now()}`,
+                        source: 'user',
+                        text: userText,
+                        timestamp: new Date().toISOString(),
+                        threadTs: threadId,
+                        sourceId: userId
+                    }
+                ];
+                
+                // Try multiple approaches to get at least one message into context
+                for (const msg of emergencyMessages) {
+                    try {
+                        // First try the normal addMessage method
+                        const added = contextBuilder.addMessage(msg);
+                        logger.info(`Added emergency message: ${added.id}`);
+                        
+                        // Directly add to message maps as a backup
+                        contextBuilder.messages.set(msg.id, msg);
+                        
+                        // Get existing thread messages or create a new array
+                        if (!contextBuilder.threadMessages.has(threadId)) {
+                            contextBuilder.threadMessages.set(threadId, []);
+                        }
+                        
+                        // Add to thread messages directly
+                        const threadMsgs = contextBuilder.threadMessages.get(threadId);
+                        threadMsgs.push(msg.id);
+                        contextBuilder.threadMessages.set(threadId, threadMsgs);
+                        
+                        logger.info(`Directly added message ${msg.id} to thread ${threadId}`);
+                    } catch (msgError) {
+                        logger.error(`Error adding emergency message: ${msgError.message}`);
+                    }
+                }
+                
+                // Set metadata to mark this as an emergency context recovery
+                contextBuilder.setMetadata(threadId, 'emergencyRecovery', true);
+                contextBuilder.setMetadata(threadId, 'originalUserText', userText);
+                
+                // Final verification
+                const verifyMessages = contextBuilder.getThreadMessages(threadId);
+                logger.info(`After emergency recovery: thread has ${verifyMessages.length} messages`);
+            } catch (emergencyError) {
+                logger.error(`Failed emergency context recovery: ${emergencyError.message}`);
+                logger.error(emergencyError.stack);
+            }
         }
 
         // Variables to track state across iterations
@@ -445,6 +669,31 @@ async function processThread(threadId) {
                 // Log iteration with clear separation
                 logger.info(`\n🔄 Iteration ${iteration}/${MAX_ITERATIONS}`);
                 
+                // Early finish if message already sent (strict policy)
+                if (messagePosted && iteration > 2) {
+                    logger.warn(`🛑 Strict policy: Message already sent on iteration ${iteration}, auto-finishing`);
+                    
+                    // Add a system message explaining the auto-finish
+                    contextBuilder.addMessage({
+                        source: 'system',
+                        text: `🛑 AUTO-FINISH: You've already sent a message to the user. To prevent multiple responses, the system is auto-finishing this request.`,
+                        timestamp: new Date().toISOString(),
+                        threadTs: threadId
+                    });
+                    
+                    // Auto-finish the request
+                    const finishTool = getTool('finishRequest');
+                    if (finishTool) {
+                        await finishTool({
+                            summary: "Auto-finishing to enforce one-message policy",
+                            reasoning: "Preventing multiple messages to the same user query"
+                        }, getThreadContext(threadId, context));
+                    }
+                    
+                    requestCompleted = true;
+                    break;
+                }
+                
                 // Add additional warnings if many iterations without completion
                 if (iteration >= MAX_ITERATIONS - 2) {
                     contextBuilder.addMessage({
@@ -457,7 +706,7 @@ async function processThread(threadId) {
                 
                 // If we've already sent a message but haven't called finishRequest yet, add a note
                 if (messagePosted && iteration > 1) {
-                    logger.info(`Already sent ${messagesSent} messages, but allowing LLM to continue processing`);
+                    logger.info(`Already sent ${messagesSent} messages, adding finishRequest reminder`);
                     
                     // Set flag to indicate we're waiting for finishRequest
                     waitingForFinishRequest = true;
@@ -470,6 +719,18 @@ async function processThread(threadId) {
                             timestamp: new Date().toISOString(),
                             threadTs: threadId
                         });
+                        
+                        // Auto-finish after iteration 3 if message has been posted
+                        logger.info(`Auto-finishing after sending a message and waiting ${iteration-1} iterations`);
+                        const finishTool = getTool('finishRequest');
+                        if (finishTool) {
+                            await finishTool({
+                                summary: "Auto-finishing after response completed",
+                                reasoning: `Response was sent but finishRequest wasn't called after ${iteration-1} iterations`
+                            }, getThreadContext(threadId, context));
+                        }
+                        requestCompleted = true;
+                        break;
                     }
                 }
                 
@@ -498,6 +759,32 @@ async function processThread(threadId) {
 
                     // Handle postMessage - track that we've posted a message
                     if (toolName === 'postMessage') {
+                        // Check if we already sent a message and should block sending another
+                        if (messagePosted && messagesSent >= 1) {
+                            logger.warn(`⚠️ Blocking additional postMessage call - message already sent`);
+                            
+                            // Add a system message explaining why the message was blocked
+                            contextBuilder.addMessage({
+                                source: 'system',
+                                text: `⚠️ BLOCKED: Additional message not sent. You should call finishRequest after posting your response to avoid multiple messages.`,
+                                timestamp: new Date().toISOString(),
+                                threadTs: threadId
+                            });
+                            
+                            // Auto-finish the request to prevent further attempts
+                            logger.info(`Auto-finishing to prevent multiple messages`);
+                            const finishTool = getTool('finishRequest');
+                            if (finishTool) {
+                                await finishTool({
+                                    summary: "Auto-finishing to prevent multiple messages",
+                                    reasoning: "Multiple postMessage attempts detected"
+                                }, getThreadContext(threadId, context));
+                            }
+                            
+                            requestCompleted = true;
+                            break;
+                        }
+                        
                         // This is a meaningful action
                         meaningfulActionTaken = true;
                         
@@ -512,6 +799,24 @@ async function processThread(threadId) {
                                 
                                 // Reset consecutive similar operations
                                 consecutiveSimilarOperations = 0;
+                                
+                                // Store the message text in the context for the LLM to reference
+                                const messageText = args.text || '';
+                                contextBuilder.addMessage({
+                                    source: 'assistant',
+                                    text: messageText,
+                                    timestamp: new Date().toISOString(),
+                                    threadTs: threadId,
+                                    originalContent: {
+                                        tool: 'postMessage',
+                                        parameters: args
+                                    },
+                                    llmResponse: {
+                                        tool: 'postMessage',
+                                        parameters: args,
+                                        reasoning: args.reasoning
+                                    }
+                                });
                                 
                                 // Add a prompt to call finishRequest
                                 contextBuilder.addMessage({
@@ -666,9 +971,44 @@ async function processThread(threadId) {
             }
         }
         
+        // After the final check before proceeding with LLM processing
+        // Final check and create guaranteed minimal context
+        logger.info(`Final safety check: ensuring minimal context exists`);
+
+        // Always add these minimal messages to ensure context isn't empty
+        try {
+            // Add a minimal system welcome message
+            contextBuilder.addMessage({
+                id: `sys_welcome_${Date.now()}`,
+                source: 'system',
+                text: `This is a conversation in Slack.`,
+                timestamp: new Date().toISOString(),
+                threadTs: threadId
+            });
+            
+            // If we have context, add the user's message directly
+            if (context?.text) {
+                contextBuilder.addMessage({
+                    id: `user_fallback_${Date.now()}`,
+                    source: 'user',
+                    text: context.text,
+                    timestamp: new Date().toISOString(),
+                    threadTs: threadId,
+                    sourceId: context?.userId || 'unknown'
+                });
+            }
+            
+            logger.info(`Added guaranteed minimal context`);
+        } catch (minimalError) {
+            logger.error(`Error adding minimal context: ${minimalError.message}`);
+        }
+        
     } catch (error) {
-        logger.error(`Error processing thread ${threadId}: ${error.message}`);
-        logError('Error processing thread', error, { threadId });
+        // Handle with enhanced error handling
+        await handleProcessingError(error, threadId, {
+            channelId: getContextBuilder().getChannel(threadId),
+            userId: getContextBuilder().getMetadata(threadId, 'context')?.userId
+        });
     }
 }
 
@@ -768,57 +1108,148 @@ function handleGetThreadHistory(args, threadId, context, callCount, errorCount) 
 }
 
 /**
- * Internal function to load thread history into context
- * This avoids using the getThreadHistory tool directly to prevent the LLM from seeing it in the context
- * @param {string} threadId - The thread ID
- * @param {string} threadTs - The thread timestamp
- * @param {string} channelId - The channel ID
- * @param {number} limit - Maximum number of messages to retrieve
- * @param {boolean} isEmergencyLoad - Whether this is an emergency load attempt
- * @returns {Promise<Object>} - The history result
+ * Loads thread history directly into context using the Slack API
+ * @param {string} threadId - Thread ID for context
+ * @param {string} threadTs - Thread timestamp for Slack API
+ * @param {string} channelId - Channel ID for Slack API
+ * @param {number} [limit=10] - Maximum number of messages to load
+ * @param {boolean} [isEmergencyLoad=false] - Whether this is an emergency load to recover from a failure
+ * @returns {Promise<Object>} Result of the history load
  */
 async function loadThreadHistoryIntoContext(threadId, threadTs, channelId, limit = 10, isEmergencyLoad = false) {
-    // Get context builder
-    const contextBuilder = getContextBuilder();
-    
-    // Get the loadThreadHistory function directly
-    const loadThreadHistory = getThreadHistoryTool.loadThreadHistory;
-    
-    // Load the history
-    const historyResult = await loadThreadHistory({
-        threadTs: threadTs,
-        limit: limit,
-        includeParent: true,
-        reasoning: isEmergencyLoad ? "Emergency thread history load" : "Initial thread history load"
-    }, {
-        threadId: threadId,
-        threadTs: threadTs,
-        channelId: channelId,
-        addMessage: (message) => {
-            message.threadTs = threadId;
-            return contextBuilder.addMessage(message);
+    try {
+        // Validate required parameters
+        if (!threadId || !threadTs || !channelId) {
+            throw new Error('Missing required parameters for thread history load');
         }
-    });
-    
-    // Check if there was an error
-    if (historyResult.error) {
-        logger.warn(`Thread history error: ${historyResult.errorMessage || 'Unknown error'}`);
-        // Add guidance for the LLM
-        contextBuilder.addMessage({
-            source: 'system',
-            text: `Note: There was a problem loading some thread history. Using available context.`,
-            timestamp: new Date().toISOString(),
-            threadTs: threadId
-        });
-    } else {
-        // Log compact summary of the results
-        const threadMessages = contextBuilder.getThreadMessages(threadId);
-        logger.info(`Thread history: ${historyResult.messagesRetrieved || 0} retrieved, ${threadMessages ? threadMessages.length : 0} in context`);
         
-        // We do NOT record this as a tool execution since we don't want the LLM to see it
+        logger.info(`Loading thread history into context (threadId=${threadId}, channelId=${channelId}, limit=${limit})`);
+        
+        // Get context builder
+        const contextBuilder = getContextBuilder();
+        
+        // Get the Slack client
+        const slackClient = getSlackClient();
+        
+        // First, check if we already have messages for this thread
+        const existingMessages = contextBuilder.getThreadMessages(threadId);
+        if (existingMessages && existingMessages.length > 0 && !isEmergencyLoad) {
+            logger.info(`Thread already has ${existingMessages.length} messages in context, skipping load`);
+            return { 
+                messagesRetrieved: 0, 
+                alreadyLoaded: true,
+                existingMessages: existingMessages.length 
+            };
+        }
+        
+        // Parameters for thread replies
+        const params = {
+            channel: channelId,
+            ts: threadTs,
+            inclusive: true,
+            limit: limit
+        };
+        
+        // Call Slack API to get thread replies
+        const result = await slackClient.conversations.replies(params);
+        
+        if (!result.ok) {
+            throw new Error(`Slack API error: ${result.error || 'Unknown error'}`);
+        }
+        
+        // Get messages from the result
+        const messages = result.messages || [];
+        
+        if (messages.length === 0) {
+            logger.warn('No messages found in thread');
+            return { messagesRetrieved: 0 };
+        }
+        
+        logger.info(`Retrieved ${messages.length} messages from Slack API`);
+        
+        // Format and add each message to the context
+        let addedCount = 0;
+        
+        for (const message of messages) {
+            try {
+                // Create a normalized message format
+                const normalizedMessage = {
+                    source: message.bot_id ? 'assistant' : 'user',
+                    originalContent: message,
+                    id: `slack_${message.ts}`,
+                    timestamp: new Date((message.ts * 1000)).toISOString(),
+                    threadTs: threadId,
+                    text: message.text || '',
+                    sourceId: message.user || message.bot_id,
+                    type: 'chat_message',
+                    metadata: {
+                        channel: channelId,
+                        ts: message.ts,
+                        user: message.user,
+                        bot_id: message.bot_id,
+                        thread_ts: message.thread_ts || threadTs
+                    }
+                };
+                
+                // If the message has attachments, add them
+                if (message.attachments && message.attachments.length > 0) {
+                    normalizedMessage.attachments = message.attachments;
+                }
+                
+                // Add the message to the context
+                contextBuilder.addMessage(normalizedMessage);
+                addedCount++;
+            } catch (messageError) {
+                logger.warn(`Error processing message ${message.ts}: ${messageError.message}`);
+                // Continue with next message
+            }
+        }
+        
+        // Verify messages were added
+        const messagesAfterLoad = contextBuilder.getThreadMessages(threadId);
+        logger.info(`Added ${addedCount} messages to context. Context now has ${messagesAfterLoad.length} messages.`);
+        
+        return {
+            messagesRetrieved: addedCount,
+            totalMessages: messages.length,
+            success: true
+        };
+    } catch (error) {
+        logger.error(`❌ Error loading thread history: ${error.message}`);
+        
+        // If this is a Slack API error, add better debugging
+        if (error.message.includes('Slack API error')) {
+            logger.error('This appears to be a Slack API issue. Check bot permissions and tokens.');
+        }
+        
+        // Try an emergency fallback for critical failures
+        if (!isEmergencyLoad) {
+            try {
+                // Add a system message to indicate the error
+                const contextBuilder = getContextBuilder();
+                contextBuilder.addMessage({
+                    source: 'system',
+                    text: `Error loading thread history: ${error.message}. The bot may have incomplete conversation context.`,
+                    timestamp: new Date().toISOString(),
+                    threadTs: threadId,
+                    type: 'error'
+                });
+                
+                // Return partial success
+                return {
+                    messagesRetrieved: 0,
+                    error: error.message,
+                    success: false,
+                    errorHandled: true
+                };
+            } catch (fallbackError) {
+                logger.error(`Failed to add error message to context: ${fallbackError.message}`);
+            }
+        }
+        
+        // Re-throw the error for the caller to handle
+        throw error;
     }
-    
-    return historyResult;
 }
 
 /**

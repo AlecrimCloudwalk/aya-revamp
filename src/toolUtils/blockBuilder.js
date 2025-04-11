@@ -9,11 +9,17 @@ const { getSlackClient } = require('../slackClient.js');
 const logger = require('./logger.js');
 
 
-// Debug logging function
+// Debug logging function that avoids character-by-character logging
 function debugLog(message, data) {
   if (process.env.DEBUG === 'true' || process.env.DEBUG_SLACK === 'true') {
     if (data) {
-      logger.debug(message, data);
+      // Handle string data specially to avoid verbose logging
+      if (typeof data === 'string') {
+        const preview = data.length > 100 ? data.substring(0, 100) + '...' : data;
+        logger.debug(`${message} (${data.length} chars): ${preview}`);
+      } else {
+        logger.debug(message, data);
+      }
     } else {
       logger.debug(message);
     }

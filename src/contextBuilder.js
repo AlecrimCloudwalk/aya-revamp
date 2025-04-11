@@ -5,13 +5,62 @@
  * (Slack API, LLM responses, button clicks, etc.) into a consistent format 
  * that can be used to build context for the LLM. It also manages thread-specific
  * state like tool executions, button states, and metadata.
+ * 
+ * Standard Context Structure
+ * 
+ * This documents the standard context structure used throughout the application.
+ * It serves as a reference, not a constraint - fields can be added as needed.
+ * 
+ * @typedef {Object} ThreadContext
+ * @property {string} threadId - Thread ID/timestamp
+ * @property {string} [channelId] - Channel ID
+ * @property {string} [userId] - User ID who initiated the request
+ * @property {Object} [user] - User information
+ * @property {string} user.id - User ID
+ * @property {string} user.name - User name
+ * @property {boolean} [isDirectMessage] - Whether this is a direct message
+ * @property {Object} [channel] - Channel information
+ * @property {Object[]} [messages] - Formatted messages in the thread
+ * @property {Object} [metadata] - Additional metadata about the thread
+ * @property {Object} [toolExecutions] - Record of tool executions
+ * 
+ * Message Structure
+ * 
+ * @typedef {Object} Message
+ * @property {string} id - Message ID
+ * @property {string} source - Source of the message (user, assistant, system, tool)
+ * @property {string} text - Message text content
+ * @property {string} timestamp - ISO timestamp
+ * @property {string} threadTs - Thread timestamp
+ * @property {Object} [originalContent] - Original message content from Slack
+ * @property {Object} [metadata] - Additional metadata about the message
  */
 
 const { logError } = require('./errors.js');
 const logger = require('./toolUtils/logger.js');
 const { formatTimestamp, formatRelativeTime, formatContextTimestamp } = require('./toolUtils/dateUtils.js');
 const { calculateTextSimilarity } = require('./toolUtils/messageFormatUtils');
+const crypto = require('crypto');
 
+/**
+ * Cache configuration
+ */
+const CACHE_CONFIG = {
+  MAX_EXECUTIONS_PER_THREAD: 100,
+  MAX_AGE_MS: 30 * 60 * 1000, // 30 minutes
+  TOOLS_WITHOUT_EXPIRY: ['getThreadHistory', 'postMessage']
+};
+
+/**
+ * Thread pruning configuration
+ */
+const THREAD_PRUNING = {
+  MAX_MESSAGES: 75,        // Maximum messages before pruning
+  TARGET_MESSAGES: 50,     // Target number to keep
+  MIN_MESSAGES_TO_KEEP: 10, // Minimum to always keep
+  ALWAYS_KEEP_TYPES: ['error', 'button_click'],
+  ALWAYS_KEEP_FIRST_MESSAGE: true // Always keep thread parent
+};
 
 // Message types - extensible enum of supported message types
 const MessageTypes = {
@@ -30,6 +79,59 @@ const MessageSources = {
   SYSTEM: 'system',
   TOOL: 'tool'
 };
+
+/**
+ * Creates a stable hash for a tool call including name and arguments
+ * @param {string} toolName - Name of the tool
+ * @param {Object} args - Tool arguments
+ * @returns {string} - Hash string representing the tool call
+ */
+function hashToolCall(toolName, args) {
+  // Create a normalized copy of args with keys sorted
+  const normalizedArgs = normalizeObject(args || {});
+  
+  // Create a string representation
+  const stringRepresentation = JSON.stringify({
+    tool: toolName,
+    args: normalizedArgs
+  });
+  
+  // Create a hash
+  return crypto.createHash('md5').update(stringRepresentation).digest('hex');
+}
+
+/**
+ * Recursively normalizes an object for stable hashing
+ * - Sorts keys alphabetically
+ * - Handles nested objects and arrays
+ * - Removes undefined values
+ * @param {*} obj - Object to normalize
+ * @returns {*} - Normalized object
+ */
+function normalizeObject(obj) {
+  // Handle primitives and null
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+  
+  // Handle arrays
+  if (Array.isArray(obj)) {
+    return obj.map(normalizeObject);
+  }
+  
+  // Handle objects
+  const normalized = {};
+  const sortedKeys = Object.keys(obj).sort();
+  
+  for (const key of sortedKeys) {
+    // Skip undefined values
+    if (obj[key] !== undefined) {
+      normalized[key] = normalizeObject(obj[key]);
+    }
+  }
+  
+  return normalized;
+}
 
 /**
  * Format blocks and attachments into a readable text representation
@@ -151,6 +253,38 @@ function formatBlocks(blocks) {
 }
 
 /**
+ * Validates a context object and logs warnings for missing fields
+ * Note: This is for debugging purposes and does NOT restrict fields
+ * @param {Object} context - Context object to validate
+ * @param {string} location - Where validation is occurring 
+ * @returns {Object} - Same context object (never modified)
+ */
+function validateContext(context, location = 'unknown') {
+  // Critical fields that should always be present
+  const criticalFields = ['threadId'];
+  
+  // Recommended fields
+  const recommendedFields = ['channelId', 'userId'];
+  
+  // Check critical fields
+  for (const field of criticalFields) {
+    if (!context[field]) {
+      logger.warn(`Missing critical field '${field}' in context at ${location}`);
+    }
+  }
+  
+  // Check recommended fields
+  for (const field of recommendedFields) {
+    if (!context[field]) {
+      logger.debug(`Missing recommended field '${field}' in context at ${location}`);
+    }
+  }
+  
+  // Return the unchanged context
+  return context;
+}
+
+/**
  * Class to build and manage context for the LLM
  */
 class ContextBuilder {
@@ -175,6 +309,9 @@ class ContextBuilder {
     
     // Tool to message mapping - maps tool execution IDs to message IDs
     this.toolToMessageMap = new Map();
+    
+    // Tool execution cache - maps threadId -> {hashToExecution, executions}
+    this.toolExecutionCache = new Map();
     
     this.buttonStates = new Map(); // ThreadTS -> Map of button states 
     this.debug = process.env.DEBUG_CONTEXT === 'true';
@@ -201,236 +338,257 @@ class ContextBuilder {
   }
 
   /**
-   * Records a tool execution in the context
-   * @param {string} threadId - Thread ID
-   * @param {string} toolName - Name of the tool
-   * @param {Object} args - Tool arguments
-   * @param {Object} result - Tool execution result
-   * @param {Error} [error] - Error object if the tool execution failed
-   * @param {boolean} [skipped] - Whether the tool execution was skipped
-   * @returns {string} - Generated tool execution ID
+   * Records a tool execution with hash-based caching
    */
   recordToolExecution(threadId, toolName, args, result, error = null, skipped = false) {
-    try {
-      // Check if thread exists
-      if (!this.toolExecutions.has(threadId)) {
-        this.toolExecutions.set(threadId, []);
-      }
-      
-      // Generate execution ID
-      const executionId = `tool_${toolName}_${Date.now()}`;
-      
-      // Assign a sequence number to this tool execution
-      const sequence = this.getNextSequence(threadId);
-      
-      // Get current date and time for logging
-      const timestamp = new Date();
-      const isoTimestamp = timestamp.toISOString();
-      
-      // Format timestamps with error handling
-      let formattedTime = 'unknown time';
-      let relativeTime = 'just now';
-      
-      try {
-        formattedTime = formatTimestamp(timestamp);
-        relativeTime = 'just now'; // New executions are always "just now"
-      } catch (timeError) {
-        logger.warn(`Error formatting timestamp in recordToolExecution: ${timeError.message}`);
-      }
-      
-      // Determine the turn ID based on the sequence counter
-      const turnId = Math.floor(sequence / 2) + 1;
-      
-      // Format status - prioritize skipped over error
-      let status;
-      if (skipped) {
-        status = "SKIPPED";
-      } else if (error) {
-        status = "ERROR";
-      } else {
-        status = "SUCCESS";
-      }
-      
-      // For getThreadHistory results, create a simplified version to prevent bloating logs
-      let processedResult = result;
-      if (toolName === 'getThreadHistory' && result) {
-        // Only keep summary information, not full message content
-        processedResult = {
-          messagesRetrieved: result.messagesRetrieved,
-          threadTs: result.threadTs,
-          channelId: result.channelId,
-          threadStats: result.threadStats,
-          indexInfo: result.indexInfo,
-          contextRebuilt: result.contextRebuilt,
-          // Remove the large sections that bloat logs
-          messagesCount: result.messages ? result.messages.length : 0
-        };
-      } else {
-        // Make a safe clone of the result to avoid reference issues
-        processedResult = result ? JSON.parse(JSON.stringify(result)) : null;
-      }
-      
-      // Create execution record
-      const executionRecord = {
-        id: executionId,
-        toolName,
-        threadId,
-        timestamp: isoTimestamp,
-        formattedTime,
-        relativeTime,
-        turnId,
-        args: { ...args },  // Clone to avoid reference issues
-        result: processedResult,
-        error: error ? error.message : null,
-        skipped: skipped,
-        status,
-        sequence: sequence, // Store the sequence number
-        reasoning: args.reasoning || null, // Capture the reasoning
-      };
-      
-      // Add to list
-      this.toolExecutions.get(threadId).unshift(executionRecord);
-      
-      // Log standardized execution record for LLM context
-      try {
-        const logEntry = `[${turnId}] tool ${toolName} called, ${status.toLowerCase()} at ${formattedTime}`;
-        logger.info(logEntry);
-      } catch (logError) {
-        logger.warn(`Error logging tool execution: ${logError.message}`);
-      }
-      
-      // For postMessage tool, associate it with the message sequence and log the message
-      if (toolName === 'postMessage' && result && result.ts) {
-        const messageId = `bot_${result.ts}`;
-        this.messageSequences.set(messageId, sequence);
-        this.toolToMessageMap.set(executionId, messageId);
-        
-        // Log message content preview (truncated if long) with error handling
-        try {
-          const messageText = args.text || '';
-          const previewText = messageText.length > 50 ? 
-            `${messageText.substring(0, 50)}...` : 
-            messageText;
-          logger.info(`[${turnId}] assistant: ${previewText}`);
-          
-          // Log reasoning if available
-          if (args.reasoning) {
-            logger.info(`[${turnId}] reasoning: "${args.reasoning}"`);
-          }
-          
-          // Add system guidance for the LLM about next steps
-          logger.info(`[system] Message was successfully posted at ${formattedTime}. Decide if you want to call finishRequest to complete this user interaction.`);
-        } catch (msgLogError) {
-          logger.warn(`Error logging message preview: ${msgLogError.message}`);
-        }
-      }
-      
-      // Trim if too many
-      if (this.toolExecutions.get(threadId).length > 100) {
-        this.toolExecutions.get(threadId).pop();
-      }
-      
-      return executionId;
-    } catch (error) {
-      logger.error(`Error recording tool execution: ${error.message}`);
-      return null;
+    // Initialize tool executions array for thread if not exists
+    if (!this.toolExecutions.has(threadId)) {
+      this.toolExecutions.set(threadId, []);
+    }
+    
+    // Get or initialize tool execution cache for thread
+    if (!this.toolExecutionCache.has(threadId)) {
+      this.toolExecutionCache.set(threadId, {
+        hashToExecution: new Map(),
+        executions: []
+      });
+    }
+    
+    const cache = this.toolExecutionCache.get(threadId);
+    
+    // Create hash for the tool call
+    const hash = hashToolCall(toolName, args);
+    
+    // Create execution record
+    const execution = {
+      toolName,
+      args,
+      result,
+      error,
+      skipped,
+      timestamp: new Date().toISOString(),
+      hash
+    };
+    
+    // Add to cache by hash
+    cache.hashToExecution.set(hash, execution);
+    
+    // Add to chronological list
+    cache.executions.push(execution);
+    
+    // Add to existing tool executions array (for backward compatibility)
+    const toolExecutions = this.toolExecutions.get(threadId);
+    toolExecutions.push(execution);
+    
+    // Check if we should prune cache after adding new execution
+    if (cache.executions.length > CACHE_CONFIG.MAX_EXECUTIONS_PER_THREAD) {
+      this.pruneToolExecutionCache(threadId);
+    }
+    
+    if (this.debug) {
+      logger.info(`Recorded tool execution for ${threadId}: ${toolName}`);
     }
   }
   
   /**
-   * Add a message to the context
-   * @param {Object} message - Message object
-   * @returns {boolean} - Whether the message was added successfully
+   * Prunes tool execution cache for a thread
+   */
+  pruneToolExecutionCache(threadId) {
+    const cache = this.toolExecutionCache.get(threadId);
+    if (!cache) return;
+    
+    const now = Date.now();
+    const cutoffTime = new Date(now - CACHE_CONFIG.MAX_AGE_MS).toISOString();
+    
+    // Filter executions by age and special tools
+    const validExecutions = cache.executions.filter(execution => {
+      // Never expire certain tools
+      if (CACHE_CONFIG.TOOLS_WITHOUT_EXPIRY.includes(execution.toolName)) {
+        return true;
+      }
+      
+      return execution.timestamp >= cutoffTime;
+    });
+    
+    // Limit to max size
+    const finalExecutions = validExecutions.slice(
+      Math.max(0, validExecutions.length - CACHE_CONFIG.MAX_EXECUTIONS_PER_THREAD)
+    );
+    
+    // Rebuild hash map
+    const newHashMap = new Map();
+    for (const execution of finalExecutions) {
+      newHashMap.set(execution.hash, execution);
+    }
+    
+    // Update cache
+    cache.executions = finalExecutions;
+    cache.hashToExecution = newHashMap;
+    
+    // Log the pruning operation
+    if (this.debug) {
+      const prunedCount = cache.executions.length - finalExecutions.length;
+      if (prunedCount > 0) {
+        logger.info(`Pruned ${prunedCount} tool executions from thread ${threadId}`);
+      }
+    }
+  }
+  
+  /**
+   * Checks if a tool has already been executed with given arguments
+   */
+  hasExecuted(threadId, toolName, args = {}) {
+    // Get cache
+    const cache = this.toolExecutionCache.get(threadId);
+    if (!cache) return false;
+    
+    // Create hash for lookup
+    const hash = hashToolCall(toolName, args);
+    
+    // Check cache
+    return cache.hashToExecution.has(hash);
+  }
+  
+  /**
+   * Gets the result of a previous tool execution
+   */
+  getToolResult(threadId, toolName, args = {}) {
+    // Get cache
+    const cache = this.toolExecutionCache.get(threadId);
+    if (!cache) return null;
+    
+    // Create hash for lookup
+    const hash = hashToolCall(toolName, args);
+    
+    // Check cache
+    const execution = cache.hashToExecution.get(hash);
+    return execution ? execution.result : null;
+  }
+  
+  /**
+   * Add a message to the context builder
+   * @param {Object} message - Message object to add
+   * @returns {Object} - Added message
    */
   addMessage(message) {
     try {
-      // Validate message has required fields
-      if (!message || !message.threadTs) {
-        logger.warn('Attempted to add invalid message to context');
-        return false;
+      // Generate a message ID if not provided
+      if (!message.id) {
+        const randomId = Math.random().toString(36).substring(2, 8);
+        message.id = `msg_${Date.now()}_${randomId}`;
       }
       
-      // Generate ID if none provided
-      const messageId = message.id || `msg_${Date.now()}`;
-      
-      // Get thread timestamp
-      const threadTs = message.threadTs;
-      
-      // Initialize thread if not exists
-      if (!this.threadMessages.has(threadTs)) {
-        this.threadMessages.set(threadTs, []);
+      // Set timestamp if not provided
+      if (!message.timestamp) {
+        message.timestamp = new Date().toISOString();
       }
       
-      // Assign a sequence number to this message if not from a tool call
-      let sequence;
-      if (message.source === 'user') {
-        // User messages get their own sequence
-        sequence = this.getNextSequence(threadTs);
-      } else if (message.fromToolExecution) {
-        // If message came from a tool execution, use that sequence
-        sequence = message.sequence;
+      // Make sure threadTs is set
+      if (!message.threadTs) {
+        logger.warn(`Adding message without threadTs: ${message.id}`);
+      }
+      
+      // Process the message by type
+      const processedMessage = this._processMessage(message);
+      
+      // Check if the message was processed correctly
+      if (!processedMessage) {
+        logger.error(`Failed to process message: ${JSON.stringify(message)}`);
+        return message;
+      }
+      
+      // Add message to the general message map
+      this.messages.set(processedMessage.id, processedMessage);
+      logger.info(`Added message to messages map with ID: ${processedMessage.id}`);
+      
+      // Add to thread-specific list if threadTs is provided
+      if (processedMessage.threadTs) {
+        // Get existing thread messages or create a new array
+        if (!this.threadMessages.has(processedMessage.threadTs)) {
+          this.threadMessages.set(processedMessage.threadTs, []);
+          logger.info(`Created new thread entry for ${processedMessage.threadTs}`);
+        }
+        
+        // Get the messages array for this thread
+        const threadMsgs = this.threadMessages.get(processedMessage.threadTs);
+        
+        // Add to thread-specific list
+        threadMsgs.push(processedMessage.id);
+        
+        // Update the map
+        this.threadMessages.set(processedMessage.threadTs, threadMsgs);
+        logger.info(`Added message ${processedMessage.id} to thread ${processedMessage.threadTs} (now has ${threadMsgs.length} messages)`);
       } else {
-        // All other messages get their own sequence if not specified
-        sequence = message.sequence || this.getNextSequence(threadTs);
+        logger.warn(`Message has no threadTs, not adding to any thread: ${processedMessage.id}`);
       }
       
-      // Store the sequence with this message
-      this.messageSequences.set(messageId, sequence);
-      
-      // Store message with ID
-      const fullMessage = {
-        ...message,
-        id: messageId,
-        timestamp: message.timestamp || new Date().toISOString(),
-        sequence: sequence
-      };
-      
-      this.messages.set(messageId, fullMessage);
-      
-      // Add to thread
-      const threadMessages = this.threadMessages.get(threadTs);
-      if (!threadMessages.includes(messageId)) {
-        threadMessages.push(messageId);
+      // Save a copy of recent messages for duplicate detection
+      if (processedMessage.text && processedMessage.source === 'assistant') {
+        const recentMessages = this.getMetadata(processedMessage.threadTs, 'recentMessages') || [];
+        recentMessages.unshift({
+          text: processedMessage.text,
+          timestamp: processedMessage.timestamp,
+          id: processedMessage.id
+        });
+        
+        // Keep only the last 5
+        const trimmedRecent = recentMessages.slice(0, 5);
+        
+        // Store in metadata
+        this.setMetadata(processedMessage.threadTs, 'recentMessages', trimmedRecent);
       }
       
-      return true;
+      // Return the processed message
+      return processedMessage;
     } catch (error) {
-      logger.error(`Error adding message to context: ${error.message}`);
-      return false;
+      logger.error(`Error adding message: ${error.message}`);
+      logger.error(error.stack);
+      return message;
     }
   }
   
   /**
-   * Process message into standardized format
-   * @param {Object} message - Raw message data
-   * @returns {Object} - Standardized context message
+   * Process a message by its type and source
+   * @param {Object} message - Message to process
+   * @returns {Object} - Processed message
+   * @private
    */
   _processMessage(message) {
-    // Basic validation
-    if (!message) return null;
-    
-    // Different handling based on source
-    if (message.source === 'slack') {
-      return this._processSlackMessage(message);
-    } else if (message.source === 'llm') {
-      return this._processLLMMessage(message);
-    } else if (message.source === 'button_click') {
-      return this._processButtonClick(message);
-    } else if (message.source === 'system') {
-      return this._processSystemMessage(message);
-    } else {
-      // Generic processing for other message types
-      return {
-        id: message.id || `msg_${Date.now()}`,
+    try {
+      logger.info(`Processing message of source: ${message.source}, type: ${message.type || 'unspecified'}`);
+      
+      // Normalize message structure
+      const baseMessage = {
+        ...message,
+        id: message.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         timestamp: message.timestamp || new Date().toISOString(),
-        threadTs: message.threadTs,
-        source: message.source || MessageSources.SYSTEM,
-        sourceId: message.sourceId,
-        originalContent: message.originalContent || message,
-        text: message.text || 'No text content',
-        type: message.type || MessageTypes.TEXT,
-        metadata: message.metadata || {}
+        text: message.text || ''
       };
+      
+      // Process by source
+      if (message.source === 'slack') {
+        return this._processSlackMessage(baseMessage);
+      } else if (message.source === 'llm' || message.source === 'assistant') {
+        return this._processLLMMessage(baseMessage);
+      } else if (message.source === 'system') {
+        return this._processSystemMessage(baseMessage);
+      } else if (message.type === 'button_click') {
+        return this._processButtonClick(baseMessage);
+      }
+      
+      // Log if we don't recognize the message type
+      if (!['user', 'tool'].includes(message.source)) {
+        logger.warn(`Unknown message source: ${message.source}, passing through`);
+      }
+      
+      logger.info(`Message processed successfully, ID: ${baseMessage.id}`);
+      
+      // Return the message as is if not handled specifically
+      return baseMessage;
+    } catch (error) {
+      logger.error(`Error processing message: ${error.message}`);
+      logger.error(error.stack);
+      return message; // Return original message on error
     }
   }
   
@@ -890,43 +1048,85 @@ class ContextBuilder {
   }
   
   /**
-   * Format a message for LLM consumption
+   * Formats a message for the LLM in a standardized format
    * @param {Object} message - Message to format
-   * @param {number} index - Index in the context sequence
-   * @returns {Object|null} - Formatted message object or null if invalid
+   * @param {number} index - Message index for ordering
+   * @returns {Object|null} - Formatted message for LLM
+   * @private
    */
   _formatMessageForLLM(message, index) {
-    if (!message) return null;
-    
-    const formattedTime = formatContextTimestamp(message.timestamp);
-    let formattedString = '';
-    let role = 'system';
-    let source = message.source;
-    
-    if (message.source === 'user') {
-      // Format: [1] DD/MM/YYYY HH:mm - USER <@userID>: message
-      const userId = this._extractUserId(message);
-      formattedString = `[${index}] ${formattedTime} - USER <@${userId}>: ${message.text || ''}`;
-      role = 'user';
-    } else if (message.source === 'assistant' || message.source === 'llm') {
-      // Format: [2] DD/MM/YYYY HH:mm - BOT MESSAGE: message
-      formattedString = `[${index}] ${formattedTime} - BOT MESSAGE: ${message.text || ''}`;
-      role = 'assistant';
-    } else if (message.source === 'system') {
-      // Format: [3] DD/MM/YYYY HH:mm - BOT SYSTEM: message
-      formattedString = `[${index}] ${formattedTime} - BOT SYSTEM: ${message.text || ''}`;
-      role = 'system';
-    } else {
-      // Unknown source, skip
-      return null;
+    try {
+      if (!message) {
+        logger.warn('Attempted to format undefined/null message');
+        return null;
+      }
+      
+      // Log message details for debugging
+      logger.info(`Formatting message for LLM: ${message.id} (source: ${message.source || 'undefined'})`);
+      
+      // Normalize message source to handle different formats
+      let sourceType = typeof message.source === 'string' ? message.source.toLowerCase() : 'unknown';
+      
+      // Determine the appropriate role based on source
+      let role = 'system';  // Default role
+      if (sourceType === 'user') {
+        role = 'user';
+      } else if (['assistant', 'bot', 'llm'].includes(sourceType)) {
+        role = 'assistant';
+      } else if (sourceType === 'tool') {
+        role = 'function';  // For tool calls/responses
+      }
+      
+      // Format content based on role
+      let content;
+      if (role === 'user') {
+        // For user messages, use an object with text and userid
+        // Strip out dev key if present
+        let textContent = message.text || '';
+        if (textContent.startsWith('!@#')) {
+          textContent = textContent.substring(3).trim();
+          logger.info(`Stripped dev key from user message before sending to LLM: ${textContent}`);
+        }
+        
+        content = {
+          text: textContent,
+          userid: message.sourceId || 'unknown'
+        };
+      } else if (role === 'assistant' && message.llmResponse) {
+        // For assistant messages with tool call data
+        content = message.text || '';
+        // Include reasoning if available
+        if (message.llmResponse?.reasoning) {
+          content += `\n\nReasoning: ${message.llmResponse.reasoning}`;
+        }
+      } else if (role === 'assistant') {
+        // For assistant messages without tool call data
+        // Make sure we always have message content, not an empty string
+        content = message.text || 'Assistant response';
+        logger.info(`Formatted assistant message content: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`);
+      } else {
+        // For system or other messages, use text directly
+        content = message.text || '';
+      }
+      
+      // Return formatted message object
+      return {
+        role,
+        content,
+        timestamp: message.timestamp || new Date().toISOString(),
+        turn: index + 1
+      };
+    } catch (error) {
+      logger.error(`Error formatting message for LLM: ${error.message}`);
+      
+      // Return a safe default if formatting fails
+      return {
+        role: 'system',
+        content: `Error formatting message: ${error.message}`,
+        timestamp: new Date().toISOString(),
+        turn: index + 1
+      };
     }
-    
-    return {
-      role,
-      source,
-      formattedString,
-      raw: message.text || ''
-    };
   }
   
   /**
@@ -958,279 +1158,249 @@ class ContextBuilder {
   }
   
   /**
-   * Builds context for the LLM using the new standardized format specified in docs/llm_context_format.md
+   * Prunes thread history when it gets too long
+   * @param {string} threadTs - Thread timestamp
+   * @returns {number} - Number of messages removed
+   */
+  pruneThreadHistory(threadTs) {
+    // Get messages for the thread
+    const messages = this.getThreadMessages(threadTs);
+    if (!messages || messages.length <= THREAD_PRUNING.MIN_MESSAGES_TO_KEEP) {
+      return 0; // Nothing to prune
+    }
+    
+    // Only prune if we're over the limit
+    if (messages.length <= THREAD_PRUNING.MAX_MESSAGES) {
+      return 0;
+    }
+    
+    // Determine which messages to keep
+    const messagesToKeep = [];
+    
+    // Always keep the first message (thread parent)
+    if (THREAD_PRUNING.ALWAYS_KEEP_FIRST_MESSAGE && messages.length > 0) {
+      messagesToKeep.push(messages[0]);
+    }
+    
+    // First pass - keep critical message types
+    for (const msgId of messages) {
+      const msg = this.messages.get(msgId);
+      if (!msg) continue;
+      
+      if (THREAD_PRUNING.ALWAYS_KEEP_TYPES.includes(msg.type)) {
+        messagesToKeep.push(msgId);
+      }
+    }
+    
+    // Second pass - keep most recent messages to reach target
+    const remainingToKeep = THREAD_PRUNING.TARGET_MESSAGES - messagesToKeep.length;
+    if (remainingToKeep > 0) {
+      // Create a set of already kept messages for quick lookup
+      const keptSet = new Set(messagesToKeep);
+      
+      // Add the most recent messages not already kept
+      const recentMessages = messages
+        .slice(-remainingToKeep)
+        .filter(msgId => !keptSet.has(msgId));
+      
+      messagesToKeep.push(...recentMessages);
+    }
+    
+    // Create a set for efficient lookup
+    const keepSet = new Set(messagesToKeep);
+    
+    // Create new thread messages list
+    const newThreadMessages = messages.filter(msgId => keepSet.has(msgId));
+    
+    // Calculate how many we removed
+    const removedCount = messages.length - newThreadMessages.length;
+    
+    // Update thread messages
+    if (removedCount > 0) {
+      this.threadMessages.set(threadTs, newThreadMessages);
+      
+      // Add a system message about pruning
+      this.addMessage({
+        source: 'system',
+        originalContent: { pruned: removedCount },
+        id: `prune_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        threadTs,
+        text: `${removedCount} older messages have been summarized to optimize context.`,
+        type: 'system_note',
+        metadata: { isPruneNotice: true }
+      });
+      
+      logger.info(`Pruned ${removedCount} messages from thread ${threadTs}`);
+    }
+    
+    return removedCount;
+  }
+  
+  /**
+   * Builds context for the LLM for a specific thread in the new JSON format
    * @param {string} threadTs - Thread timestamp
    * @param {Object} options - Build options
-   * @returns {Array} - Messages array for LLM in the new format
+   * @returns {Array} - Messages array for LLM
    */
   buildFormattedLLMContext(threadTs, options = {}) {
     try {
-      const { limit = 25, includeBotMessages = true, includeToolCalls = true, skipLogging = false } = options;
+      // Add verbose logging for empty context diagnosis
+      logger.info(`Building context for thread: ${threadTs}`);
+      logger.info(`Thread exists in threadMessages: ${this.threadMessages.has(threadTs)}`);
       
-      // Only log if not explicitly skipped (helps prevent duplicate logs)
-      if (!skipLogging) {
-        logger.info(`Building formatted LLM context for thread ${threadTs}`);
+      if (this.threadMessages.has(threadTs)) {
+        const messageCount = this.threadMessages.get(threadTs)?.length || 0;
+        logger.info(`Thread has ${messageCount} message IDs stored`);
+      } else {
+        logger.error(`⚠️ CONTEXT ERROR: Thread ${threadTs} not found in threadMessages map`);
+        // Print all available thread IDs for debugging
+        logger.info(`Available thread IDs: ${Array.from(this.threadMessages.keys()).join(', ')}`);
+      }
+
+      // Check if we should prune first
+      const messageCount = this.getThreadMessages(threadTs)?.length || 0;
+      
+      if (messageCount > THREAD_PRUNING.MAX_MESSAGES) {
+        this.pruneThreadHistory(threadTs);
       }
       
-      // Make sure threadTs exists
+      const { limit = 25, includeBotMessages = true, includeToolCalls = true, skipLogging = false } = options;
+      
       if (!threadTs || !this.threadMessages.has(threadTs)) {
         logger.warn(`No messages found for thread ${threadTs}`);
         return [];
       }
       
-      // Get messages for this thread
-      const threadMsgs = this.threadMessages.get(threadTs) || [];
+      // Get all message IDs for this thread
+      const messageIds = this.getThreadMessages(threadTs);
       
-      // Get tool executions for this thread
-      const toolExecs = this.toolExecutions.get(threadTs) || [];
+      // Get the actual message objects
+      const rawMessages = [];
       
-      // Get thread metadata for user info
-      const metadata = this.getMetadata(threadTs) || {};
-      const context = metadata.context || {};
-      const iterations = metadata.iterations || 0;
-      
-      // Extract user information
-      const userInfo = context.user || {};
-      const userId = this._extractUserId(this.messages.get(threadMsgs[0]));
-      const userTimezone = userInfo.timezone || 'America/Sao_Paulo';
-      const isDirectMessage = context.isDirectMessage || false;
-      const channel = context.channelName || (isDirectMessage ? 'Direct Message' : 'Unknown Channel');
-      
-      // Debug log - only if not skipped
-      if (!skipLogging) {
-        logger.info(`Found ${threadMsgs.length} messages and ${toolExecs.length} tool executions for thread ${threadTs}`);
-      }
-      
-      // Create an array of all items (messages and tool executions) with their sequence numbers
-      const allItems = [];
-      
-      // Add messages
-      for (const msgId of threadMsgs) {
-        if (!this.messages.has(msgId)) continue;
-        
-        const message = this.messages.get(msgId);
-        const sequence = this.messageSequences.get(msgId) || 0;
-        
-        allItems.push({
-          type: 'message',
-          item: message,
-          sequence: sequence,
-          timestamp: message.timestamp
-        });
-      }
-      
-      // Add tool executions if enabled
-      if (includeToolCalls) {
-        for (const tool of toolExecs) {
-          allItems.push({
-            type: 'tool',
-            item: tool,
-            sequence: tool.sequence || 0,
-            timestamp: tool.timestamp
-          });
+      // Directly access actual messages since mapping is failing
+      for (const msgId of messageIds) {
+        const msg = this.messages.get(msgId);
+        if (msg) {
+          // Log for debugging
+          logger.info(`Found message ${msgId}, source=${msg.source}, type=${msg.type || 'unspecified'}`);
+          rawMessages.push(msg);
+        } else {
+          logger.warn(`Message not found for ID: ${msgId}`);
         }
       }
       
-      // Sort by timestamp in chronological order (oldest first)
-      allItems.sort((a, b) => {
-        return new Date(a.timestamp) - new Date(b.timestamp);
+      // Log details about the raw messages retrieved
+      logger.info(`Found ${rawMessages.length} raw messages for thread ${threadTs}`);
+      
+      // DEBUG: Add detailed logging of raw messages
+      rawMessages.forEach((msg, idx) => {
+        logger.info(`Raw message ${idx}: source=${msg.source}, type=${msg.type || 'unspecified'}, id=${msg.id}`);
       });
       
-      // Create an array to hold the JSON context entries
-      const jsonContext = [];
-
-      // Count different message types for conversation stats
-      const userMessages = allItems.filter(item => 
-        item.type === 'message' && item.item.source === 'user'
-      );
-      const botMessages = allItems.filter(item => 
-        item.type === 'message' && 
-        (item.item.source === 'assistant' || item.item.source === 'llm')
-      );
-      const totalMessages = threadMsgs.length;
-      const toolCallsCount = toolExecs.length;
-      const inThread = context.isThread || false;
-      const threadHistoryCalls = toolExecs.filter(tool => tool.toolName === 'getThreadHistory').length;
-      const isInitialMessage = totalMessages === 1;
-      const mentionedUsers = context.mentionedUsers || [];
-      const hasMentions = mentionedUsers.length > 0;
+      // Filter and format each message
+      const jsonContext = rawMessages
+        .filter(msg => {
+          // Add detailed filtering logs
+          // First, ensure message has a source - default to 'system' if missing
+          if (!msg.source) {
+            logger.info(`Message ${msg.id} has no source, defaulting to 'system'`);
+            msg.source = 'system';
+          }
+          
+          // Normalize source to handle both object and string sources
+          const sourceNormalized = typeof msg.source === 'string' ? msg.source.toLowerCase() : 'unknown';
+          
+          const sourceMatch = sourceNormalized === 'user';
+          const botMatch = (sourceNormalized === 'assistant' || sourceNormalized === 'bot') && includeBotMessages;
+          const toolMatch = sourceNormalized === 'tool' && includeToolCalls;
+          const errorMatch = sourceNormalized === 'system' && msg.type === 'error';
+          const buttonMatch = (msg.type === 'button_click' || msg.type === 'button');
+          
+          // Add special case for system messages which should be included by default
+          const systemMatch = sourceNormalized === 'system';
+          
+          logger.info(`Message ${msg.id} filtering: source=${sourceNormalized}, type=${msg.type || 'unspecified'}`);
+          logger.info(`  sourceMatch=${sourceMatch}, botMatch=${botMatch}, toolMatch=${toolMatch}, errorMatch=${errorMatch}, buttonMatch=${buttonMatch}, systemMatch=${systemMatch}`);
+          
+          // Include anything that matches our criteria
+          const result = sourceMatch || botMatch || toolMatch || errorMatch || buttonMatch || systemMatch;
+          
+          if (!result) {
+            logger.info(`  ❌ Message ${msg.id} filtered out`);
+          } else {
+            logger.info(`  ✅ Message ${msg.id} included`);
+          }
+          
+          return result;
+        })
+        .map((msg, index) => {
+          const formatted = this._formatMessageForLLM(msg, index);
+          if (!formatted) {
+            logger.info(`Message ${msg.id} formatting failed`);
+          }
+          return formatted;
+        })
+        .filter(Boolean);  // Remove any null/undefined formatted messages
       
-      // Create conversation stats object (added before the system prompt)
-      const conversationStats = {
-        index: 0,
-        turn: 0,
-        timestamp: new Date().toISOString(),
-        role: "system",
-        content: {
-          type: "conversation_stats",
-          stats: {
-            channel_info: {
-              channel: channel,
-              is_dm: isDirectMessage,
-              is_thread: inThread,
-              is_initial_message: isInitialMessage,
-              has_mentions: hasMentions,
-              mentioned_users_count: mentionedUsers.length
-            },
-            message_counts: {
-              total_messages: totalMessages,
-              user_messages: userMessages.length,
-              bot_messages: botMessages.length,
-              available_messages: Math.min(totalMessages, limit)
-            },
-            tool_usage: {
-              total_tool_calls: toolCallsCount,
-              thread_history_calls: threadHistoryCalls
-            }
-          },
-          guidance: "Use this information to decide whether to call getThreadHistory. In DMs or threads with only 1 message, extra context retrieval isn't needed."
-        }
-      };
+      // Log filtered count to identify filtering issues
+      logger.info(`After filtering and formatting: ${jsonContext.length} messages`);
       
-      // Add conversation stats as the very first item
-      jsonContext.push(conversationStats);
-
-      // Add system message as the next entry with enhanced user info
-      const ayaPrompts = require('./prompts/aya.js');
-      const systemPrompt = ayaPrompts.generatePersonalityPrompt(userId, channel, iterations);
-
-      // Add system message to our JSON context array
-      jsonContext.push({
-        index: 1,
-        turn: 0,
-        timestamp: new Date().toISOString(),
-        role: "system",
-        content: systemPrompt
-      });
-      
-      // Group items by conversation turn for proper numbering
-      // Initialize with turn 0 for the initial system message
-      let currentTurn = 0;
-      let lastUserMessageTime = null;
-      let currentIndex = 2; // Start from 2 since we have stats and system message
-      
-      // Process all items according to turn-based numbering
-      for (const item of allItems) {
-        // Determine if this starts a new turn
-        // A turn starts when a user message follows a bot message or tool call
-        if (item.type === 'message' && 
-          item.item.source === 'user' &&
-          lastUserMessageTime !== null && 
-          new Date(item.timestamp) - new Date(lastUserMessageTime) > 100) {
-          currentTurn++;
+      // If context is still empty, try a fallback approach
+      if (jsonContext.length === 0) {
+        logger.warn(`⚠️ No messages passed filtering for thread ${threadTs}, trying fallback`);
+        
+        // Try to bypass the filter entirely as a last resort
+        logger.info(`Attempting to bypass filtering entirely as last resort`);
+        const emergencyContext = rawMessages.map((msg, index) => {
+          // Force basic user/system message format
+          const forcedMsg = {
+            ...msg,
+            source: msg.source || 'system',
+            text: msg.text || 'No content',
+            timestamp: msg.timestamp || new Date().toISOString(),
+            id: msg.id || `emergency_${index}`
+          };
+          
+          return {
+            role: forcedMsg.source === 'user' ? 'user' : 'system',
+            content: forcedMsg.source === 'user' 
+              ? { text: forcedMsg.text, userid: forcedMsg.sourceId || 'unknown' }
+              : forcedMsg.text,
+            timestamp: forcedMsg.timestamp
+          };
+        }).filter(Boolean);
+        
+        logger.info(`Emergency bypass produced ${emergencyContext.length} context items`);
+        
+        if (emergencyContext.length > 0) {
+          logger.info(`Using ${emergencyContext.length} emergency context items`);
+          return emergencyContext;
         }
         
-        // Remember last user message time
-        if (item.type === 'message' && item.item.source === 'user') {
-          lastUserMessageTime = item.timestamp;
-        }
+        // Add all messages without filtering as a fallback
+        const fallbackContext = rawMessages
+          .map((msg, index) => this._formatMessageForLLM(msg, index))
+          .filter(Boolean);
+          
+        logger.info(`Fallback approach yielded ${fallbackContext.length} messages`);
         
-        // Format this item based on its type
-        if (item.type === 'message') {
-          // Format user or assistant messages
-          const formattedMessage = this._formatMessageForLLM(item.item, currentIndex);
-          
-          if (formattedMessage) {
-            // Generate content object with additional metadata
-            const contentObj = {};
-            
-            // Add relevant message metadata
-            if (item.item.text) {
-              contentObj.text = item.item.text;
-            }
-            
-            // Extract and add message identifiers for use in reactions
-            const messageId = item.item.id || null;
-            const messageTs = item.item.ts || (item.item.originalContent?.ts || null);
-            
-            // Add message identifiers to allow targeting for emoji reactions
-            contentObj.message_id = messageId;
-            
-            // Add message timestamps for Slack API operations
-            if (messageTs) {
-              contentObj.message_ts = messageTs;
-              
-              // Mark this as the preferred identifier for API operations
-              contentObj.api_identifier = messageTs;
-            }
-            
-            // Include the channel ID if available for API operations
-            const channelId = item.item.channelId || 
-                            item.item.metadata?.channel || 
-                            this.getChannel(threadTs);
-            if (channelId) {
-              contentObj.channel_id = channelId;
-            }
-            
-            // Add additional metadata if available in the original message
-            if (item.item.metadata) {
-              // Add message index if available
-              if (item.item.metadata.messageIndex !== undefined) {
-                contentObj.message_index = item.item.metadata.messageIndex;
-              }
-              
-              // Add parent message flag
-              if (item.item.metadata.isParent) {
-                contentObj.is_parent = true;
-              }
-              
-              // Add thread timestamp
-              if (item.item.metadata.threadTs) {
-                contentObj.thread_ts = item.item.metadata.threadTs;
-              }
-            }
-            
-            // Add reactions if available in the message metadata
-            if (item.item.metadata && item.item.metadata.reactions) {
-              contentObj.reactions = item.item.metadata.reactions;
-              
-              // Add formatted reactions string if available
-              if (item.item.metadata.formattedReactions) {
-                contentObj.formatted_reactions = item.item.metadata.formattedReactions;
-              }
-            }
-            
-            // Add JSON context entry with proper role, turn number, and timestamp
-            jsonContext.push({
-              index: currentIndex,
-              turn: currentTurn,
-              timestamp: item.timestamp,
-              role: formattedMessage.role,
-              content: contentObj
-            });
-            
-            currentIndex++;
-          }
-        } else if (item.type === 'tool' && includeToolCalls) {
-          // Format tool executions
-          const formattedTool = this._formatToolExecutionForLLM(item.item, currentIndex);
-          
-          if (formattedTool) {
-            // Create a JSON structure for the tool call
-            jsonContext.push({
-              index: currentIndex,
-              turn: currentTurn,
-              timestamp: item.timestamp,
-              role: formattedTool.role,
-              content: {
-                type: "tool_call",
-                tool_name: item.item.toolName,
-                status: item.item.error ? "error" : (item.item.skipped ? "skipped" : "success"),
-                args: item.item.args || {},
-                result: item.item.result || null,
-                error: item.item.error || null
-              }
-            });
-            
-            currentIndex++;
-          }
+        // If we have fallback messages, use them
+        if (fallbackContext.length > 0) {
+          logger.info(`Using ${fallbackContext.length} fallback messages`);
+          return fallbackContext;
         }
+      }
+      
+      if (!skipLogging && process.env.DEBUG_CONTEXT === 'true') {
+        logger.info(`Formatted ${jsonContext.length} messages for LLM context`);
       }
       
       // Return the fully formatted JSON context
       return jsonContext;
     } catch (error) {
       logError('Error building LLM context', error, { threadTs });
+      logger.error(`⚠️ CONTEXT ERROR: ${error.message}`);
       return [];
     }
   }
@@ -1318,133 +1488,51 @@ class ContextBuilder {
   }
   
   /**
-   * Get messages for a specific thread
+   * Get all messages for a thread
    * @param {string} threadTs - Thread timestamp
-   * @returns {Array} Array of messages
+   * @returns {Array} - Array of message IDs for the thread
    */
   getThreadMessages(threadTs) {
     try {
-      // If not a valid thread TS, return empty array
-      if (!threadTs || !this.threadMessages.has(threadTs)) {
-        return [];
+      logger.info(`DEBUG: threadMessages map has ${this.threadMessages.size} threads`);
+      logger.info(`DEBUG: Keys in threadMessages: ${Array.from(this.threadMessages.keys()).join(', ')}`);
+      
+      // Check if the thread exists in the map
+      if (!this.threadMessages.has(threadTs)) {
+        // Try exact key comparison and then try number/string conversion
+        const threadTsNum = parseFloat(threadTs);
+        const keys = Array.from(this.threadMessages.keys());
+        
+        // Try to find a close match
+        const closeMatch = keys.find(key => {
+          const keyNum = parseFloat(key);
+          return Math.abs(keyNum - threadTsNum) < 0.001; // Allow small floating point differences
+        });
+        
+        if (closeMatch) {
+          logger.info(`Found close match for thread ID ${threadTs} -> ${closeMatch}`);
+          threadTs = closeMatch;
+        } else {
+          logger.warn(`No thread messages found for ${threadTs}`);
+          return [];
+        }
       }
       
       // Get message IDs for this thread
-      const messageIds = this.threadMessages.get(threadTs);
-      if (!messageIds || !Array.isArray(messageIds)) {
-        return [];
-      }
+      const messageIds = this.threadMessages.get(threadTs) || [];
+      logger.info(`Thread ${threadTs} has ${messageIds.length} message IDs`);
       
-      // Get actual messages from IDs
-      return messageIds
+      // Get actual messages and count how many we found
+      const actualMessages = messageIds
         .map(id => this.messages.get(id))
-        .filter(message => !!message); // Filter out any null/undefined messages
+        .filter(Boolean);
+      logger.info(`Retrieved ${actualMessages.length} actual messages from ${messageIds.length} IDs`);
+      
+      return messageIds;
     } catch (error) {
       logger.error(`Error getting thread messages: ${error.message}`);
+      logger.error(error.stack);
       return [];
-    }
-  }
-  
-  /**
-   * Check if a tool has been executed with specific args
-   * @param {string} threadId - Thread ID
-   * @param {string} toolName - Name of the tool
-   * @param {Object} args - Arguments to check
-   * @returns {boolean} - Whether tool has been executed
-   */
-  hasExecuted(threadId, toolName, args = {}) {
-    try {
-      // Check if thread exists in tool executions
-      if (!this.toolExecutions.has(threadId)) {
-        return false;
-      }
-      
-      // Get tool executions for this thread
-      const executions = this.toolExecutions.get(threadId);
-      
-      // Special handling for postMessage to avoid treating different messages as duplicates
-      if (toolName === 'postMessage' && args.text) {
-        return executions.some(exec => {
-          // Must match the tool name
-          if (exec.toolName !== toolName) return false;
-          
-          // If no args in previous execution, it can't be a match
-          if (!exec.args || !exec.args.text) return false;
-          
-          // For postMessage, compare text content with similarity detection
-          const similarity = calculateTextSimilarity(args.text, exec.args.text);
-          
-          // Lower the similarity threshold from 0.95 to 0.85
-          // This allows more variation between messages while still catching true duplicates
-          return similarity > 0.85;
-        });
-      }
-      
-      // For other tools, do a more precise comparison of args
-      return executions.some(exec => {
-        // Must match the tool name
-        if (exec.toolName !== toolName) return false;
-        
-        // Check if args match (more detailed check)
-        if (!args || Object.keys(args).length === 0) {
-          return true; // No args to check, just match on tool name
-        }
-        
-        // Compare all keys and values
-        return Object.keys(args).every(key => {
-          // Skip reasoning check - reasoning can be different
-          if (key === 'reasoning') return true;
-          
-          // Compare the values
-          return exec.args && 
-                 exec.args[key] !== undefined && 
-                 JSON.stringify(exec.args[key]) === JSON.stringify(args[key]);
-        });
-      });
-    } catch (error) {
-      logger.error(`Error checking if tool was executed: ${error.message}`);
-      return false;
-    }
-  }
-  
-  /**
-   * Get the result of a tool execution
-   * @param {string} threadId - Thread ID
-   * @param {string} toolName - Name of the tool
-   * @param {Object} args - Arguments used
-   * @returns {Object} - Result of the execution
-   */
-  getToolResult(threadId, toolName, args = {}) {
-    try {
-      // Check if thread exists in tool executions
-      if (!this.toolExecutions.has(threadId)) {
-        return null;
-      }
-      
-      // Get tool executions for this thread
-      const executions = this.toolExecutions.get(threadId);
-      
-      // Find a matching execution
-      const matchingExec = executions.find(exec => {
-        // Must match the tool name
-        if (exec.toolName !== toolName) return false;
-        
-        // Check if args match approximately
-        if (!args || Object.keys(args).length === 0) {
-          return true; // No args to check, just match on tool name
-        }
-        
-        // Simple key matching
-        return Object.keys(args).every(key => {
-          return exec.args && exec.args[key] !== undefined;
-        });
-      });
-      
-      // Return the result if found
-      return matchingExec ? matchingExec.result : null;
-    } catch (error) {
-      logger.error(`Error getting tool result: ${error.message}`);
-      return null;
     }
   }
   
@@ -1462,6 +1550,145 @@ class ContextBuilder {
     } catch (error) {
       logger.error('Error in buildLLMContext:', error);
       return [];
+    }
+  }
+  
+  /**
+   * Enhances a context object with thread information if missing
+   * @param {Object} context - Context object to enhance
+   * @returns {Object} - Enhanced context (or original if already complete)
+   */
+  enhanceWithThreadInfo(context) {
+    // Create a shallow copy to avoid direct modification
+    const enhancedContext = { ...context };
+    
+    // If we have a threadId but no thread messages, add them
+    if (enhancedContext.threadId && !enhancedContext.messages) {
+      const threadMessages = this.getFormattedThreadMessages(enhancedContext.threadId);
+      if (threadMessages && threadMessages.length > 0) {
+        enhancedContext.messages = threadMessages;
+      }
+    }
+    
+    // If we have a threadId but no channel, try to find it
+    if (enhancedContext.threadId && !enhancedContext.channelId) {
+      const channelId = this.getChannel(enhancedContext.threadId);
+      if (channelId) {
+        enhancedContext.channelId = channelId;
+      }
+    }
+    
+    return enhancedContext;
+  }
+  
+  /**
+   * Enhances a context object with user information if missing
+   * @param {Object} context - Context object to enhance
+   * @returns {Promise<Object>} - Enhanced context with user information
+   */
+  async enhanceWithUserInfo(context) {
+    // Create a shallow copy to avoid direct modification
+    const enhancedContext = { ...context };
+    
+    // If we have userId but no user object, fetch user info
+    if (enhancedContext.userId && !enhancedContext.user) {
+      try {
+        // Get Slack client
+        const { getSlackClient } = require('./slackClient');
+        const slackClient = getSlackClient();
+        
+        // Fetch user info
+        const userResponse = await slackClient.users.info({ user: enhancedContext.userId });
+        if (userResponse.ok && userResponse.user) {
+          enhancedContext.user = {
+            id: userResponse.user.id,
+            name: userResponse.user.name,
+            real_name: userResponse.user.real_name,
+            profile: userResponse.user.profile
+          };
+        }
+      } catch (error) {
+        // Log but don't fail if user info can't be retrieved
+        logger.warn(`Could not fetch user info for ${enhancedContext.userId}:`, error.message);
+      }
+    }
+    
+    return enhancedContext;
+  }
+
+  /**
+   * Force the creation of a minimal context from user input when normal context building fails
+   * @param {string} threadId - The thread ID
+   * @param {Object} userContext - User context from Slack
+   * @returns {Array} - A minimal context array
+   */
+  buildEmergencyContext(threadId, userContext) {
+    try {
+      logger.info(`🚨 Building emergency context for thread ${threadId}`);
+      
+      // Array to hold our emergency context
+      const emergencyContext = [];
+      
+      // Add system message explaining the situation
+      emergencyContext.push({
+        role: 'system',
+        content: 'EMERGENCY CONTEXT: The normal context building process failed. This is a reconstructed minimal context.',
+        timestamp: new Date().toISOString()
+      });
+      
+      // Add the user's latest message
+      if (userContext && userContext.text) {
+        emergencyContext.push({
+          role: 'user',
+          content: {
+            text: userContext.text,
+            userid: userContext.userId || 'unknown'
+          },
+          timestamp: new Date().toISOString()
+        });
+        
+        logger.info(`Added user message to emergency context: ${userContext.text}`);
+      } else {
+        // No user context available, add a generic user message
+        emergencyContext.push({
+          role: 'user',
+          content: {
+            text: 'Can you help me?',
+            userid: 'unknown'
+          },
+          timestamp: new Date().toISOString()
+        });
+        
+        logger.info('Added generic user message to emergency context');
+      }
+      
+      // Add another system message with guidance for the LLM
+      emergencyContext.push({
+        role: 'system',
+        content: 'Please respond to the user\'s message as best you can with the limited context. After responding, call finishRequest to complete the interaction.',
+        timestamp: new Date().toISOString()
+      });
+      
+      logger.info(`Built emergency context with ${emergencyContext.length} items`);
+      
+      return emergencyContext;
+    } catch (error) {
+      logger.error(`Error building emergency context: ${error.message}`);
+      
+      // Absolute last resort - return a minimal context with just an error message
+      return [
+        {
+          role: 'system',
+          content: 'CRITICAL ERROR: Context building completely failed. Please respond to the user and call finishRequest.'
+        },
+        {
+          role: 'user',
+          content: {
+            text: 'Can you help me?',
+            userid: 'unknown'
+          }
+        }
+      ];
     }
   }
 }
@@ -1484,5 +1711,6 @@ module.exports = {
   ContextBuilder,
   getContextBuilder,
   MessageTypes,
-  MessageSources
+  MessageSources,
+  validateContext
 }; 
