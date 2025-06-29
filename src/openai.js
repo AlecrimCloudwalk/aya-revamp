@@ -73,7 +73,21 @@ async function callOpenAI(params) {
         logger.info('=== FULL MESSAGES BEING SENT TO LLM ===');
         logger.info(JSON.stringify(params.messages, null, 2));
         logger.info('=== FULL REQUEST BODY ===');
-        logger.info(JSON.stringify(requestBody, null, 2));
+        
+        // Create a modified request body with truncated system messages and only include messages
+        const loggingRequestBody = {
+            messages: requestBody.messages.map(msg => {
+                if (msg.role === 'system' && msg.content.length > 100) {
+                    return {
+                        ...msg,
+                        content: msg.content.substring(0, 100) + '...'
+                    };
+                }
+                return msg;
+            })
+        };
+        
+        logger.info(JSON.stringify(loggingRequestBody, null, 2));
         
         // Use the new llmDebugLogger for comprehensive request logging
         llmDebugLogger.logRequest(threadId, params);

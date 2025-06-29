@@ -113,11 +113,12 @@ async function updateButtonMessage(payload, threadContext) {
             ]
         };
 
-        // Initialize update parameters
+        // Initialize update parameters - don't change the text, just update the visual representation
         let updateParams = {
             channel: channelId,
-            ts: messageTs,
-            text: 'Selection made'
+            ts: messageTs
+            // NOTE: We don't set 'text' here to avoid polluting the conversation history
+            // The visual update will be handled by replacing the action blocks
         };
         
         // Track whether we found and updated any actions blocks

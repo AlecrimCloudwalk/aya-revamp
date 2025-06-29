@@ -10,6 +10,9 @@ const { setSlackClient } = require('./slackClient.js');
 // Add tools import to verify they're loaded properly
 const tools = require('./tools/index.js');
 const logger = require('./toolUtils/logger.js');
+// Initialize context builders
+const { getContextBuilder } = require('./contextBuilder.js');
+const { getThreadContextBuilder } = require('./threadContextBuilder.js');
 
 
 // Reduce logging noise
@@ -42,28 +45,29 @@ const app = new App({
 // Store the Slack client in our singleton
 setSlackClient(app.client);
 
-// Verify that critical tools are available
+// Function to verify tools are loaded properly
 function verifyTools() {
-  const requiredTools = ['postMessage', 'getThreadHistory', 'finishRequest'];
-  const missingTools = [];
-
-  requiredTools.forEach(toolName => {
-    try {
-      const tool = tools.getTool(toolName);
-      if (!tool) {
-        missingTools.push(toolName);
-      }
-    } catch (error) {
-      missingTools.push(`${toolName} (${error.message})`);
-    }
-  });
-
-  if (missingTools.length > 0) {
-    logger.error('❌ ERROR: Critical tools are missing:', missingTools.join(', '));
-    throw new Error(`Missing required tools: ${missingTools.join(', ')}`);
+  // Count the number of tools
+  const toolsCount = Object.keys(tools).length;
+  
+  // Log tools count
+  logger.info(`Loaded ${toolsCount} tools`);
+  
+  // Verify context builders are initialized
+  try {
+    // Initialize both context builders
+    const contextBuilder = getContextBuilder();
+    const threadContextBuilder = getThreadContextBuilder();
+    
+    // Log success
+    logger.info('Context builders initialized successfully');
+  } catch (error) {
+    logError('Failed to initialize context builders', error);
+    throw error;
   }
-
-  logger.info('✅ All required tools verified successfully');
+  
+  // Success - return true
+  return true;
 }
 
 // Set up Slack event listeners

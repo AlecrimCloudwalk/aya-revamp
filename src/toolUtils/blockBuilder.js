@@ -1117,6 +1117,70 @@ function parseParams(blockType, content) {
     return { buttons: [] };
   }
   
+  // For fields blocks, parse the array format
+  if (blockType === 'fields') {
+    debugLog(`📊 Parsing fields block`);
+    
+    // Check if content is in array format [field1, field2, ...]
+    if (content.trim().startsWith('[') && content.trim().endsWith(']')) {
+      // Remove the square brackets
+      const fieldsContent = content.trim().substring(1, content.trim().length - 1);
+      debugLog(`📊 Fields content to parse: "${fieldsContent}"`);
+      
+      // Split by commas, but be careful of commas inside field content
+      const fieldDefinitions = [];
+      let currentField = '';
+      let inFieldContent = false;
+      let pipeCount = 0;
+      
+      for (let i = 0; i < fieldsContent.length; i++) {
+        const char = fieldsContent[i];
+        
+        if (char === '|') {
+          pipeCount++;
+          currentField += char;
+        } else if (char === ',' && pipeCount % 2 === 0) {
+          // Comma after even number of pipes (complete field pair)
+          if (currentField.trim()) {
+            fieldDefinitions.push(currentField.trim());
+          }
+          currentField = '';
+          pipeCount = 0;
+        } else {
+          currentField += char;
+        }
+      }
+      
+      // Add the last field if there is one
+      if (currentField.trim()) {
+        fieldDefinitions.push(currentField.trim());
+      }
+      
+      debugLog(`📊 Parsed ${fieldDefinitions.length} field definitions`);
+      
+      // Process each field definition into field objects
+      const fields = fieldDefinitions.map((fieldDef, index) => {
+        if (fieldDef.includes('|')) {
+          const parts = fieldDef.split('|').map(part => part.trim());
+          const title = parts[0];
+          const value = parts[1] || '';
+          
+          debugLog(`📊 Field ${index + 1}: "${title}" → "${value}"`);
+          return { title, value };
+        } else {
+          // Simple field without title/value separation
+          debugLog(`📊 Field ${index + 1}: simple text "${fieldDef}"`);
+          return fieldDef;
+        }
+      });
+      
+      return { ...params, fields };
+    }
+    
+    // If not in array format, treat as single field
+    return { ...params, fields: [content] };
+  }
+  
   // Default case, just return the content as text parameter plus any common parameters
   return { ...params, text: content };
 }
@@ -1405,10 +1469,17 @@ async function parseMessage(message) {
     };
   }
   
+  // First, properly unescape newlines in the message
+  let processedMessage = message.replace(/\\n/g, '\n');
+  
+  // Log the before and after for debugging
+  debugLog(`🔍 Original message length: ${message.length}`);
+  debugLog(`🔍 Processed message length: ${processedMessage.length}`);
+  
   // Extract block declarations using regex
   // Updated regex that's more flexible with newlines and whitespace
   const blockRegex = /#([a-zA-Z]+):\s*([\s\S]*?)(?=\s*#[a-zA-Z]+:|$)/g;
-  const matches = Array.from(message.matchAll(blockRegex));
+  const matches = Array.from(processedMessage.matchAll(blockRegex));
   
   // If no blocks found, treat as plain text but put in an attachment with colored bar
   if (matches.length === 0) {
@@ -1420,7 +1491,7 @@ async function parseMessage(message) {
           type: 'section', 
           text: { 
             type: 'mrkdwn', 
-            text: message 
+            text: processedMessage // Use the processed message with unescaped newlines
           } 
         }]
       }]

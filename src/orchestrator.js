@@ -198,167 +198,76 @@ async function handleIncomingSlackMessage(context) {
 }
 
 /**
- * Executes a tool and records its execution in thread state
+ * Execute a tool
+ * @param {string} toolName - Name of the tool to execute
+ * @param {Object} args - Tool arguments
+ * @param {string} threadId - Thread ID
+ * @returns {Promise<Object>} - Tool execution result
  */
 async function executeTool(toolName, args, threadId) {
-    // Get context builder
-    const contextBuilder = getContextBuilder();
+  try {
+    const tools = require('./tools');
     
-    try {
-        logger.info(`📣 Executing tool: ${toolName}`);
+    // Get context
+    const context = getThreadContext(threadId);
+    
+    // Get tool execution count for this thread
+    const contextBuilder = getContextBuilder();
+    const toolExecutions = contextBuilder.getToolExecutionHistory(threadId);
+    
+    // Count consecutive calls to this tool
+    const sameTool = toolExecutions.filter(te => te.toolName === toolName);
+    const callCount = sameTool.length;
+    
+    // Count errors in recent executions of this tool
+    const errors = sameTool.filter(te => te.error).length;
+    
+    // Special handling for specific tools
+    switch(toolName) {
+      case 'getThreadHistory':
+        logger.info(`Handling getThreadHistory with special handler (call #${callCount + 1})`);
+        return await handleGetThreadHistory(args, threadId, context, callCount, errors);
         
-        // STANDARDIZE: Handle reasoning parameter by moving it to the top level
-        // We want reasoning to always be at the top level, not inside parameters
-        let sanitizedArgs = { ...args };
+      case 'postMessage':
+        // Ensure reasoning gets stored in metadata
+        args.metadata = args.metadata || {};
+        args.metadata.reasoning = args.reasoning || "No reasoning provided";
+        break;
         
-        // Handle nested tool structure - this happens when the LLM returns 
-        // { "tool": "toolName", "parameters": {...} } inside the parameters
-        if (sanitizedArgs.tool && sanitizedArgs.parameters && sanitizedArgs.tool === toolName) {
-            logger.info('Detected nested tool structure, extracting inner parameters');
-            sanitizedArgs = {
-                ...sanitizedArgs.parameters,
-                reasoning: sanitizedArgs.reasoning || sanitizedArgs.parameters.reasoning
-            };
-        }
-        
-        // Check if we have reasoning in both places
-        if (sanitizedArgs.reasoning && 
-            sanitizedArgs.parameters && 
-            sanitizedArgs.parameters.reasoning) {
-            // Keep only the top-level reasoning and remove the parameters.reasoning
-            logger.info('Detected duplicate reasoning fields - keeping only top-level reasoning');
-            delete sanitizedArgs.parameters.reasoning;
-        }
-        
-        // If reasoning is only in parameters, move it to the top level
-        if (!sanitizedArgs.reasoning && 
-            sanitizedArgs.parameters && 
-            sanitizedArgs.parameters.reasoning) {
-            sanitizedArgs.reasoning = sanitizedArgs.parameters.reasoning;
-            delete sanitizedArgs.parameters.reasoning;
-            logger.info('Moved reasoning from parameters to top level for consistency');
-        }
-        
-        const tool = getTool(toolName);
-        if (!tool) {
-            throw new Error(`Tool ${toolName} not found`);
-        }
-        // Get existing recent messages from context
-        let recentMessages = contextBuilder.getMetadata(threadId, 'recentMessages') || [];
-        
-        // Create an object with thread-specific context for the tool
-        const threadContext = {
-            threadId: threadId,
-            channelId: contextBuilder.getChannel(threadId),
-            threadTs: contextBuilder.getThreadTs(threadId),
-            recentMessages: recentMessages, // Add recent messages for duplicate detection
-            getMetadata: (key) => contextBuilder.getMetadata(threadId, key),
-            setMetadata: (key, value) => contextBuilder.setMetadata(threadId, key, value),
-            getButtonState: (actionId) => contextBuilder.getButtonState(threadId, actionId),
-            setButtonState: (actionId, state, metadata) => contextBuilder.setButtonState(threadId, actionId, state, metadata),
-            addMessage: (message) => {
-                message.threadTs = threadId;
-                return contextBuilder.addMessage(message);
-            },
-            getToolExecutionHistory: (limit = 10) => contextBuilder.getToolExecutionHistory(threadId, limit)
-        };
-
-        // Special debugging for getThreadHistory - simplified to reduce noise
-        if (toolName === 'getThreadHistory') {
-            const callNum = getThreadHistoryTool.callCounter.get(threadId) || 1;
-            logger.info(`🔍 getThreadHistory call #${callNum} for thread ${threadId}`);
-            
-            // Only log essential parameters to reduce noise
-            if (process.env.DEBUG_LLM === 'true') {
-                const debugInfo = {
-                    threadId: threadId,
-                    argsThreadTs: sanitizedArgs.threadTs,
-                    argsChannelId: sanitizedArgs.channelId,
-                    argsLimit: sanitizedArgs.limit,
-                    argsForceRefresh: sanitizedArgs.forceRefresh || false
-                };
-                logger.detail(`getThreadHistory params: ${JSON.stringify(debugInfo)}`);
-            }
-        }
-
-        // Right before the actual tool call - avoid logging large argument objects for getThreadHistory
-        if (toolName === 'getThreadHistory') {
-            const simplifiedArgs = {
-                limit: sanitizedArgs.limit,
-                threadTs: sanitizedArgs.threadTs,
-                includeParent: sanitizedArgs.includeParent,
-                forceRefresh: sanitizedArgs.forceRefresh
-            };
-            logger.info(`Executing tool ${toolName} with parameters: ${JSON.stringify(simplifiedArgs, null, 2)}`);
-        } else {
-            logger.info(`Executing tool ${toolName} with parameters: ${JSON.stringify(sanitizedArgs, null, 2)}`);
-        }
-
-        // Add tool tracing to global namespace for debugging
-        if (!global.toolTraces) {
-            global.toolTraces = new Map();
-        }
-        if (!global.toolTraces.has(threadId)) {
-            global.toolTraces.set(threadId, []);
-        }
-        global.toolTraces.get(threadId).push({
-            timestamp: new Date().toISOString(),
-            tool: toolName,
-            args: sanitizedArgs
-        });
-
-        // Pass the thread context object to the tool
-        const result = await tool(sanitizedArgs, threadContext);
-        
-        // If this is a message post, add it to recent messages
-        if (toolName === 'postMessage' && result && result.status !== 'error' && sanitizedArgs.text) {
-            recentMessages.push({
-                text: sanitizedArgs.text,
-                timestamp: Date.now(),
-                toolName: toolName
-            });
-            
-            // Only keep recent 10 messages
-            if (recentMessages.length > 10) {
-                recentMessages = recentMessages.slice(-10);
-            }
-            
-            // Store updated recent messages
-            contextBuilder.setMetadata(threadId, 'recentMessages', recentMessages);
-        }
-        
-        // Record the tool execution in context builder, but create a summarized version of large results
-        if (toolName === 'getThreadHistory' && result) {
-            // Create a summarized version of the getThreadHistory result to prevent log bloat
-            const summarizedResult = {
-                messagesRetrieved: result.messagesRetrieved,
-                threadTs: result.threadTs,
-                channelId: result.channelId,
-                threadStats: result.threadStats,
-                indexInfo: result.indexInfo,
-                contextRebuilt: result.contextRebuilt,
-                fromCache: result.fromCache,
-                // Exclude full message content and formatted history to reduce log size
-                messagesCount: result.messages ? result.messages.length : 0
-            };
-            contextBuilder.recordToolExecution(threadId, toolName, sanitizedArgs, summarizedResult);
-        } else {
-            contextBuilder.recordToolExecution(threadId, toolName, sanitizedArgs, result);
-        }
-        
-        return result;
-    } catch (error) {
-        logger.warn(`❌ Tool execution failed: ${error.message}`);
-        // Add more detailed error information
-        if (error.message.includes('JSON') || error.message.includes('array') || error.message.includes('object')) {
-            logger.info(`💡 This might be a parameter formatting issue. Check that arrays and objects are correctly formatted.`);
-        }
-        
-        // Record the failed execution
-        contextBuilder.recordToolExecution(threadId, toolName, args, null, error);
-        
-        throw error;
+      case 'finishRequest':
+        // Track completion for analytics
+        args.metadata = args.metadata || {};
+        args.metadata.completionTime = new Date().toISOString();
+        args.metadata.toolCalls = toolExecutions.length;
+        break;
     }
+    
+    // Get the tool function from the registry
+    const toolFunction = tools.getTool(toolName);
+    
+    // Execute the appropriate tool
+    if (!toolFunction) {
+      logger.error(`Tool not found in registry: ${toolName}`);
+      throw new Error(`Tool not found: ${toolName}`);
+    }
+    
+    logger.info(`Executing tool: ${toolName}`);
+    const result = await toolFunction(args, { threadTs: threadId, ...context });
+    
+    // Record the execution in the context
+    contextBuilder.recordToolExecution(threadId, toolName, args, result);
+    
+    return result;
+  } catch (error) {
+    logger.error(`Error executing tool ${toolName}: ${error.message}`);
+    
+    // Record the error in the context
+    const contextBuilder = getContextBuilder();
+    contextBuilder.recordToolExecution(threadId, toolName, args, null, error);
+    
+    // Rethrow for upstream handling
+    throw error;
+  }
 }
 
 /**
@@ -567,6 +476,27 @@ async function processThread(threadId) {
         // Check if this is a button selection
         const isButtonSelection = contextBuilder.getMetadata(threadId, 'isButtonSelection') || false;
         
+        // DEBUG: Log button selection status to help track the loop issue
+        if (isButtonSelection) {
+            logger.info(`🔘 Processing as button selection for thread ${threadId}`);
+        } else {
+            // CRITICAL FIX: If this is NOT a button selection, it's a fresh user request
+            // Clear any confusing previous context that might contain "Selection made" messages
+            logger.info(`🧹 Fresh request detected - cleaning up any previous "Selection made" messages`);
+            
+            const messages = contextBuilder.getThreadMessages(threadId) || [];
+            const cleanedMessages = messages.filter(msg => {
+                // Remove messages that contain "Selection made" text as they pollute the context
+                return !(msg.text && msg.text.includes('Selection made'));
+            });
+            
+            if (cleanedMessages.length !== messages.length) {
+                logger.info(`🧹 Removed ${messages.length - cleanedMessages.length} "Selection made" messages from context`);
+                // Update the thread messages
+                contextBuilder.threadMessages.set(threadId, cleanedMessages);
+            }
+        }
+        
         // Add a warning note if we're in a direct message with minimal context
         if (context && context.isDirectMessage) {
             const messages = contextBuilder.getThreadMessages(threadId) || [];
@@ -706,31 +636,50 @@ async function processThread(threadId) {
                 
                 // If we've already sent a message but haven't called finishRequest yet, add a note
                 if (messagePosted && iteration > 1) {
-                    logger.info(`Already sent ${messagesSent} messages, adding finishRequest reminder`);
+                    logger.info(`Already sent ${messagesSent} messages, checking if we should wait for user interaction`);
                     
-                    // Set flag to indicate we're waiting for finishRequest
-                    waitingForFinishRequest = true;
+                    // CRITICAL FIX: Check if the last message contained buttons
+                    // If so, we should NOT auto-finish - we should wait for user interaction
+                    const lastMessages = contextBuilder.getThreadMessages(threadId) || [];
+                    const lastBotMessage = lastMessages
+                        .filter(msg => msg.source === 'assistant' || msg.type === 'bot_message')
+                        .pop();
                     
-                    // Add explicit guidance if we're just waiting for finishRequest
-                    if (iteration === 3) {
-                        contextBuilder.addMessage({
-                            source: 'system',
-                            text: `⚠️ REMINDER: You've already responded to the user's request. Please call finishRequest now to complete this interaction.`,
-                            timestamp: new Date().toISOString(),
-                            threadTs: threadId
-                        });
+                    const hasButtons = lastBotMessage && lastBotMessage.text && 
+                        (lastBotMessage.text.includes('#buttons:') || lastBotMessage.text.includes('buttons:'));
+                    
+                    if (hasButtons) {
+                        logger.info(`🔘 Last message contained buttons - NOT auto-finishing, waiting for user interaction`);
                         
-                        // Auto-finish after iteration 3 if message has been posted
-                        logger.info(`Auto-finishing after sending a message and waiting ${iteration-1} iterations`);
-                        const finishTool = getTool('finishRequest');
-                        if (finishTool) {
-                            await finishTool({
-                                summary: "Auto-finishing after response completed",
-                                reasoning: `Response was sent but finishRequest wasn't called after ${iteration-1} iterations`
-                            }, getThreadContext(threadId, context));
-                        }
+                        // Don't auto-finish if we posted buttons - wait for user interaction
+                        // Just break out of the loop to wait for button clicks
                         requestCompleted = true;
                         break;
+                    } else {
+                        // Set flag to indicate we're waiting for finishRequest
+                        waitingForFinishRequest = true;
+                        
+                        // Add explicit guidance if we're just waiting for finishRequest
+                        if (iteration === 3) {
+                            contextBuilder.addMessage({
+                                source: 'system',
+                                text: `⚠️ REMINDER: You've already responded to the user's request. Please call finishRequest now to complete this interaction.`,
+                                timestamp: new Date().toISOString(),
+                                threadTs: threadId
+                            });
+                            
+                            // Auto-finish after iteration 3 if message has been posted (but no buttons)
+                            logger.info(`Auto-finishing after sending a message and waiting ${iteration-1} iterations`);
+                            const finishTool = getTool('finishRequest');
+                            if (finishTool) {
+                                await finishTool({
+                                    summary: "Auto-finishing after response completed",
+                                    reasoning: `Response was sent but finishRequest wasn't called after ${iteration-1} iterations`
+                                }, getThreadContext(threadId, context));
+                            }
+                            requestCompleted = true;
+                            break;
+                        }
                     }
                 }
                 
@@ -840,10 +789,14 @@ async function processThread(threadId) {
                         
                         if (isSimilarOperation) {
                             consecutiveSimilarOperations++;
-                            // If we're repeating the same operation too many times, it's likely a loop
-                            if (consecutiveSimilarOperations >= 3) {
-                                logger.warn(`⚠️ Loop detected: ${consecutiveSimilarOperations} consecutive ${toolName} calls`);
-                                
+                                                    // More intelligent loop detection - only consider it a loop if it's really excessive
+                        if (consecutiveSimilarOperations >= 5) {
+                            logger.warn(`⚠️ Potential loop detected: ${consecutiveSimilarOperations} consecutive ${toolName} calls`);
+                            
+                            // For getThreadHistory, allow more attempts as it's often needed for context
+                            if (toolName === 'getThreadHistory' && consecutiveSimilarOperations < 7) {
+                                logger.info(`Allowing additional getThreadHistory calls - may be needed for context building`);
+                            } else {
                                 // Add system message about loop detection
                                 contextBuilder.addMessage({
                                     source: 'system',
@@ -869,6 +822,7 @@ async function processThread(threadId) {
                                     break;
                                 }
                             }
+                        }
                         } else {
                             // Reset counter if we're doing a different operation
                             consecutiveSimilarOperations = 0;
@@ -907,22 +861,39 @@ async function processThread(threadId) {
                     idleIterations = 0;
                 }
                 
-                // Special handling for button selections
+                // Special handling for button selections - ONLY auto-finish if this was a response to a button click
                 if (isButtonSelection && buttonResponses === 0 && messagePosted) {
-                    // Auto-finish button selection responses after first message
-                    logger.info('Button selection response sent, auto-finishing request');
+                    // Only auto-finish if this was actually a response to a button click
+                    // Check if we have a recent button click in the context
+                    const recentMessages = contextBuilder.getThreadMessages(threadId) || [];
+                    const hasRecentButtonClick = recentMessages.some(msg => 
+                        msg.type === 'button_click' && 
+                        (Date.now() - new Date(msg.timestamp).getTime()) < 30000 // Within last 30 seconds
+                    );
                     
-                    // Auto-finish the request
-                    const finishTool = getTool('finishRequest');
-                    if (finishTool) {
-                        await finishTool({
-                            summary: "Auto-finishing after button selection response",
-                            reasoning: `Button selection response completed`
-                        }, getThreadContext(threadId, context));
+                    if (hasRecentButtonClick) {
+                        // This is a response to a button click - auto-finish
+                        logger.info('Button selection response sent (responding to button click), auto-finishing request');
+                        
+                        // CRITICAL FIX: Clear the button selection flag to prevent loops
+                        contextBuilder.setMetadata(threadId, 'isButtonSelection', false);
+                        logger.info('Cleared isButtonSelection flag to prevent future loops');
+                        
+                        // Auto-finish the request
+                        const finishTool = getTool('finishRequest');
+                        if (finishTool) {
+                            await finishTool({
+                                summary: "Auto-finishing after button selection response",
+                                reasoning: `Button selection response completed`
+                            }, getThreadContext(threadId, context));
+                        }
+                        
+                        requestCompleted = true;
+                        break;
+                    } else {
+                        // This is just posting buttons initially - don't auto-finish yet
+                        logger.info('Posted buttons but no recent button click - NOT auto-finishing, waiting for user interaction');
                     }
-                    
-                    requestCompleted = true;
-                    break;
                 }
                 
             } catch (iterationError) {
@@ -1013,98 +984,165 @@ async function processThread(threadId) {
 }
 
 /**
- * Helper function to create a thread context object
+ * Get thread context for tools
+ * @param {string} threadId - Thread ID
+ * @returns {Object} - Thread context
  */
-function getThreadContext(threadId, context) {
-    return {
-        threadId: threadId,
-        threadTs: context?.threadTs,
-        channelId: context?.channelId,
-        addMessage: (message) => {
-            message.threadTs = threadId;
-            return getContextBuilder().addMessage(message);
-        },
-        // Add getMetadata method to fix the error in postMessage
-        getMetadata: (key) => {
-            if (key === 'context') {
-                return context;
-            }
-            return context?.[key];
-        }
-    };
+function getThreadContext(threadId) {
+  const contextBuilder = getContextBuilder();
+  
+  // Create an object with thread-specific context for the tool
+  return {
+    threadId,
+    channelId: contextBuilder.getChannel(threadId),
+    threadTs: contextBuilder.getThreadTs(threadId),
+    isDirectMessage: contextBuilder.getMetadata(threadId, 'isDirectMessage') || false,
+    userInfo: contextBuilder.getMetadata(threadId, 'userInfo') || {},
+    getMetadata: (key) => contextBuilder.getMetadata(threadId, key),
+    setMetadata: (key, value) => contextBuilder.setMetadata(threadId, key, value),
+    getButtonState: (actionId) => contextBuilder.getButtonState(threadId, actionId),
+    setButtonState: (actionId, state, metadata) => contextBuilder.setButtonState(threadId, actionId, state, metadata),
+    addMessage: (message) => {
+      message.threadTs = threadId;
+      return contextBuilder.addMessage(message);
+    },
+    getToolExecutionHistory: (limit = 10) => contextBuilder.getToolExecutionHistory(threadId, limit)
+  };
 }
 
 /**
- * Handle special processing for getThreadHistory tool
+ * Handle getThreadHistory tool calls
+ * @param {Object} args - Tool call arguments
+ * @param {string} threadId - Thread ID
+ * @param {Object} context - Thread context
+ * @param {number} callCount - Count of tool calls
+ * @param {number} errorCount - Count of errors
+ * @returns {Promise<Object>} - Thread history result
  */
-function handleGetThreadHistory(args, threadId, context, callCount, errorCount) {
-    // Check if this is an extra getThreadHistory call
-    if (callCount > 0) {
-        const contextBuilder = getContextBuilder();
-        
-        // Add warning if this is called multiple times
-        if (callCount > 1) {
-            const messages = contextBuilder.getThreadMessages(threadId) || [];
-            const isDirectMessage = context?.isDirectMessage || false;
-            
-            // For DMs or simple threads, strongly discourage multiple history calls
-            if (isDirectMessage && messages.length <= 2) {
-                contextBuilder.addMessage({
-                    source: 'system',
-                    text: `⚠️ NOTE: You are in a direct message with only ${messages.length} messages. Thread history has already been loaded automatically. Multiple getThreadHistory calls are unnecessary and waste resources. Please respond directly to the user.`,
-                    timestamp: new Date().toISOString(),
-                    threadTs: threadId,
-                    type: 'warning'
-                });
-            } else if (callCount > 2) {
-                // Add strong warning after 3+ calls
-                contextBuilder.addMessage({
-                    source: 'system',
-                    text: `⚠️ WARNING: getThreadHistory called ${callCount} times. This is excessive and inefficient. You already have the necessary context. Please focus on answering the user's query directly without requesting more history.`,
-                    timestamp: new Date().toISOString(),
-                    threadTs: threadId,
-                    type: 'warning'
-                });
-            }
-        }
-        
-        // Create a hard limit for thread history calls
-        if (callCount > 3) {
-            logger.warn(`⚠️ HARD LIMIT: getThreadHistory called ${callCount} times for thread ${threadId}`);
-            
-            // Record this as a skipped execution
-            const skippedResult = {
-                status: 'error',
-                error: 'EXECUTION_LIMIT_REACHED',
-                errorMessage: `Maximum getThreadHistory calls (3) reached for this conversation`,
-                skipped: true,
-                suggestion: 'You already have sufficient context. Please respond to the user without further history retrieval.'
-            };
-            
-            // Record the skipped execution
-            contextBuilder.recordToolExecution(threadId, 'getThreadHistory', args, skippedResult, null, true);
-            
-            // Add explicit system message
-            contextBuilder.addMessage({
-                source: 'system',
-                text: `⚠️ LIMIT REACHED: You've called getThreadHistory ${callCount} times. This tool is being blocked to prevent inefficient usage. Please use the existing context and respond to the user.`,
-                timestamp: new Date().toISOString(),
-                threadTs: threadId,
-                type: 'error_notice'
-            });
-            
-            // Return the skipped result instead of executing the tool
-            return skippedResult;
-        }
+async function handleGetThreadHistory(args, threadId, context, callCount, errorCount) {
+  try {
+    logger.info(`🧵 Getting thread history for ${threadId}`);
+    
+    // Extract parameters
+    const limit = args.limit || 20;
+    const ascending = args.ascending === true;
+    const forceRefresh = args.forceRefresh === true;
+    
+    // Get thread info from context
+    const channelId = context.channelId || threadId;
+    const threadTs = context.threadTs || threadId;
+    
+    // Check for excessive calls but be more permissive for legitimate use cases
+    const MAX_CONSECUTIVE_CALLS = 6; // Increased from 3 to 6
+    if (callCount > MAX_CONSECUTIVE_CALLS && !forceRefresh) {
+      logger.warn(`⚠️ Detected potential loop in getThreadHistory calls (${callCount} consecutive calls)`);
+      
+      // Return a warning but still proceed with the history retrieval
+      logger.info(`Proceeding with getThreadHistory despite ${callCount} calls - legitimate use case possible`);
     }
     
-    // Execute the tool normally
-    try {
-        return executeTool('getThreadHistory', args, threadId);
-    } catch (error) {
-        logger.error(`Error executing getThreadHistory: ${error.message}`);
-        throw error;
+    // Get context builder
+    const { getThreadContextBuilder } = require('./threadContextBuilder.js');
+    const threadContextBuilder = getThreadContextBuilder();
+    
+    // Clear cache if force refresh is requested
+    if (forceRefresh) {
+      logger.info(`Forcing refresh of thread history for ${threadId}`);
+      threadContextBuilder.clearCache(threadTs, channelId);
     }
+    
+    // Build context to get thread history
+    const threadInfo = await threadContextBuilder._getThreadInfo(threadTs, channelId);
+    
+    // Format messages for presentation to the LLM
+    const formattedMessages = threadInfo.messages.map((msg, index) => {
+      // Determine message type (user, bot, system)
+      const isUser = !(msg.bot_id || msg.subtype === 'bot_message' || msg.user === process.env.SLACK_BOT_USER_ID);
+      const isSystem = msg.subtype && ['channel_join', 'channel_leave', 'channel_purpose', 'channel_topic'].includes(msg.subtype);
+      
+      // Format user info
+      const userIdentifier = isUser ? `<@${msg.user || 'unknown'}>` : 'Aya';
+      
+      // Convert timestamp to readable format
+      const timestamp = msg.ts ? new Date(parseInt(msg.ts) * 1000).toLocaleString() : 'Unknown time';
+      
+      // Prefix for each message
+      const prefix = `[${index}] ${isUser ? '👤' : isSystem ? '🔄' : '🤖'} `;
+      
+      // Handle attachments/blocks - simplify for presentation
+      let attachmentText = '';
+      if (msg.attachments && msg.attachments.length > 0) {
+        attachmentText = msg.attachments.map(att => 
+          `\n    📎 ${att.title || 'Attachment'}: ${att.text || att.fallback || 'No description'}`
+        ).join('');
+      }
+      
+      // Format final message text
+      return `${prefix}${userIdentifier} (${timestamp}):\n${msg.text || ''}${attachmentText}`;
+    });
+    
+    // Generate formatted history text
+    const historyHeader = `Thread History in ${threadInfo.isThread ? 'Thread' : 'Direct Message'} (${formattedMessages.length} messages):\n`;
+    const formattedHistoryText = historyHeader + formattedMessages.join('\n\n');
+    
+    // Create indexing info
+    const indexInfo = {
+      indexRange: `0-${formattedMessages.length - 1}`,
+      messageCount: formattedMessages.length,
+      missingMessages: 0
+    };
+    
+    // Create thread stats
+    const threadStats = {
+      totalMessagesInThread: formattedMessages.length,
+      remainingMessages: 0,
+      parentMessageRetrieved: threadInfo.parentMessage !== null
+    };
+    
+    // Return formatted result
+    logger.info(`✅ Retrieved ${formattedMessages.length} messages from thread history`);
+    
+    return {
+      messagesRetrieved: formattedMessages.length,
+      messages: formattedMessages,
+      formattedHistoryText,
+      threadStats,
+      indexInfo,
+      fromCache: !forceRefresh,
+      cachedAt: forceRefresh ? null : new Date().toISOString()
+    };
+  } catch (error) {
+    logger.error(`❌ Error getting thread history: ${error.message}`);
+    errorCount = (errorCount || 0) + 1;
+    
+    // After multiple failures, fall back to a simpler approach
+    if (errorCount > 3) {
+      logger.warn(`Multiple failures getting thread history, using emergency fallback`);
+      return {
+        error: true,
+        messagesRetrieved: 0,
+        messages: ["Failed to retrieve thread history."],
+        threadStats: {
+          totalMessagesInThread: 0,
+          remainingMessages: 0
+        },
+        recommendation: "Please try a different approach or ask the user for more context."
+      };
+    }
+    
+    // Try the legacy approach as fallback
+    try {
+      logger.info(`Attempting legacy thread history loading...`);
+      return await loadThreadHistoryIntoContext(threadId, context.threadTs, context.channelId, args.limit || 10, true);
+    } catch (fallbackError) {
+      logger.error(`Legacy thread history loading also failed: ${fallbackError.message}`);
+      return { 
+        error: true, 
+        message: error.message,
+        fallbackError: fallbackError.message
+      };
+    }
+  }
 }
 
 /**
@@ -1301,6 +1339,10 @@ async function processButtonInteraction(payload) {
       actionValue,
       timestamp: Date.now().toString()
     });
+    
+    // CRITICAL FIX: Set temporary button selection flag that will be cleared after processing
+    // This prevents the flag from persisting and causing loops in subsequent interactions
+    contextBuilder.setMetadata(threadId, 'isButtonSelection', true);
     
     // Log payload structure for debugging
     logger.logButtonClick(payload);

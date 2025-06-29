@@ -35,4 +35,8 @@ yarn-error.log*
 pids
 *.pid
 *.seed
-*.pid.lock 
+*.pid.lock
+
+# Tools directory - exclude everything except gitleaks
+.tools/*
+!.tools/gitleaks.exe 

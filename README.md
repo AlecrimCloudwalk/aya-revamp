@@ -101,6 +101,26 @@ See `docs/LLM_DEBUGGING.md` for detailed information on the debugging capabiliti
 
 MIT
 
+## Security
+
+### Gitleaks Secret Scanner
+
+This project uses Gitleaks to prevent accidental secret leakage in Git repositories:
+
+- **Pre-commit Hook**: Automatically scans all staged changes before each commit
+- **Local Installation**: Gitleaks is stored in the `.tools` directory
+- **Configuration**: The pre-commit hook is configured in `.git/hooks/pre-commit` and `.git/hooks/pre-commit.ps1`
+
+#### For New Developers
+
+After cloning the repository, ensure the pre-commit hook is executable:
+
+```powershell
+icacls ".git\hooks\pre-commit" /grant Everyone:F
+```
+
+See `docs/gitleaks-setup.md` for more details on the Gitleaks implementation.
+
 ## System Prompt Organization
 
 The system prompts for the LLM are centralized in a single module to avoid duplication and inconsistency:
